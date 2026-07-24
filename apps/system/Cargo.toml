@@ -1,0 +1,44 @@
+[package]
+name = "catos-system"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.74"
+description = "CatOS system administration backend - read-only probes for environment, capabilities, and target inspection"
+license = "GPL-3.0-or-later"
+publish = false
+# Single binary target. The library is exposed only so unit tests can drive
+# probe logic with injected fixtures; it is not part of any public API.
+
+[lib]
+name = "catos_system"
+path = "src/lib.rs"
+
+[[bin]]
+name = "catos-system"
+path = "src/main.rs"
+
+[dependencies]
+# Only serde + serde_json. No async runtime, no TLS, no D-Bus, no libalpm,
+# no heavyweight CLI framework. CLI parsing is hand-rolled.
+serde = { version = "1", default-features = false, features = ["std", "derive"] }
+serde_json = { version = "1", default-features = false, features = ["std"] }
+
+[dev-dependencies]
+# No extra dev-deps: tests use only std + serde_json + tempfile-free helpers
+# built on std::env::temp_dir.
+
+# Release profile tuned for size. Comparison recorded in apps/system/README.md:
+#   opt-level = "z" produced a smaller stripped static binary than "s" on this
+#   toolchain, so "z" is the default.
+[profile.release]
+opt-level = "z"
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = "symbols"
+incremental = false
+overflow-checks = true
+
+# Make `cargo test` builds faster without changing release characteristics.
+[profile.test]
+opt-level = 0
