@@ -10,10 +10,16 @@ include(GNUInstallDirs)
 
 option(BUILD_TESTS "Build tests" OFF)
 
-add_subdirectory(apps/hello)
-
+# enable_testing() must run BEFORE add_subdirectory(apps/system) so that
+# add_test() calls in apps/system/CMakeLists.txt get registered.
 if(BUILD_TESTS)
     enable_testing()
+endif()
+
+add_subdirectory(apps/hello)
+add_subdirectory(apps/system)
+
+if(BUILD_TESTS)
     add_subdirectory(tests)
 endif()
 

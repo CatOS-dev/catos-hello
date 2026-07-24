@@ -13,3 +13,7 @@ compile_commands.json
 # 测试生成文件
 tests/build/
 !tests/CMakeLists.txt
+
+# Cargo (apps/system): never pollute the source tree. Real builds go through
+# CMake which sets CARGO_TARGET_DIR into the CMake build directory.
+apps/system/target/
