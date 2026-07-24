@@ -115,6 +115,9 @@ if(BUILD_TESTS)
     option(CATOS_SYSTEM_INITRAMFS_SMOKE
            "Enable initramfs/QEMU smoke test (opt-in; needs qemu + kernel + busybox)"
            OFF)
+    option(CATOS_SYSTEM_STORAGE_SMOKE
+           "Enable real ext4+ESP QEMU recovery test (opt-in)"
+           OFF)
     if(CATOS_SYSTEM_INITRAMFS_SMOKE)
         # Two test variants:
         #   * bare:         no initramfs markers; verifies binary starts
@@ -147,6 +150,19 @@ if(BUILD_TESTS)
             TIMEOUT 180
             SKIP_RETURN_CODE 77
             LABELS "rust;integration;qemu"
+        )
+    endif()
+    if(CATOS_SYSTEM_STORAGE_SMOKE)
+        add_test(
+            NAME catos-system-storage-qemu-smoke
+            COMMAND "${BASH_CMD}"
+                    "${CMAKE_CURRENT_SOURCE_DIR}/scripts/storage-qemu-smoke.sh"
+                    --bin "${CATOS_SYSTEM_BIN}"
+        )
+        set_tests_properties(catos-system-storage-qemu-smoke PROPERTIES
+            TIMEOUT 240
+            SKIP_RETURN_CODE 77
+            LABELS "rust;integration;qemu;storage"
         )
     endif()
 endif()

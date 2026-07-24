@@ -348,3 +348,24 @@ fn target_root_absolute_symlinks_do_not_escape_to_host() {
         "host /usr/bin/pacman escaped through target symlink"
     );
 }
+
+#[test]
+fn phase2_json_failure_is_structured_and_keeps_stdout_pure() {
+    let (ok, code, stdout, stderr) = run(&[
+        "target",
+        "plan",
+        "--root-device",
+        "/dev/catos-definitely-missing",
+        "--json",
+    ]);
+    assert!(!ok);
+    assert_eq!(code, 5);
+    assert!(stderr.is_empty(), "JSON failure leaked to stderr: {stderr}");
+    let value: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap();
+    assert_eq!(value["kind"], "error");
+    assert_eq!(value["error"]["code"], "device_not_found");
+    assert_eq!(
+        value["error"]["detail"]["device_or_path"],
+        "/dev/catos-definitely-missing"
+    );
+}
