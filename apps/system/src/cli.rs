@@ -6,13 +6,28 @@
 use crate::error::{exit_code, Error};
 use crate::system_root::SystemRoot;
 
-/// One of the three phase-1 commands. They share the same flags but each
-/// selects a different rendering [`View`] of the same underlying report.
+/// One of the phase-1 or phase-2 commands.
+///
+/// Phase 1 commands (`environment`, `capabilities`, `inspect`) share a
+/// rendering [`View`] over the same underlying inspection report.
+///
+/// Phase 2 commands are read-only storage discovery and target mount:
+///   * `storage scan` — walks sysfs + blkid + mountinfo and emits a
+///     [`crate::model::storage::StorageReport`].
+///   * `target plan` — reads a target fstab + discovers devices and emits
+///     a [`crate::model::mount::MountPlan`] without executing any mount.
+///   * `target mount` — same as `target plan` then executes the plan in a
+///     private mount namespace, emits a
+///     [`crate::model::mount::MountSession`], and waits for SIGINT/SIGTERM
+///     before cleaning up.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Command {
     Environment,
     Capabilities,
     Inspect,
+    StorageScan,
+    TargetPlan,
+    TargetMount,
 }
 
 impl Command {
@@ -25,8 +40,18 @@ impl Command {
         }
     }
 
+    /// True iff this command emits a phase-1 InspectionReport (vs a
+    /// phase-2 StorageReport / MountPlan / MountSession).
+    pub fn is_phase1(self) -> bool {
+        matches!(
+            self,
+            Command::Environment | Command::Capabilities | Command::Inspect
+        )
+    }
+
     /// The rendering view this command selects. The probe layer always
     /// builds the full report (cheap); the view filters what is emitted.
+    /// Panics for phase-2 commands (they do not use View).
     pub fn view(self) -> View {
         match self {
             Command::Environment => View {
@@ -44,6 +69,7 @@ impl Command {
                 capabilities: true,
                 target: true,
             },
+            other => panic!("view() called on phase-2 command {other:?}"),
         }
     }
 }
@@ -75,6 +101,56 @@ pub enum ParseOutcome {
     Help(String),
     /// Print this text to stdout and exit 0.
     Version(String),
+}
+
+/// Parse a top-level subcommand, consuming the matching `argv` slots.
+/// Handles both single-word phase-1 commands (`environment`, `capabilities`,
+/// `inspect`) and two-word phase-2 commands (`storage scan`, `target plan`,
+/// `target mount`). Advances `idx` past every consumed token.
+///
+/// Returns a structured argument error if the leading word is unknown or
+/// if a two-word command is missing its required second word.
+fn parse_command(first: &str, argv: &[String], idx: &mut usize) -> Result<Command, Error> {
+    // Phase-1 single-word commands: consume exactly one token.
+    if let Some(c) = Command::parse_name(first) {
+        *idx += 1;
+        return Ok(c);
+    }
+    match first {
+        "storage" => {
+            let sub = argv.get(*idx + 1).ok_or_else(|| Error::InvalidArgument {
+                message: "storage requires a subcommand (scan)".to_string(),
+            })?;
+            if sub != "scan" {
+                return Err(Error::InvalidArgument {
+                    message: format!("unknown storage subcommand {sub:?}; expected scan"),
+                });
+            }
+            *idx += 2;
+            Ok(Command::StorageScan)
+        }
+        "target" => {
+            let sub = argv.get(*idx + 1).ok_or_else(|| Error::InvalidArgument {
+                message: "target requires a subcommand (plan|mount)".to_string(),
+            })?;
+            let cmd = match sub.as_str() {
+                "plan" => Command::TargetPlan,
+                "mount" => Command::TargetMount,
+                other => {
+                    return Err(Error::InvalidArgument {
+                        message: format!("unknown target subcommand {other:?}; expected plan|mount"),
+                    });
+                }
+            };
+            *idx += 2;
+            Ok(cmd)
+        }
+        other => Err(Error::InvalidArgument {
+            message: format!(
+                "unknown subcommand {other:?}; expected environment|capabilities|inspect|storage scan|target plan|target mount"
+            ),
+        }),
+    }
 }
 
 /// Parse `argv[1..]`. argv[0] is handled separately by [`crate::entry`].
@@ -127,15 +203,10 @@ pub fn parse(argv: &[String], default_root: SystemRoot) -> Result<ParseOutcome, 
             }
             // First positional (no leading dash) becomes the subcommand.
             positional if !positional.starts_with('-') && command.is_none() => {
-                command = Some(Command::parse_name(positional).ok_or_else(|| Error::InvalidArgument {
-                    message: format!(
-                        "unknown subcommand {positional:?}; expected environment|capabilities|inspect"
-                    ),
-                })?);
-                idx += 1;
+                command = Some(parse_command(positional, argv, &mut idx)?);
             }
             // A second positional after we already have the subcommand is an
-            // error (no subcommand takes a positional argument in phase 1).
+            // error (no phase-1 subcommand takes a positional argument).
             extra_positional if !extra_positional.starts_with('-') => {
                 return Err(Error::InvalidArgument {
                     message: format!(
@@ -165,15 +236,23 @@ pub fn parse(argv: &[String], default_root: SystemRoot) -> Result<ParseOutcome, 
 pub fn help_text() -> String {
     format!(
         "\
-catos-system {version} - CatOS read-only system backend (phase 1)
+catos-system {version} - CatOS read-only system backend (phase 1 + phase 2)
 
 USAGE:
     catos-system <SUBCOMMAND> [OPTIONS]
 
-SUBCOMMANDS:
+PHASE-1 SUBCOMMANDS (read-only environment + target inspection):
     environment   Print detected runtime environment facts.
     capabilities  Print detected capabilities (read-only).
     inspect       Print combined runtime + capabilities + target inspection.
+
+PHASE-2 SUBCOMMANDS (read-only storage discovery + safe RO target mount):
+    storage scan  Walk sysfs + blkid + mountinfo; emit a StorageReport.
+                  Pure read. No mounts, no writes.
+    target plan   Read --root's /etc/fstab + discover devices; emit a
+                  MountPlan WITHOUT executing any mount.
+    target mount  Same as 'target plan' then execute the plan in a private
+                  mount namespace (read-only mounts only).
 
 OPTIONS:
     --root PATH   Inspect a different target root (default: /).
@@ -191,8 +270,13 @@ EXIT CODES:
     {ser}  JSON serialisation failed
 
 NOTES:
-    * This is a phase-1 read-only tool. It never mounts, never writes, never
-      unlocks devices, never invokes pacman, never modifies the target root.
+    * This is a read-only tool. It never writes to the target root.
+    * 'target mount' enters a private mount namespace (CLONE_NEWNS) and
+      flips / to MS_REC|MS_PRIVATE so its mounts do NOT propagate to the
+      host. Pre-existing mounts are never unmounted.
+    * Phase 2 mounts are read-only with filesystem-specific safety options
+      (ext4 noload, xfs norecovery, btrfs ro-only, etc.) so journal replay
+      and superblock updates are suppressed.
     * argv[0] is honoured only for the JSON 'invocation' field and for help
       text. The three symlinks catos-update / catos-recovery / catos-doctor
       all accept the same subcommands and produce identical probe results.
@@ -313,5 +397,80 @@ mod tests {
         } else {
             panic!();
         }
+    }
+
+    #[test]
+    fn parses_storage_scan_two_word_subcommand() {
+        let r = parse(&args(&["storage", "scan"]), default_root()).unwrap();
+        if let ParseOutcome::Run(c) = r {
+            assert_eq!(c.command, Command::StorageScan);
+        } else {
+            panic!("expected Run");
+        }
+    }
+
+    #[test]
+    fn parses_target_plan_two_word_subcommand() {
+        let r = parse(&args(&["target", "plan"]), default_root()).unwrap();
+        if let ParseOutcome::Run(c) = r {
+            assert_eq!(c.command, Command::TargetPlan);
+        } else {
+            panic!("expected Run");
+        }
+    }
+
+    #[test]
+    fn parses_target_mount_two_word_subcommand() {
+        let r = parse(&args(&["target", "mount"]), default_root()).unwrap();
+        if let ParseOutcome::Run(c) = r {
+            assert_eq!(c.command, Command::TargetMount);
+        } else {
+            panic!("expected Run");
+        }
+    }
+
+    #[test]
+    fn rejects_storage_without_subcommand() {
+        let err = parse(&args(&["storage"]), default_root()).unwrap_err();
+        assert_eq!(err.exit_code(), exit_code::ARG_ERROR);
+    }
+
+    #[test]
+    fn rejects_target_without_subcommand() {
+        let err = parse(&args(&["target"]), default_root()).unwrap_err();
+        assert_eq!(err.exit_code(), exit_code::ARG_ERROR);
+    }
+
+    #[test]
+    fn rejects_storage_with_invalid_subcommand() {
+        let err = parse(&args(&["storage", "frobnicate"]), default_root()).unwrap_err();
+        assert_eq!(err.exit_code(), exit_code::ARG_ERROR);
+    }
+
+    #[test]
+    fn rejects_target_with_invalid_subcommand() {
+        let err = parse(&args(&["target", "frobnicate"]), default_root()).unwrap_err();
+        assert_eq!(err.exit_code(), exit_code::ARG_ERROR);
+    }
+
+    #[test]
+    fn storage_scan_accepts_flags_after_subcommand() {
+        let r = parse(&args(&["storage", "scan", "--json"]), default_root()).unwrap();
+        if let ParseOutcome::Run(c) = r {
+            assert_eq!(c.command, Command::StorageScan);
+            assert!(c.json);
+        } else {
+            panic!("expected Run");
+        }
+    }
+
+    #[test]
+    fn is_phase1_classification_is_correct() {
+        assert!(Command::Environment.is_phase1());
+        assert!(Command::Capabilities.is_phase1());
+        assert!(Command::Inspect.is_phase1());
+        assert!(!Command::StorageScan.is_phase1());
+        assert!(!Command::TargetPlan.is_phase1());
+        assert!(!Command::TargetMount.is_phase1());
     }
 }

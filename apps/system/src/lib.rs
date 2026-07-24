@@ -6,7 +6,9 @@
 //! Layering:
 //! ```text
 //! model   <- pure data + serde (no I/O)
+//! parse   <- pure parsers (mountinfo, fstab, blkid output); no I/O
 //! probe   <- reads filesystem via FilesystemProbe trait, returns model
+//! mount   <- state-changing mount/unmount (phase 2+; only read-only mounts)
 //! output  <- renders model as human text or JSON
 //! cli     <- parses argv into commands
 //! entry   <- main.rs glue: argv[0] multicall + dispatch
@@ -16,7 +18,10 @@ pub mod cli;
 pub mod entry;
 pub mod error;
 pub mod model;
+pub mod mount;
 pub mod output;
+pub mod parse;
+pub mod phase2;
 pub mod probe;
 pub mod system_root;
 

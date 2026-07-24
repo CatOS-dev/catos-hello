@@ -119,28 +119,86 @@ pub fn run(invocation: Invocation, argv: &[String]) -> i32 {
             exit_code::SUCCESS
         }
         Ok(crate::cli::ParseOutcome::Run(args)) => {
-            let view = args.command.view();
-            match build_report(invocation, &args.root) {
-                Ok(report) => {
-                    let result = if args.json {
-                        crate::output::render_json(&report, view).and_then(|s| {
-                            write_json_stdout(&s)
-                                .map_err(|e| Error::SerializeFailed(format!("stdout write: {e}")))
-                        })
-                    } else {
-                        let mut out = std::io::stdout();
-                        crate::output::render_human(&report, view, &mut out)
-                            .and_then(|_| out.flush())
-                            .map_err(|e| Error::SerializeFailed(format!("stdout write: {e}")))
-                    };
-                    match result {
-                        Ok(()) => exit_code::SUCCESS,
-                        Err(e) => {
-                            eprintln!("{invocation}: {e}");
-                            e.exit_code()
-                        }
-                    }
+            if args.command.is_phase1() {
+                run_phase1(invocation, args)
+            } else {
+                run_phase2(invocation, args)
+            }
+        }
+        Err(e) => {
+            eprintln!("{invocation}: {e}");
+            e.exit_code()
+        }
+    }
+}
+
+/// Dispatch a phase-1 command (environment / capabilities / inspect).
+/// Builds an InspectionReport and renders the selected view.
+fn run_phase1(invocation: Invocation, args: crate::cli::CliArgs) -> i32 {
+    use std::io::Write;
+
+    let view = args.command.view();
+    match build_report(invocation, &args.root) {
+        Ok(report) => {
+            let result = if args.json {
+                crate::output::render_json(&report, view).and_then(|s| {
+                    write_json_stdout(&s)
+                        .map_err(|e| Error::SerializeFailed(format!("stdout write: {e}")))
+                })
+            } else {
+                let mut out = std::io::stdout();
+                crate::output::render_human(&report, view, &mut out)
+                    .and_then(|_| out.flush())
+                    .map_err(|e| Error::SerializeFailed(format!("stdout write: {e}")))
+            };
+            match result {
+                Ok(()) => exit_code::SUCCESS,
+                Err(e) => {
+                    eprintln!("{invocation}: {e}");
+                    e.exit_code()
                 }
+            }
+        }
+        Err(e) => {
+            eprintln!("{invocation}: {e}");
+            e.exit_code()
+        }
+    }
+}
+
+/// Dispatch a phase-2 command (storage scan / target plan / target mount).
+/// Builds the phase-2 outcome and renders it via the phase-2 output layer.
+fn run_phase2(invocation: Invocation, args: crate::cli::CliArgs) -> i32 {
+    use std::io::Write;
+
+    let outcome_result = match args.command {
+        crate::cli::Command::StorageScan => crate::phase2::run_storage_scan(&args.root),
+        crate::cli::Command::TargetPlan => crate::phase2::run_target_plan(&args.root),
+        crate::cli::Command::TargetMount => crate::phase2::run_target_mount(&args.root),
+        // Phase-1 commands never reach here (is_phase1() routes them away).
+        other => unreachable!("run_phase2 called with phase-1 command {other:?}"),
+    };
+
+    match outcome_result {
+        Ok(outcome) => {
+            let result = if args.json {
+                crate::output::render_phase2_json(
+                    &outcome,
+                    invocation.as_str(),
+                    args.root.as_path(),
+                )
+                .and_then(|s| {
+                    write_json_stdout(&s)
+                        .map_err(|e| Error::SerializeFailed(format!("stdout write: {e}")))
+                })
+            } else {
+                let mut out = std::io::stdout();
+                crate::output::render_phase2_human(&outcome, &mut out)
+                    .and_then(|_| out.flush())
+                    .map_err(|e| Error::SerializeFailed(format!("stdout write: {e}")))
+            };
+            match result {
+                Ok(()) => crate::phase2::exit_code_for(&outcome),
                 Err(e) => {
                     eprintln!("{invocation}: {e}");
                     e.exit_code()
