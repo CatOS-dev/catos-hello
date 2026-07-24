@@ -5,7 +5,8 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use crate::model::capability::Capability;
+use crate::model::capability::{Capability, CapabilityStatus};
+use crate::model::evidence::Evidence;
 use crate::model::runtime::{Detection, RuntimeFacts};
 
 /// Subset of `/etc/os-release` we extract. `raw_fields` keeps every key=value
@@ -79,13 +80,48 @@ fn normalise_os_release_value(raw: &str) -> String {
     }
 }
 
-/// A tool path probe result under the target root (or host PATH for some).
+/// Three-state presence for target-side paths. `Unknown` covers all
+/// non-deterministic cases: permission denied, I/O error, broken symlink,
+/// etc. Compression of these into a single `false` was the original sin
+/// this enum corrects.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum Presence {
+    /// Presence could not be determined reliably.
+    #[default]
+    Unknown,
+    /// Path was positively observed to exist.
+    Present,
+    /// Path was positively observed to NOT exist (no permission / I/O
+    /// ambiguity).
+    Absent,
+}
+
+impl Presence {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Presence::Present => "present",
+            Presence::Absent => "absent",
+            Presence::Unknown => "unknown",
+        }
+    }
+}
+
+impl std::fmt::Display for Presence {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// A target-side tool probe. Status is three-state so permission and I/O
+/// failures never collapse into a false "missing" result.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ToolPath {
     pub name: String,
     pub path: PathBuf,
-    pub exists: bool,
-    pub executable: bool,
+    pub status: CapabilityStatus,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub evidence: Vec<Evidence>,
 }
 
 /// Target-root inspection. Phase 1 only reads files; it does NOT mount,
@@ -97,13 +133,13 @@ pub struct TargetInspection {
     /// Parsed `/etc/os-release` if present and readable.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub os_release: Option<OsRelease>,
-    pub has_fstab: bool,
-    pub has_crypttab: bool,
-    pub has_pacman_db: bool,
-    pub has_usr: bool,
-    pub has_boot: bool,
-    pub has_efi: bool,
-    pub has_boot_efi: bool,
+    pub has_fstab: Presence,
+    pub has_crypttab: Presence,
+    pub has_pacman_db: Presence,
+    pub has_usr: Presence,
+    pub has_boot: Presence,
+    pub has_efi: Presence,
+    pub has_boot_efi: Presence,
     /// CatOS-ness of the *target* root, derived from os-release ID fields.
     pub is_catos_target: Detection,
     /// Phase-1 tool probes inside the target root and on the host PATH.
@@ -131,7 +167,7 @@ impl Warning {
 /// JSON contract guarantees.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct InspectionReport {
-    /// Always 1 in phase 1. Bumped only on backward-incompatible changes.
+    /// Bumped only on backward-incompatible JSON contract changes.
     #[serde(rename = "schemaVersion")]
     pub schema_version: u32,
     #[serde(rename = "programVersion")]

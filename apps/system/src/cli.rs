@@ -6,7 +6,8 @@
 use crate::error::{exit_code, Error};
 use crate::system_root::SystemRoot;
 
-/// One of the three phase-1 commands. They share the same flags.
+/// One of the three phase-1 commands. They share the same flags but each
+/// selects a different rendering [`View`] of the same underlying report.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Command {
     Environment,
@@ -23,6 +24,39 @@ impl Command {
             _ => None,
         }
     }
+
+    /// The rendering view this command selects. The probe layer always
+    /// builds the full report (cheap); the view filters what is emitted.
+    pub fn view(self) -> View {
+        match self {
+            Command::Environment => View {
+                runtime: true,
+                capabilities: false,
+                target: false,
+            },
+            Command::Capabilities => View {
+                runtime: false,
+                capabilities: true,
+                target: false,
+            },
+            Command::Inspect => View {
+                runtime: true,
+                capabilities: true,
+                target: true,
+            },
+        }
+    }
+}
+
+/// Which sections of an [`InspectionReport`] to render. JSON keeps the
+/// schemaVersion/programVersion/invocation/targetRoot/warnings keys
+/// unconditionally; runtime/capabilities/target are present iff the
+/// corresponding flag is true.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct View {
+    pub runtime: bool,
+    pub capabilities: bool,
+    pub target: bool,
 }
 
 /// Parsed CLI invocation.

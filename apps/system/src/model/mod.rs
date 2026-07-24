@@ -7,5 +7,5 @@ pub mod runtime;
 
 pub use capability::{Capability, CapabilityKind, CapabilityStatus};
 pub use evidence::Evidence;
-pub use inspection::{InspectionReport, OsRelease, TargetInspection, ToolPath, Warning};
+pub use inspection::{InspectionReport, OsRelease, Presence, TargetInspection, ToolPath, Warning};
 pub use runtime::{Detection, DetectionStatus, PrimaryRuntimeMode, RuntimeFacts};

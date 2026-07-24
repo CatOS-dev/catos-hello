@@ -96,12 +96,22 @@ pub enum PrimaryRuntimeMode {
 
 impl RuntimeFacts {
     /// Pick a single most-representative mode for human display.
+    ///
     /// Rule precedence is documented so behaviour is reproducible:
     ///   1. initramfs wins (we are inside the early-boot environment)
     ///   2. live environment
     ///   3. chroot
-    ///   4. running system (default positive state)
-    ///   5. Unknown if no positive signal at all and root is read-only
+    ///   4. running system (the default positive state)
+    ///
+    /// `is_snapshot_boot` is intentionally NOT consulted here: it is an
+    /// orthogonal attribute (a running system can ALSO be booted from a
+    /// snapshot). Letting it participate produced false `Unknown` on every
+    /// Btrfs system whose subvol path did not contain "snapshot", which is
+    /// the common case.
+    ///
+    /// `RunningSystem` is returned only when initramfs, live, and chroot have
+    /// all been positively ruled out. If any of those axes remains Unknown,
+    /// the primary mode remains Unknown rather than inventing certainty.
     pub fn primary_mode(&self) -> PrimaryRuntimeMode {
         use DetectionStatus::*;
         if matches!(self.is_initramfs.status, Detected) {
@@ -113,22 +123,17 @@ impl RuntimeFacts {
         if matches!(self.is_chroot.status, Detected) {
             return PrimaryRuntimeMode::Chroot;
         }
-        // If we positively know we are NOT in any special environment, we are
-        // a running system. If anything is Unknown, prefer Unknown over a
-        // misleading positive claim.
-        let any_unknown = [
+        if [
             self.is_initramfs.status,
             self.is_live_environment.status,
             self.is_chroot.status,
-            self.is_snapshot_boot.status,
         ]
         .iter()
-        .any(|s| matches!(s, Unknown));
-
-        if any_unknown {
-            PrimaryRuntimeMode::Unknown
-        } else {
+        .all(|status| matches!(status, NotDetected))
+        {
             PrimaryRuntimeMode::RunningSystem
+        } else {
+            PrimaryRuntimeMode::Unknown
         }
     }
 }
@@ -164,5 +169,39 @@ mod tests {
         let json = serde_json::to_string(&d.status).unwrap();
         assert_eq!(json, "\"unknown\"");
         assert_ne!(json, "false");
+    }
+
+    #[test]
+    fn primary_mode_is_unknown_when_special_environment_is_unresolved() {
+        let facts = RuntimeFacts::default();
+        assert_eq!(facts.primary_mode(), PrimaryRuntimeMode::Unknown);
+    }
+
+    #[test]
+    fn primary_mode_is_running_only_when_special_environments_are_ruled_out() {
+        let not_detected = || Detection::not_detected(vec![]);
+        let facts = RuntimeFacts {
+            is_initramfs: not_detected(),
+            is_chroot: not_detected(),
+            is_live_environment: not_detected(),
+            is_snapshot_boot: Detection::unknown(vec![]),
+            has_systemd: Detection::unknown(vec![]),
+            root_is_read_only: Detection::unknown(vec![]),
+        };
+        assert_eq!(facts.primary_mode(), PrimaryRuntimeMode::RunningSystem);
+    }
+
+    #[test]
+    fn snapshot_status_does_not_override_running_system_mode() {
+        let not_detected = || Detection::not_detected(vec![]);
+        let facts = RuntimeFacts {
+            is_initramfs: not_detected(),
+            is_chroot: not_detected(),
+            is_live_environment: not_detected(),
+            is_snapshot_boot: Detection::detected(vec![]),
+            has_systemd: Detection::detected(vec![]),
+            root_is_read_only: Detection::not_detected(vec![]),
+        };
+        assert_eq!(facts.primary_mode(), PrimaryRuntimeMode::RunningSystem);
     }
 }

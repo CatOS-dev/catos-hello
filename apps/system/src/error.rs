@@ -70,6 +70,7 @@ pub enum FsError {
     NotFound,
     PermissionDenied,
     NotUtf8,
+    OutsideRoot(String),
     Io(String),
 }
 
@@ -79,6 +80,9 @@ impl fmt::Display for FsError {
             FsError::NotFound => write!(f, "not found"),
             FsError::PermissionDenied => write!(f, "permission denied"),
             FsError::NotUtf8 => write!(f, "content not utf-8"),
+            FsError::OutsideRoot(path) => {
+                write!(f, "resolved path escapes target root: {path}")
+            }
             FsError::Io(msg) => write!(f, "io error: {msg}"),
         }
     }

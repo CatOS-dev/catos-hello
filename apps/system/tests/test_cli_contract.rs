@@ -101,10 +101,10 @@ fn json_stdout_is_pure_json() {
 }
 
 #[test]
-fn json_schema_version_is_one() {
+fn json_schema_version_is_two() {
     let (_, _, stdout, _) = run(&["inspect", "--json"]);
     let v: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap();
-    assert_eq!(v["schemaVersion"].as_u64(), Some(1));
+    assert_eq!(v["schemaVersion"].as_u64(), Some(2));
 }
 
 #[test]
@@ -137,7 +137,7 @@ fn json_has_required_top_level_keys() {
         "read_sysfs",
         "read_block_sysfs",
         "access_dev",
-        "run_external_commands",
+        "shell_available",
         "mount_operations_possible",
         "write_efivars_possible",
         "systemd_available",
@@ -192,4 +192,159 @@ fn help_and_version_exit_zero() {
     assert!(ok);
     assert_eq!(code, 0);
     assert!(stdout_v.contains("catos-system"));
+}
+
+// ---- sub-command view dispatch (review issue #1) ----
+// The original implementation parsed `Command` but never read it, so all
+// three sub-commands produced identical output. These tests verify each
+// sub-command selects a distinct view of the same underlying report.
+
+fn json_keys(args: &[&str]) -> Vec<String> {
+    let (_, _, stdout, _) = run(args);
+    let v: serde_json::Value = serde_json::from_str(stdout.trim()).expect("valid JSON");
+    v.as_object()
+        .expect("top-level object")
+        .keys()
+        .map(|s| s.to_string())
+        .collect()
+}
+
+#[test]
+fn environment_view_omits_capabilities_and_target() {
+    let keys = json_keys(&["environment", "--json"]);
+    assert!(keys.contains(&"runtime".to_string()), "missing runtime");
+    assert!(
+        !keys.contains(&"capabilities".to_string()),
+        "environment must not emit capabilities, got: {keys:?}"
+    );
+    assert!(
+        !keys.contains(&"target".to_string()),
+        "environment must not emit target, got: {keys:?}"
+    );
+}
+
+#[test]
+fn capabilities_view_omits_runtime_and_target() {
+    let keys = json_keys(&["capabilities", "--json"]);
+    assert!(keys.contains(&"capabilities".to_string()));
+    assert!(
+        !keys.contains(&"runtime".to_string()),
+        "capabilities must not emit runtime, got: {keys:?}"
+    );
+    assert!(
+        !keys.contains(&"target".to_string()),
+        "capabilities must not emit target, got: {keys:?}"
+    );
+}
+
+#[test]
+fn inspect_view_emits_all_three_sections() {
+    let keys = json_keys(&["inspect", "--json"]);
+    for k in ["runtime", "capabilities", "target"] {
+        assert!(
+            keys.contains(&k.to_string()),
+            "inspect must emit {k}, got: {keys:?}"
+        );
+    }
+}
+
+#[test]
+fn three_subcommands_produce_distinct_output() {
+    // The whole point of the fix: the three views must NOT be identical.
+    let env = json_keys(&["environment", "--json"]);
+    let caps = json_keys(&["capabilities", "--json"]);
+    let insp = json_keys(&["inspect", "--json"]);
+    assert_ne!(
+        env, caps,
+        "environment and capabilities views are identical"
+    );
+    assert_ne!(env, insp, "environment and inspect views are identical");
+    assert_ne!(caps, insp, "capabilities and inspect views are identical");
+}
+
+#[test]
+fn all_views_share_unconditional_keys() {
+    // schemaVersion, programVersion, invocation, targetRoot, warnings
+    // must be present in EVERY view.
+    for args in [
+        ["environment", "--json"],
+        ["capabilities", "--json"],
+        ["inspect", "--json"],
+    ] {
+        let keys = json_keys(&args);
+        for k in [
+            "schemaVersion",
+            "programVersion",
+            "invocation",
+            "targetRoot",
+            "warnings",
+        ] {
+            assert!(
+                keys.contains(&k.to_string()),
+                "view {args:?} is missing unconditional key {k}: {keys:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn human_environment_view_omits_target_section() {
+    let (_, _, stdout, _) = run(&["environment"]);
+    assert!(stdout.contains("Runtime"));
+    assert!(!stdout.contains("\nTarget\n"));
+    assert!(!stdout.contains("\nCapabilities\n"));
+}
+
+#[test]
+fn human_capabilities_view_omits_runtime_section() {
+    let (_, _, stdout, _) = run(&["capabilities"]);
+    assert!(stdout.contains("Capabilities"));
+    assert!(!stdout.contains("\nRuntime\n"));
+    assert!(!stdout.contains("\nTarget\n"));
+}
+
+#[test]
+fn target_root_absolute_symlinks_do_not_escape_to_host() {
+    use std::fs;
+    use std::os::unix::fs::symlink;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let mut root = std::env::temp_dir();
+    root.push(format!(
+        "catos-root-symlink-{}-{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    fs::create_dir_all(root.join("boot")).unwrap();
+    symlink("/etc", root.join("etc")).unwrap();
+    symlink("/usr", root.join("usr")).unwrap();
+
+    let root_text = root.to_string_lossy().into_owned();
+    let (ok, code, stdout, stderr) = run(&["inspect", "--root", &root_text, "--json"]);
+    let _ = fs::remove_dir_all(&root);
+
+    assert!(ok, "exit {code}: {stderr}");
+    let value: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap();
+    assert!(
+        value["target"].get("os_release").is_none(),
+        "host /etc/os-release escaped through target symlink: {}",
+        value["target"]
+    );
+    assert_ne!(
+        value["target"]["is_catos_target"]["status"], "detected",
+        "empty target was misidentified as host CatOS"
+    );
+    let pacman = value["target"]["tool_paths"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|tool| tool["name"] == "pacman")
+        .unwrap();
+    assert_ne!(
+        pacman["status"], "available",
+        "host /usr/bin/pacman escaped through target symlink"
+    );
 }

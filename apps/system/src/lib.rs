@@ -26,4 +26,4 @@ pub use error::{exit_code, Error, FsError};
 pub const PROGRAM_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// JSON schema version. Bumped only on backward-incompatible report changes.
-pub const SCHEMA_VERSION: u32 = 1;
+pub const SCHEMA_VERSION: u32 = 2;

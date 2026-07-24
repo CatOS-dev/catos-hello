@@ -4,6 +4,7 @@
 
 use std::path::Path;
 
+use crate::error::FsError;
 use crate::model::evidence::Evidence;
 use crate::model::runtime::{Detection, RuntimeFacts};
 use crate::probe::fs_probe::FilesystemProbe;
@@ -178,7 +179,9 @@ fn has_container_markers(fs: &dyn FilesystemProbe, evidence: &mut Vec<Evidence>)
 }
 
 /// Live environment detection (ArchISO / CatOS live). Root read-only alone
-/// is NOT sufficient evidence, per spec.
+/// is NOT sufficient evidence, per spec. Insufficient evidence (e.g.
+/// `/proc/cmdline` unreadable) MUST yield Unknown, not NotDetected: we have
+/// no positive evidence either way.
 fn detect_live(fs: &dyn FilesystemProbe) -> Detection {
     let mut evidence = Vec::new();
 
@@ -190,6 +193,11 @@ fn detect_live(fs: &dyn FilesystemProbe) -> Detection {
         ));
         return Detection::detected(evidence);
     }
+    evidence.push(Evidence::new(
+        "ARCHISO_RUN_DIR_ABSENT",
+        "/run/archiso",
+        "ArchISO/CatOS live run directory not present",
+    ));
 
     let cmdline_path = Path::new("/proc/cmdline");
     match fs.read_to_string(cmdline_path) {
@@ -215,17 +223,27 @@ fn detect_live(fs: &dyn FilesystemProbe) -> Detection {
                 )
                 .with_value(trimmed.to_string()),
             );
+            Detection::not_detected(evidence)
+        }
+        Err(FsError::NotFound) => {
+            evidence.push(Evidence::new(
+                "CMDLINE_FILE_MISSING",
+                "/proc/cmdline",
+                "/proc/cmdline does not exist; procfs not mounted. \
+                 Cannot rule out Live environment without this evidence.",
+            ));
+            Detection::unknown(evidence)
         }
         Err(_) => {
             evidence.push(Evidence::new(
                 "CMDLINE_UNREADABLE",
                 "/proc/cmdline",
-                "cannot read kernel cmdline",
+                "/proc/cmdline exists but could not be read (permission or I/O). \
+                 Cannot rule out Live environment without this evidence.",
             ));
+            Detection::unknown(evidence)
         }
     }
-
-    Detection::not_detected(evidence)
 }
 
 /// Snapshot-boot detection. Phase 1 only reads mountinfo; never invokes
@@ -324,28 +342,42 @@ fn detect_snapshot_boot(fs: &dyn FilesystemProbe) -> Detection {
 /// Runtime systemd detection (target-side systemd is a separate capability).
 fn detect_systemd(fs: &dyn FilesystemProbe) -> Detection {
     let mut evidence = Vec::new();
-    if fs.is_dir(Path::new("/run/systemd/system")) {
-        evidence.push(Evidence::new(
-            "SYSTEMD_RUN_DIR_PRESENT",
-            "/run/systemd/system",
-            "systemd runtime marker directory exists; systemd is PID 1",
-        ));
-        return Detection::detected(evidence);
+    let marker = Path::new("/run/systemd/system");
+    match fs.metadata(marker) {
+        Ok(m) if m.is_dir => {
+            evidence.push(Evidence::new(
+                "SYSTEMD_RUN_DIR_PRESENT",
+                "/run/systemd/system",
+                "systemd runtime marker directory exists; systemd is PID 1",
+            ));
+            Detection::detected(evidence)
+        }
+        Ok(_) => {
+            evidence.push(Evidence::new(
+                "SYSTEMD_RUN_DIR_NOT_A_DIRECTORY",
+                "/run/systemd/system",
+                "marker path exists but is not a directory; not running systemd",
+            ));
+            Detection::not_detected(evidence)
+        }
+        Err(FsError::NotFound) => {
+            evidence.push(Evidence::new(
+                "SYSTEMD_RUN_DIR_ABSENT",
+                "/run/systemd/system",
+                "systemd runtime marker directory missing",
+            ));
+            Detection::not_detected(evidence)
+        }
+        Err(_) => {
+            evidence.push(Evidence::new(
+                "SYSTEMD_RUN_DIR_UNREADABLE",
+                "/run/systemd/system",
+                "marker path exists but stat returned an error (permission / I/O); \
+                 cannot determine systemd runtime status",
+            ));
+            Detection::unknown(evidence)
+        }
     }
-    if !fs.is_dir(Path::new("/run")) {
-        evidence.push(Evidence::new(
-            "RUN_UNREADABLE",
-            "/run",
-            "cannot access /run; cannot determine systemd runtime status",
-        ));
-        return Detection::unknown(evidence);
-    }
-    evidence.push(Evidence::new(
-        "SYSTEMD_RUN_DIR_ABSENT",
-        "/run/systemd/system",
-        "systemd runtime marker directory missing",
-    ));
-    Detection::not_detected(evidence)
 }
 
 /// Root read-only detection via mountinfo options.

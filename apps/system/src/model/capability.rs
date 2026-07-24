@@ -31,9 +31,14 @@ pub enum CapabilityKind {
     ReadBlockSysfs,
     /// `/dev` is accessible (read enough to enumerate).
     AccessDev,
-    /// Spawning external commands is permitted (kernel execve available,
-    /// PATH populated). Phase 1 does NOT actually spawn anything.
-    RunExternalCommands,
+    /// A POSIX-compatible shell (`/bin/sh` or `/usr/bin/sh`) is available.
+    /// Note this is a *necessary* precondition for many recovery scripts,
+    /// not a guarantee that arbitrary external commands can be spawned. A
+    /// recovery environment with only `btrfs`, `mount`, and `cryptsetup`
+    /// (no shell) can still invoke those tools via `execve`. Per-tool
+    /// capabilities (`btrfs_tool_available`, etc.) are the authoritative
+    /// source for whether a given tool can be used.
+    ShellAvailable,
     /// Environment looks capable of performing mount/unmount operations
     /// (has mount(8) tool AND permission is plausible). Phase 1 does NOT
     /// perform any mount.

@@ -3,6 +3,7 @@
 //! depend on the host's `/proc`.
 
 use std::collections::HashMap;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use crate::error::FsError;
@@ -31,11 +32,22 @@ impl MetaData {
 /// - [`FixtureFilesystem`]: in-memory map for tests.
 pub trait FilesystemProbe {
     fn exists(&self, path: &Path) -> bool;
+    fn canonicalize(&self, path: &Path) -> Result<PathBuf, FsError>;
     fn metadata(&self, path: &Path) -> Result<MetaData, FsError>;
     fn read_to_string(&self, path: &Path) -> Result<String, FsError>;
     fn read_link(&self, path: &Path) -> Result<PathBuf, FsError>;
     /// List immediate child names of a directory (not recursive, no `.`/`..`).
     fn read_dir_names(&self, path: &Path) -> Result<Vec<String>, FsError>;
+
+    fn rooted_metadata(&self, root: &Path, rel: &Path) -> Result<MetaData, FsError> {
+        let resolved = resolve_beneath(self, root, rel)?;
+        self.metadata(&resolved)
+    }
+
+    fn rooted_read_to_string(&self, root: &Path, rel: &Path) -> Result<String, FsError> {
+        let resolved = resolve_beneath(self, root, rel)?;
+        self.read_to_string(&resolved)
+    }
 
     /// Convenience wrapper that returns false instead of an error.
     fn is_dir(&self, path: &Path) -> bool {
@@ -54,6 +66,10 @@ impl FilesystemProbe for RealFilesystem {
     fn exists(&self, path: &Path) -> bool {
         // symlink_metadata so a broken symlink still counts as "exists".
         std::fs::symlink_metadata(path).is_ok()
+    }
+
+    fn canonicalize(&self, path: &Path) -> Result<PathBuf, FsError> {
+        std::fs::canonicalize(path).map_err(|e| classify_io(path, &e))
     }
 
     fn metadata(&self, path: &Path) -> Result<MetaData, FsError> {
@@ -88,6 +104,103 @@ impl FilesystemProbe for RealFilesystem {
         names.sort();
         Ok(names)
     }
+
+    fn rooted_metadata(&self, root: &Path, rel: &Path) -> Result<MetaData, FsError> {
+        use std::os::unix::fs::MetadataExt;
+
+        let file = openat2_in_root(root, rel, O_PATH | O_CLOEXEC)?;
+        let meta = file.metadata().map_err(|e| classify_io(rel, &e))?;
+        Ok(MetaData {
+            ino: meta.ino(),
+            dev: meta.dev(),
+            mode: meta.mode(),
+            is_dir: meta.is_dir(),
+            is_file: meta.is_file(),
+            is_symlink: meta.file_type().is_symlink(),
+        })
+    }
+
+    fn rooted_read_to_string(&self, root: &Path, rel: &Path) -> Result<String, FsError> {
+        let mut file = openat2_in_root(root, rel, O_CLOEXEC)?;
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes)
+            .map_err(|e| classify_io(rel, &e))?;
+        String::from_utf8(bytes).map_err(|_| FsError::NotUtf8)
+    }
+}
+
+fn resolve_beneath(
+    fs: &(impl FilesystemProbe + ?Sized),
+    root: &Path,
+    rel: &Path,
+) -> Result<PathBuf, FsError> {
+    let canonical_root = fs.canonicalize(root)?;
+    let candidate = root.join(rel);
+    let resolved = fs.canonicalize(&candidate)?;
+    if resolved == canonical_root || resolved.starts_with(&canonical_root) {
+        Ok(resolved)
+    } else {
+        Err(FsError::OutsideRoot(format!(
+            "{} -> {}",
+            candidate.display(),
+            resolved.display()
+        )))
+    }
+}
+
+#[cfg(target_os = "linux")]
+const SYS_OPENAT2: std::os::raw::c_long = 437;
+const O_CLOEXEC: u64 = 0x80000;
+const O_PATH: u64 = 0x200000;
+const RESOLVE_NO_MAGICLINKS: u64 = 0x02;
+const RESOLVE_IN_ROOT: u64 = 0x10;
+
+#[repr(C)]
+struct OpenHow {
+    flags: u64,
+    mode: u64,
+    resolve: u64,
+}
+
+fn openat2_in_root(root: &Path, rel: &Path, flags: u64) -> Result<std::fs::File, FsError> {
+    use std::ffi::CString;
+    use std::os::fd::{AsRawFd, FromRawFd};
+    use std::os::unix::ffi::OsStrExt;
+
+    let root_file = std::fs::File::open(root).map_err(|e| classify_io(root, &e))?;
+    let rel_bytes = rel.strip_prefix("/").unwrap_or(rel).as_os_str().as_bytes();
+    let rel_c = CString::new(rel_bytes)
+        .map_err(|_| FsError::Io(format!("path contains NUL: {}", rel.display())))?;
+    let how = OpenHow {
+        flags,
+        mode: 0,
+        resolve: RESOLVE_IN_ROOT | RESOLVE_NO_MAGICLINKS,
+    };
+
+    extern "C" {
+        fn syscall(number: std::os::raw::c_long, ...) -> std::os::raw::c_long;
+    }
+
+    let fd = unsafe {
+        syscall(
+            SYS_OPENAT2,
+            root_file.as_raw_fd(),
+            rel_c.as_ptr(),
+            &how as *const OpenHow,
+            std::mem::size_of::<OpenHow>(),
+        )
+    };
+    if fd < 0 {
+        let error = std::io::Error::last_os_error();
+        if error.raw_os_error() == Some(38) {
+            return Err(FsError::Io(
+                "openat2 is unavailable; refusing unconstrained target-root access".to_string(),
+            ));
+        }
+        return Err(classify_io(rel, &error));
+    }
+
+    Ok(unsafe { std::fs::File::from_raw_fd(fd as i32) })
 }
 
 fn classify_io(path: &Path, e: &std::io::Error) -> FsError {
@@ -163,17 +276,65 @@ impl FixtureFilesystem {
     }
 
     fn resolve(&self, path: &Path) -> Option<PathBuf> {
-        // Resolve at most a few symlink hops to keep tests predictable.
-        let mut current = path.to_path_buf();
-        for _ in 0..8 {
-            if let Some(target) = self.symlinks.get(&current) {
-                current = target.clone();
-                continue;
-            }
-            break;
+        use std::path::Component;
+
+        if !path.is_absolute() {
+            return None;
         }
-        Some(current)
+
+        let mut current = PathBuf::from("/");
+        let mut hops = 0;
+        for component in path.components() {
+            match component {
+                Component::RootDir => current = PathBuf::from("/"),
+                Component::CurDir => {}
+                Component::ParentDir => {
+                    current.pop();
+                    if current.as_os_str().is_empty() {
+                        current.push("/");
+                    }
+                }
+                Component::Normal(part) => {
+                    current.push(part);
+                    while let Some(target) = self.symlinks.get(&current) {
+                        hops += 1;
+                        if hops > 16 {
+                            return None;
+                        }
+                        current = if target.is_absolute() {
+                            target.clone()
+                        } else {
+                            current.parent().unwrap_or(Path::new("/")).join(target)
+                        };
+                        current = lexical_normalise(&current);
+                    }
+                }
+                Component::Prefix(_) => return None,
+            }
+        }
+        Some(lexical_normalise(&current))
     }
+}
+
+fn lexical_normalise(path: &Path) -> PathBuf {
+    use std::path::Component;
+
+    let mut out = PathBuf::from("/");
+    for component in path.components() {
+        match component {
+            Component::RootDir => out = PathBuf::from("/"),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                out.pop();
+                if out.as_os_str().is_empty() {
+                    out.push("/");
+                }
+            }
+            Component::Normal(part) => out.push(part),
+            Component::Prefix(_) => {}
+        }
+    }
+    out
 }
 
 fn default_file_meta() -> MetaData {
@@ -198,8 +359,36 @@ impl FilesystemProbe for FixtureFilesystem {
         }
     }
 
+    fn canonicalize(&self, path: &Path) -> Result<PathBuf, FsError> {
+        let resolved = self.resolve(path).ok_or(FsError::NotFound)?;
+        let mut cursor = resolved.parent();
+        while let Some(parent) = cursor {
+            if self.dirs.get(parent).is_some_and(|dir| dir.unreadable) {
+                return Err(FsError::PermissionDenied);
+            }
+            cursor = parent.parent();
+        }
+        if self.files.contains_key(&resolved) || self.dirs.contains_key(&resolved) {
+            Ok(resolved)
+        } else {
+            Err(FsError::NotFound)
+        }
+    }
+
     fn metadata(&self, path: &Path) -> Result<MetaData, FsError> {
         let resolved = self.resolve(path).ok_or(FsError::NotFound)?;
+        // Refuse to stat anything under an unreadable directory, mirroring
+        // real filesystem behaviour where lack of execute permission on a
+        // directory blocks metadata lookup of its children.
+        let mut cursor = resolved.parent();
+        while let Some(parent) = cursor {
+            if let Some(d) = self.dirs.get(parent) {
+                if d.unreadable {
+                    return Err(FsError::PermissionDenied);
+                }
+            }
+            cursor = parent.parent();
+        }
         if let Some(meta) = self.metas.get(&resolved) {
             return Ok(*meta);
         }

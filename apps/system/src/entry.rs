@@ -6,8 +6,13 @@ use std::fmt;
 
 use crate::error::{exit_code, Error};
 
-/// The set of argv[0] names this binary recognises. Anything else falls back
-/// to the canonical `catos-system` name with a warning.
+/// The set of argv[0] names this binary recognises. Anything else falls
+/// back silently to the canonical `catos-system` name. The fallback is
+/// deliberate so the binary is still usable when renamed or copied; we do
+/// not warn because there is no caller-configured warning channel in
+/// phase 1 (warnings in the JSON report are probe-level, not invocation-
+/// level). A future phase may surface this via a `--strict-invocation`
+/// flag if downstream tooling wants to detect renaming.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Invocation {
     CatosSystem,
@@ -36,8 +41,8 @@ impl Invocation {
             "catos-update" => Invocation::CatosUpdate,
             "catos-recovery" => Invocation::CatosRecovery,
             "catos-doctor" => Invocation::CatosDoctor,
-            // Includes "catos-system" and any unknown caller: fall back to the
-            // canonical name so probes still run.
+            // Includes "catos-system" and any unknown caller: silently fall
+            // back to the canonical name so probes still run.
             _ => Invocation::CatosSystem,
         }
     }
@@ -113,35 +118,35 @@ pub fn run(invocation: Invocation, argv: &[String]) -> i32 {
             std::io::stdout().flush().ok();
             exit_code::SUCCESS
         }
-        Ok(crate::cli::ParseOutcome::Run(args)) => match build_report(invocation, &args.root) {
-            Ok(report) => {
-                let result = if args.json {
-                    crate::output::render_json(&report).map(|s| {
-                        let mut out = std::io::stdout();
-                        let _ = writeln!(out, "{s}");
-                        let _ = out.flush();
-                    })
-                } else {
-                    let mut out = std::io::stdout();
-                    crate::output::render_human(&report, &mut out)
-                        .map_err(|e| Error::SerializeFailed(e.to_string()))
-                        .map(|_| {
-                            let _ = out.flush();
+        Ok(crate::cli::ParseOutcome::Run(args)) => {
+            let view = args.command.view();
+            match build_report(invocation, &args.root) {
+                Ok(report) => {
+                    let result = if args.json {
+                        crate::output::render_json(&report, view).and_then(|s| {
+                            write_json_stdout(&s)
+                                .map_err(|e| Error::SerializeFailed(format!("stdout write: {e}")))
                         })
-                };
-                match result {
-                    Ok(()) => exit_code::SUCCESS,
-                    Err(e) => {
-                        eprintln!("{invocation}: {e}");
-                        e.exit_code()
+                    } else {
+                        let mut out = std::io::stdout();
+                        crate::output::render_human(&report, view, &mut out)
+                            .and_then(|_| out.flush())
+                            .map_err(|e| Error::SerializeFailed(format!("stdout write: {e}")))
+                    };
+                    match result {
+                        Ok(()) => exit_code::SUCCESS,
+                        Err(e) => {
+                            eprintln!("{invocation}: {e}");
+                            e.exit_code()
+                        }
                     }
                 }
+                Err(e) => {
+                    eprintln!("{invocation}: {e}");
+                    e.exit_code()
+                }
             }
-            Err(e) => {
-                eprintln!("{invocation}: {e}");
-                e.exit_code()
-            }
-        },
+        }
         Err(e) => {
             eprintln!("{invocation}: {e}");
             e.exit_code()
@@ -155,9 +160,19 @@ trait HelpRewrite {
 
 impl HelpRewrite for String {
     fn replacement_help_name(self, invocation: Invocation) -> String {
-        // Only swap leading standalone occurrences of `catos-system` so we
-        // do not mangle the explanatory text. Two occurrences appear in the
-        // help header: the title line and the USAGE block.
         self.replacen("catos-system", invocation.as_str(), 2)
     }
+}
+
+/// Write a JSON document to stdout followed by a newline, propagating I/O
+/// errors instead of silently dropping them. Phase 1 reports pipe failures
+/// (e.g. broken pipe to `head`) as serialization errors so the exit code
+/// reflects that the consumer did not receive the full document.
+fn write_json_stdout(json: &str) -> std::io::Result<()> {
+    use std::io::Write;
+    let stdout = std::io::stdout();
+    let mut lock = stdout.lock();
+    lock.write_all(json.as_bytes())?;
+    lock.write_all(b"\n")?;
+    lock.flush()
 }
