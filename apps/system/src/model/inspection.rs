@@ -126,7 +126,7 @@ pub struct ToolPath {
 
 /// Target-root inspection. Phase 1 only reads files; it does NOT mount,
 /// discover block devices, or auto-detect subvolumes.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct TargetInspection {
     /// Resolved target root path (as the user passed it).
     pub root: PathBuf,

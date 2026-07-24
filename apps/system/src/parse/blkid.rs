@@ -110,6 +110,7 @@ pub fn parse_udev(body: &str) -> BlkidInfo {
     let mut info = BlkidInfo::default();
     for line in body.lines() {
         let line = line.trim();
+        let line = line.strip_prefix("E:").unwrap_or(line);
         let Some((key, value)) = line.split_once('=') else {
             continue;
         };
@@ -123,6 +124,7 @@ pub fn parse_udev(body: &str) -> BlkidInfo {
             "ID_PART_ENTRY_TYPE" => info.part_type_raw = Some(value.to_ascii_lowercase()),
             "ID_PART_ENTRY_NUMBER" => info.part_number = value.parse().ok(),
             "ID_PART_TABLE_TYPE" => info.part_table_type = Some(value.to_string()),
+            "ID_PART_ENTRY_SCHEME" => info.part_table_type = Some(value.to_string()),
             // We deliberately ignore the *_ENC variants (url-encoded forms)
             // and all unrelated keys.
             _ => {}
@@ -309,5 +311,15 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(info.gpt_role(), Some("esp"));
+    }
+
+    #[test]
+    fn parses_real_udev_database_prefixes() {
+        let body = "E:ID_FS_TYPE=btrfs\nE:ID_FS_UUID=root-uuid\nE:ID_PART_ENTRY_SCHEME=gpt\n";
+        let info = parse_udev(body);
+        assert!(info.present);
+        assert_eq!(info.fs_type.as_deref(), Some("btrfs"));
+        assert_eq!(info.fs_uuid.as_deref(), Some("root-uuid"));
+        assert_eq!(info.part_table_type.as_deref(), Some("gpt"));
     }
 }

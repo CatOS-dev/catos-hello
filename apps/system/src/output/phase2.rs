@@ -45,6 +45,7 @@ pub fn render_phase2_json(
         }
         Phase2Outcome::TargetMount {
             session,
+            inspection,
             cleanup,
             warnings,
         } => {
@@ -52,6 +53,11 @@ pub fn render_phase2_json(
             payload.insert(
                 "session".into(),
                 serde_json::to_value(session).map_err(|e| Error::SerializeFailed(e.to_string()))?,
+            );
+            payload.insert(
+                "inspection".into(),
+                serde_json::to_value(inspection)
+                    .map_err(|e| Error::SerializeFailed(e.to_string()))?,
             );
             payload.insert(
                 "cleanup".into(),
@@ -70,6 +76,42 @@ pub fn render_phase2_json(
             )
         }
     };
+    serde_json::to_string_pretty(&body).map_err(|e| Error::SerializeFailed(e.to_string()))
+}
+
+/// Render a phase-2 failure using the same stable envelope as successful
+/// reports. Mount failures remain structured for TUI/GUI consumers.
+pub fn render_phase2_error_json(
+    error: &Error,
+    invocation: &str,
+    target_root: &std::path::Path,
+) -> Result<String, Error> {
+    let detail = match error {
+        Error::MountFailed(mount_error) => {
+            serde_json::to_value(mount_error).map_err(|e| Error::SerializeFailed(e.to_string()))?
+        }
+        Error::InvalidArgument { message } => serde_json::json!({ "message": message }),
+        Error::InvalidRoot { path, reason } => {
+            serde_json::json!({ "path": path, "reason": reason })
+        }
+        Error::PermissionDenied { path, detail } => {
+            serde_json::json!({ "path": path, "detail": detail })
+        }
+        Error::ProbeFailed { detail } => serde_json::json!({ "detail": detail }),
+        Error::SerializeFailed(message) => serde_json::json!({ "message": message }),
+    };
+    let body = serde_json::json!({
+        "schemaVersion": crate::SCHEMA_VERSION,
+        "programVersion": crate::PROGRAM_VERSION,
+        "invocation": invocation,
+        "targetRoot": target_root,
+        "kind": "error",
+        "error": {
+            "code": error.code(),
+            "message": error.to_string(),
+            "detail": detail,
+        },
+    });
     serde_json::to_string_pretty(&body).map_err(|e| Error::SerializeFailed(e.to_string()))
 }
 
@@ -105,10 +147,12 @@ pub fn render_phase2_human<W: Write>(outcome: &Phase2Outcome, out: &mut W) -> st
         }
         Phase2Outcome::TargetMount {
             session,
+            inspection,
             cleanup,
             warnings,
         } => {
             render_mount_session(out, session)?;
+            render_target_inspection(out, inspection)?;
             render_cleanup_report(out, cleanup)?;
             render_warnings(out, warnings)
         }
@@ -153,6 +197,27 @@ fn render_storage_report<W: Write>(out: &mut W, report: &StorageReport) -> std::
     writeln!(out, "  esp candidates    : {}", report.esp_candidates.len())?;
     for c in &report.esp_candidates {
         writeln!(out, "    {}", c.source)?;
+    }
+    if !report.btrfs_subvolumes.is_empty() {
+        writeln!(
+            out,
+            "  btrfs subvolumes  : {}",
+            report.btrfs_subvolumes.len()
+        )?;
+        for subvolume in &report.btrfs_subvolumes {
+            writeln!(
+                out,
+                "    {} id={} kind={:?} default={} ro={}",
+                subvolume.path,
+                subvolume
+                    .id
+                    .map(|id| id.to_string())
+                    .unwrap_or_else(|| "?".into()),
+                subvolume.kind,
+                subvolume.is_default,
+                subvolume.read_only
+            )?;
+        }
     }
     if !report.ambiguities.is_empty() {
         writeln!(out, "  ambiguities       : {}", report.ambiguities.len())?;
@@ -225,6 +290,23 @@ fn render_mount_session<W: Write>(out: &mut W, session: &MountSession) -> std::i
     Ok(())
 }
 
+fn render_target_inspection<W: Write>(
+    out: &mut W,
+    inspection: &crate::model::inspection::TargetInspection,
+) -> std::io::Result<()> {
+    writeln!(out, "Target inspection")?;
+    writeln!(
+        out,
+        "  CatOS             : {:?}",
+        inspection.is_catos_target.status
+    )?;
+    writeln!(out, "  fstab             : {:?}", inspection.has_fstab)?;
+    writeln!(out, "  pacman database   : {:?}", inspection.has_pacman_db)?;
+    writeln!(out, "  /usr              : {:?}", inspection.has_usr)?;
+    writeln!(out, "  /boot             : {:?}", inspection.has_boot)?;
+    Ok(())
+}
+
 fn render_cleanup_report<W: Write>(out: &mut W, cleanup: &CleanupReport) -> std::io::Result<()> {
     writeln!(out, "Cleanup")?;
     writeln!(out, "  unmounted         : {}", cleanup.unmounted.len())?;
@@ -238,6 +320,9 @@ fn render_cleanup_report<W: Write>(out: &mut W, cleanup: &CleanupReport) -> std:
             r.reason,
             r.error_code,
         )?;
+    }
+    if let Some(error) = &cleanup.directory_cleanup_error {
+        writeln!(out, "  session directory : cleanup failed: {error}")?;
     }
     writeln!(out, "  all clean         : {}", cleanup.all_clean)?;
     Ok(())
@@ -279,5 +364,25 @@ mod tests {
         assert_eq!(v["schemaVersion"], 2);
         assert_eq!(v["kind"], "storage_scan");
         assert!(v.get("payload").is_some());
+    }
+
+    #[test]
+    fn mount_failure_json_preserves_structured_fields() {
+        let error = Error::MountFailed(crate::model::mount::MountError {
+            kind: crate::model::mount::MountErrorKind::DeviceNotFound,
+            message: "missing device".into(),
+            device_or_path: Some("/dev/missing".into()),
+            errno: Some(2),
+            completed_steps: vec!["root".into()],
+            cleanup_complete: true,
+            residual_mounts: vec![],
+        });
+        let json =
+            render_phase2_error_json(&error, "catos-system", std::path::Path::new("/")).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(value["kind"], "error");
+        assert_eq!(value["error"]["code"], "device_not_found");
+        assert_eq!(value["error"]["detail"]["errno"], 2);
+        assert_eq!(value["error"]["detail"]["cleanup_complete"], true);
     }
 }

@@ -6,6 +6,8 @@
 use std::fmt;
 use std::path::PathBuf;
 
+use crate::model::mount::MountError;
+
 /// Stable exit codes. Numbers are part of the public CLI contract and must
 /// not be renumbered without a schema-version bump.
 pub mod exit_code {
@@ -29,6 +31,9 @@ pub enum Error {
     PermissionDenied { path: PathBuf, detail: String },
     /// Probe layer could not gather enough information to produce a report.
     ProbeFailed { detail: String },
+    /// Structured target mount/plan failure. Kept intact so JSON consumers
+    /// receive errno, completed steps, cleanup state and residual mounts.
+    MountFailed(MountError),
     /// JSON serialisation failed.
     SerializeFailed(String),
 }
@@ -44,6 +49,7 @@ impl fmt::Display for Error {
                 write!(f, "permission denied reading {path:?}: {detail}")
             }
             Error::ProbeFailed { detail } => write!(f, "probe failed: {detail}"),
+            Error::MountFailed(error) => write!(f, "mount failed: {error}"),
             Error::SerializeFailed(msg) => write!(f, "serialisation failed: {msg}"),
         }
     }
@@ -58,7 +64,19 @@ impl Error {
             Error::InvalidRoot { .. } => exit_code::INVALID_ROOT,
             Error::PermissionDenied { .. } => exit_code::PERMISSION_DENIED,
             Error::ProbeFailed { .. } => exit_code::PROBE_FAILED,
+            Error::MountFailed(_) => exit_code::PROBE_FAILED,
             Error::SerializeFailed(_) => exit_code::SERIALIZE_FAILED,
+        }
+    }
+
+    pub fn code(&self) -> &'static str {
+        match self {
+            Error::InvalidArgument { .. } => "invalid_argument",
+            Error::InvalidRoot { .. } => "invalid_root",
+            Error::PermissionDenied { .. } => "permission_denied",
+            Error::ProbeFailed { .. } => "probe_failed",
+            Error::MountFailed(error) => error.code(),
+            Error::SerializeFailed(_) => "serialize_failed",
         }
     }
 }

@@ -25,6 +25,7 @@
 //!     `PARTLABEL=EFI` — we handle escaped spaces in values too.
 
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 
 /// One fstab entry as it appears in the file (source-spec, target,
 /// fstype, options, dump, pass). Source is left in its raw
@@ -125,7 +126,8 @@ impl FstabSource {
 
 /// Errors that can arise parsing a single line. Used by tests; in
 /// production we usually just skip the line with a warning.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
 pub enum FstabParseError {
     /// Line had fewer than the 4 required fields.
     TooFewFields,
@@ -136,6 +138,13 @@ pub enum FstabParseError {
     /// Line is a comment or blank. (Not really an error; useful to
     /// distinguish in tests.)
     Skip,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct FstabDiagnostic {
+    pub line: usize,
+    pub kind: FstabParseError,
+    pub text: String,
 }
 
 /// Parse one fstab line into an entry. Returns `Err` for malformed
@@ -205,9 +214,8 @@ pub fn parse_line(line: &str) -> Result<Option<FstabEntry>, FstabParseError> {
         }
     };
 
-    // Normalise: drop duplicates while preserving order. fstab is small;
-    // O(n^2) is fine here.
-    options.dedup();
+    let mut seen = HashSet::new();
+    options.retain(|option| seen.insert(option.clone()));
 
     Ok(Some(FstabEntry {
         source,
@@ -223,12 +231,28 @@ pub fn parse_line(line: &str) -> Result<Option<FstabEntry>, FstabParseError> {
     }))
 }
 
-/// Parse the whole fstab body. Lines that fail to parse are silently
-/// skipped (callers surface a warning via probe layer).
 pub fn parse_all(body: &str) -> Vec<FstabEntry> {
-    body.lines()
-        .filter_map(|l| parse_line(l).ok().flatten())
-        .collect()
+    parse_all_with_diagnostics(body).0
+}
+
+/// Parse a complete fstab without losing malformed lines. Recovery
+/// callers can surface diagnostics instead of treating corruption as an
+/// empty or incomplete configuration.
+pub fn parse_all_with_diagnostics(body: &str) -> (Vec<FstabEntry>, Vec<FstabDiagnostic>) {
+    let mut entries = Vec::new();
+    let mut diagnostics = Vec::new();
+    for (index, line) in body.lines().enumerate() {
+        match parse_line(line) {
+            Ok(Some(entry)) => entries.push(entry),
+            Ok(None) => {}
+            Err(kind) => diagnostics.push(FstabDiagnostic {
+                line: index + 1,
+                kind,
+                text: line.to_string(),
+            }),
+        }
+    }
+    (entries, diagnostics)
 }
 
 /// Tokenise a fstab line into fields, honouring escaped spaces. We split
@@ -381,5 +405,23 @@ tmpfs                                      /tmp           tmpfs  nosuid,nodev,no
         let e = parse_line(line).unwrap().unwrap();
         assert_eq!(e.kind, FstabEntryKind::Swap);
         assert_eq!(e.target, "none");
+    }
+
+    #[test]
+    fn malformed_lines_are_reported_not_silently_dropped() {
+        let body = "UUID=ok / ext4 defaults 0 1\nthis is broken\n";
+        let (entries, diagnostics) = parse_all_with_diagnostics(body);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].line, 2);
+        assert_eq!(diagnostics[0].kind, FstabParseError::TooFewFields);
+    }
+
+    #[test]
+    fn non_adjacent_duplicate_options_are_removed() {
+        let entry = parse_line("/dev/sda1 / ext4 ro,noatime,ro,noatime 0 1")
+            .unwrap()
+            .unwrap();
+        assert_eq!(entry.options, vec!["ro", "noatime"]);
     }
 }

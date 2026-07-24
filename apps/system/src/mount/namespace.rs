@@ -87,14 +87,10 @@ pub fn establish_private_namespace() -> Result<NamespaceSetup, SyscallError> {
             evidence.push("verified: / no longer carries shared: in mountinfo".into());
         }
         Ok(false) => {
-            // Not fatal — the kernel may have other propagation semantics
-            // we did not anticipate, but our mounts still live in our
-            // namespace. Surface as evidence; do not fail.
-            evidence
-                .push("warning: / still carries shared: after MS_PRIVATE (kernel quirk)".into());
+            return Err(namespace_verification_error());
         }
-        Err(msg) => {
-            evidence.push(format!("could not verify private state: {msg}"));
+        Err(_) => {
+            return Err(namespace_verification_error());
         }
     }
 
@@ -108,8 +104,8 @@ pub fn establish_private_namespace() -> Result<NamespaceSetup, SyscallError> {
 /// fields do NOT contain any `shared:N` token. Returns:
 ///   * `Ok(true)` — `/` is private (no `shared:` token).
 ///   * `Ok(false)` — `/` still carries `shared:` after our flip.
-///   * `Err(message)` — could not read or parse mountinfo (treated as
-///     evidence, not failure; the session continues).
+///   * `Err(message)` — could not read or parse mountinfo. The caller
+///     fails closed and refuses all target mounts.
 fn verify_root_is_private() -> Result<bool, String> {
     let body = std::fs::read_to_string("/proc/self/mountinfo").map_err(|e| e.to_string())?;
     let mounts = crate::parse::mountinfo::parse_all(&body);
@@ -122,6 +118,16 @@ fn verify_root_is_private() -> Result<bool, String> {
         .iter()
         .any(|f| f.starts_with("shared:"));
     Ok(!still_shared)
+}
+
+fn namespace_verification_error() -> SyscallError {
+    // EPROTO is used as an internal diagnostic errno: the namespace
+    // syscalls returned success but the resulting propagation state could
+    // not be established as private.
+    SyscallError {
+        syscall: "unshare",
+        errno: 71,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -188,5 +194,14 @@ mod tests {
             .iter()
             .find(|m| m.mount_point == std::path::Path::new("/"));
         assert!(root_mount.is_none());
+    }
+
+    #[test]
+    fn failed_private_verification_is_namespace_unavailable() {
+        let error = namespace_verification_error();
+        assert_eq!(
+            error.classify(),
+            crate::model::mount::MountErrorKind::NamespaceUnavailable
+        );
     }
 }

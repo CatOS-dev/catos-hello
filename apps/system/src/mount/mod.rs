@@ -13,5 +13,6 @@
 
 pub mod namespace;
 pub mod plan;
+pub mod probe;
 pub mod session;
 pub mod syscall;

@@ -4,12 +4,15 @@ use std::path::Path;
 
 use crate::model::evidence::Evidence;
 use crate::model::fstab::{FstabEntry, FstabEntryKind, FstabSource};
-use crate::model::inspection::Warning;
+use crate::model::inspection::{Presence, TargetInspection, Warning};
 use crate::model::runtime::Detection;
 use crate::model::storage::{
     Ambiguity, AmbiguityKind, BlockDevice, DemotionReason, EspCandidate, EspSignals,
-    OsLayoutSignals, PartitionRole, RootCandidate, RootCandidateConfidence,
+    OsLayoutSignals, PartitionRole, Presence2, RootCandidate, RootCandidateConfidence,
 };
+use crate::probe::fs_probe::{FilesystemProbe, RealFilesystem};
+use crate::probe::inspect_target;
+use crate::system_root::SystemRoot;
 
 const ESP_MIN_BYTES: u64 = 32 * 1024 * 1024;
 const ESP_MAX_BYTES: u64 = 1024 * 1024 * 1024;
@@ -75,7 +78,7 @@ fn is_esp_device(device: &BlockDevice) -> bool {
     matches!(device.partition_role, PartitionRole::Esp)
         || matches!(
             device.filesystem.as_deref(),
-            Some("vfat" | "fat" | "fat32" | "fat16" | "fat12" | "exfat")
+            Some("vfat" | "fat" | "fat32" | "fat16" | "fat12")
         )
 }
 
@@ -84,19 +87,12 @@ fn root_candidate(device: &BlockDevice, root_entries: &[&FstabEntry]) -> RootCan
         .iter()
         .copied()
         .find(|entry| device_matches_fstab_source(device, &entry.source));
-    let (confidence, demotion_reasons) = match (
-        matching_entry,
-        root_entries.is_empty(),
-        device.mount_point.is_some(),
-    ) {
-        (Some(_), _, _) => (RootCandidateConfidence::High, Vec::new()),
-        (None, false, _) => (
-            RootCandidateConfidence::Low,
-            vec![DemotionReason::FstabPointsElsewhere],
-        ),
-        (None, true, true) => (RootCandidateConfidence::Medium, Vec::new()),
-        (None, true, false) => (RootCandidateConfidence::Unknown, Vec::new()),
-    };
+    let inspected = inspect_mounted_target(device);
+    let (confidence, mut demotion_reasons) = classify_root_confidence(
+        inspected.as_ref(),
+        matching_entry.is_some(),
+        !root_entries.is_empty(),
+    );
     let subvolume = matching_entry
         .filter(|_| matches!(device.filesystem.as_deref(), Some("btrfs")))
         .and_then(|entry| {
@@ -115,33 +111,34 @@ fn root_candidate(device: &BlockDevice, root_entries: &[&FstabEntry]) -> RootCan
         )
         .with_value(device.filesystem.clone().unwrap_or_default()),
     );
-    match confidence {
-        RootCandidateConfidence::High => evidence.push(
+    if matching_entry.is_some() {
+        evidence.push(
             Evidence::new(
                 "FSTAB_ROOT_MATCH",
                 "fstab",
                 "fstab root source matches this device",
             )
             .with_value(source.clone()),
-        ),
-        RootCandidateConfidence::Low => evidence.push(
+        );
+    } else if !root_entries.is_empty() {
+        evidence.push(
             Evidence::new(
                 "FSTAB_ROOT_POINTS_ELSEWHERE",
                 "fstab",
                 "fstab contains a root entry for a different discovered device",
             )
             .with_value(source.clone()),
-        ),
-        RootCandidateConfidence::Medium => evidence.push(Evidence::new(
-            "ROOT_MOUNTED_WITHOUT_FSTAB_REFERENCE",
-            source.clone(),
-            "plausible root is mounted but fstab has no root entry",
-        )),
-        RootCandidateConfidence::Unknown => evidence.push(Evidence::new(
+        );
+        if !demotion_reasons.contains(&DemotionReason::FstabPointsElsewhere) {
+            demotion_reasons.push(DemotionReason::FstabPointsElsewhere);
+        }
+    }
+    if inspected.is_none() {
+        evidence.push(Evidence::new(
             "ROOT_UNINSPECTED",
             source.clone(),
-            "plausible root was discovered but has no mount or root fstab evidence",
-        )),
+            "candidate content has not been inspected through a read-only mount",
+        ));
     }
     if let Some(value) = &subvolume {
         evidence.push(
@@ -150,18 +147,40 @@ fn root_candidate(device: &BlockDevice, root_entries: &[&FstabEntry]) -> RootCan
         );
     }
 
+    let (is_catos, signals) = inspected
+        .map(|inspection| {
+            let signals = OsLayoutSignals {
+                has_os_release: if inspection.os_release.is_some() {
+                    Presence2::Present
+                } else {
+                    Presence2::Absent
+                },
+                has_fstab: inspection.has_fstab.into(),
+                has_usr: inspection.has_usr.into(),
+                has_pacman_db: inspection.has_pacman_db.into(),
+                has_boot: inspection.has_boot.into(),
+            };
+            (inspection.is_catos_target, signals)
+        })
+        .unwrap_or_else(|| {
+            (
+                Detection::unknown(vec![Evidence::new(
+                    "ROOT_NOT_INSPECTED",
+                    "candidate",
+                    "os-release inspection requires an existing or temporary read-only mount",
+                )]),
+                OsLayoutSignals::default(),
+            )
+        });
+
     RootCandidate {
         source,
         filesystem: device.filesystem.clone(),
         subvolume,
         confidence,
-        is_catos: Detection::unknown(vec![Evidence::new(
-            "ROOT_NOT_INSPECTED",
-            "candidate",
-            "os-release inspection is deferred until after a read-only mount",
-        )]),
+        is_catos,
         mounted_at: device.mount_point.clone(),
-        signals: OsLayoutSignals::default(),
+        signals,
         demotion_reasons,
         evidence,
     }
@@ -172,7 +191,7 @@ fn esp_candidate(device: &BlockDevice, fstab: &[FstabEntry]) -> EspCandidate {
     let gpt_esp_type = matches!(device.partition_role, PartitionRole::Esp);
     let fat_filesystem = matches!(
         device.filesystem.as_deref(),
-        Some("vfat" | "fat" | "fat32" | "fat16" | "fat12" | "exfat")
+        Some("vfat" | "fat" | "fat32" | "fat16" | "fat12")
     );
     let plausible_size = device
         .size_bytes()
@@ -184,17 +203,18 @@ fn esp_candidate(device: &BlockDevice, fstab: &[FstabEntry]) -> EspCandidate {
     let fstab_referenced = fstab.iter().any(|entry| {
         is_esp_location(&entry.target) && device_matches_fstab_source(device, &entry.source)
     });
+    let has_efi_directory = mounted_directory_exists(device.mount_point.as_deref(), "EFI");
     let signals = EspSignals {
         gpt_esp_type,
         fat_filesystem,
         plausible_size,
         mounted_at_esp_location,
         fstab_referenced,
-        has_efi_directory: false,
+        has_efi_directory,
     };
-    let confidence = if gpt_esp_type {
+    let confidence = if fat_filesystem && (gpt_esp_type || has_efi_directory) {
         RootCandidateConfidence::High
-    } else if fstab_referenced || mounted_at_esp_location {
+    } else if gpt_esp_type || fstab_referenced || mounted_at_esp_location {
         RootCandidateConfidence::Medium
     } else {
         RootCandidateConfidence::Low
@@ -236,6 +256,13 @@ fn esp_candidate(device: &BlockDevice, fstab: &[FstabEntry]) -> EspCandidate {
             "device is mounted at an ESP location",
         ));
     }
+    if has_efi_directory {
+        evidence.push(Evidence::new(
+            "ESP_EFI_DIRECTORY",
+            source.clone(),
+            "mounted candidate contains an EFI directory",
+        ));
+    }
 
     EspCandidate {
         source,
@@ -243,6 +270,83 @@ fn esp_candidate(device: &BlockDevice, fstab: &[FstabEntry]) -> EspCandidate {
         signals,
         evidence,
     }
+}
+
+fn inspect_mounted_target(device: &BlockDevice) -> Option<TargetInspection> {
+    let mount_point = device.mount_point.as_ref()?;
+    let root = SystemRoot::from_user_input(mount_point.to_str()?).ok()?;
+    let mut warnings = Vec::new();
+    Some(inspect_target(&RealFilesystem, &root, &mut warnings))
+}
+
+fn classify_root_confidence(
+    inspection: Option<&TargetInspection>,
+    fstab_matches: bool,
+    fstab_has_other_root: bool,
+) -> (RootCandidateConfidence, Vec<DemotionReason>) {
+    let Some(inspection) = inspection else {
+        return if fstab_matches {
+            (
+                RootCandidateConfidence::Medium,
+                vec![DemotionReason::MissingOsLayout],
+            )
+        } else if fstab_has_other_root {
+            (
+                RootCandidateConfidence::Low,
+                vec![DemotionReason::FstabPointsElsewhere],
+            )
+        } else {
+            (RootCandidateConfidence::Unknown, Vec::new())
+        };
+    };
+
+    let has_os_release = inspection.os_release.is_some();
+    let has_usr = inspection.has_usr == Presence::Present;
+    let has_package_db = inspection.has_pacman_db == Presence::Present;
+    let has_fstab = inspection.has_fstab == Presence::Present;
+    let strong_layout = has_usr && (has_package_db || has_fstab);
+
+    if inspection.is_catos_target.status == crate::model::runtime::DetectionStatus::Detected
+        && has_os_release
+        && strong_layout
+    {
+        return (RootCandidateConfidence::High, Vec::new());
+    }
+
+    let mut reasons = Vec::new();
+    if !has_os_release {
+        reasons.push(DemotionReason::NoOsRelease);
+    } else if inspection.is_catos_target.status
+        == crate::model::runtime::DetectionStatus::NotDetected
+    {
+        reasons.push(DemotionReason::NotCatOs);
+    }
+    if !strong_layout {
+        reasons.push(DemotionReason::MissingOsLayout);
+    }
+
+    if has_os_release || strong_layout {
+        (RootCandidateConfidence::Medium, reasons)
+    } else if has_usr || has_package_db || has_fstab || fstab_matches {
+        (RootCandidateConfidence::Low, reasons)
+    } else {
+        (RootCandidateConfidence::Unknown, reasons)
+    }
+}
+
+fn mounted_directory_exists(mount_point: Option<&Path>, relative: &str) -> bool {
+    let Some(mount_point) = mount_point else {
+        return false;
+    };
+    let Some(path) = mount_point.to_str() else {
+        return false;
+    };
+    let Ok(root) = SystemRoot::from_user_input(path) else {
+        return false;
+    };
+    RealFilesystem
+        .rooted_metadata(root.canonical_path(), Path::new(relative))
+        .is_ok_and(|metadata| metadata.is_dir)
 }
 
 fn device_source(device: &BlockDevice) -> String {
@@ -257,7 +361,7 @@ fn is_esp_location(target: &str) -> bool {
     matches!(target, "/boot/efi" | "/efi" | "/boot")
 }
 
-fn candidate_ambiguities(roots: &[RootCandidate], esps: &[EspCandidate]) -> Vec<Ambiguity> {
+pub fn candidate_ambiguities(roots: &[RootCandidate], esps: &[EspCandidate]) -> Vec<Ambiguity> {
     let mut ambiguities = Vec::new();
     for confidence in [
         RootCandidateConfidence::High,
@@ -268,7 +372,7 @@ fn candidate_ambiguities(roots: &[RootCandidate], esps: &[EspCandidate]) -> Vec<
         let sources = roots
             .iter()
             .filter(|candidate| candidate.confidence == confidence)
-            .map(|candidate| candidate.source.clone())
+            .map(root_candidate_identity)
             .collect::<Vec<_>>();
         if sources.len() > 1 {
             ambiguities.push(ambiguity(AmbiguityKind::Root, confidence, sources));
@@ -283,6 +387,13 @@ fn candidate_ambiguities(roots: &[RootCandidate], esps: &[EspCandidate]) -> Vec<
         }
     }
     ambiguities
+}
+
+fn root_candidate_identity(candidate: &RootCandidate) -> String {
+    match candidate.subvolume.as_deref() {
+        Some(subvolume) => format!("{}#subvol={subvolume}", candidate.source),
+        None => candidate.source.clone(),
+    }
 }
 
 fn ambiguity(
@@ -337,6 +448,7 @@ mod tests {
             label: Some(format!("{name}-label")),
             part_label: Some(format!("{name}-partlabel")),
             mount_point: None,
+            mounts: vec![],
             mounted_before_session: false,
             evidence: vec![],
         }
@@ -374,7 +486,7 @@ mod tests {
         let (roots, _, ambiguities, _) = identify_candidates(&[root], &fstab);
 
         assert_eq!(roots.len(), 1);
-        assert_eq!(roots[0].confidence, RootCandidateConfidence::High);
+        assert_eq!(roots[0].confidence, RootCandidateConfidence::Medium);
         assert!(!roots[0].evidence.is_empty());
         assert!(ambiguities.is_empty());
     }
@@ -392,7 +504,7 @@ mod tests {
         let (roots, _, _, _) = identify_candidates(&[root], &fstab);
 
         assert_eq!(roots[0].subvolume.as_deref(), Some("/@"));
-        assert_eq!(roots[0].confidence, RootCandidateConfidence::High);
+        assert_eq!(roots[0].confidence, RootCandidateConfidence::Medium);
     }
 
     #[test]
@@ -407,6 +519,20 @@ mod tests {
             ambiguity.kind == AmbiguityKind::Root
                 && ambiguity.candidates == vec!["/dev/sda2", "/dev/sdb2"]
         }));
+    }
+
+    #[test]
+    fn ambiguity_distinguishes_subvolumes_on_the_same_device() {
+        let mut first = root_candidate(&device("sda2", Some("btrfs")), &[]);
+        first.confidence = RootCandidateConfidence::Medium;
+        first.subvolume = Some("/@".into());
+        let mut second = first.clone();
+        second.subvolume = Some("/@root".into());
+        let ambiguities = candidate_ambiguities(&[first, second], &[]);
+        assert_eq!(
+            ambiguities[0].candidates,
+            vec!["/dev/sda2#subvol=/@", "/dev/sda2#subvol=/@root"]
+        );
     }
 
     #[test]
@@ -467,5 +593,37 @@ mod tests {
         assert!(esps.is_empty());
         assert!(ambiguities.is_empty());
         assert!(warnings.is_empty());
+    }
+
+    #[test]
+    fn mounted_catos_root_requires_content_evidence_for_high_confidence() {
+        let base =
+            std::env::temp_dir().join(format!("catos-candidate-content-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(base.join("etc")).unwrap();
+        std::fs::create_dir_all(base.join("usr")).unwrap();
+        std::fs::create_dir_all(base.join("var/lib/pacman/local")).unwrap();
+        std::fs::create_dir_all(base.join("boot")).unwrap();
+        std::fs::write(base.join("etc/os-release"), "ID=catos\nNAME=CatOS\n").unwrap();
+        std::fs::write(base.join("etc/fstab"), "# fixture\n").unwrap();
+
+        let mut root = device("sda2", Some("ext4"));
+        root.mount_point = Some(base.clone());
+        let (roots, _, _, _) = identify_candidates(&[root], &[]);
+        assert_eq!(roots[0].confidence, RootCandidateConfidence::High);
+        assert_eq!(
+            roots[0].is_catos.status,
+            crate::model::runtime::DetectionStatus::Detected
+        );
+        assert_eq!(roots[0].signals.has_usr, Presence2::Present);
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn exfat_is_not_an_esp_candidate_without_gpt_esp_role() {
+        let mut exfat = device("sda1", Some("exfat"));
+        exfat.partition_role = PartitionRole::Unknown;
+        let (_, esps, _, _) = identify_candidates(&[exfat], &[]);
+        assert!(esps.is_empty());
     }
 }

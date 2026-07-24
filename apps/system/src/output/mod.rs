@@ -7,4 +7,4 @@ pub mod phase2;
 
 pub use human::render_human;
 pub use json::render_json;
-pub use phase2::{render_phase2_human, render_phase2_json};
+pub use phase2::{render_phase2_error_json, render_phase2_human, render_phase2_json};

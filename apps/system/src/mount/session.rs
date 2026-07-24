@@ -66,6 +66,7 @@ pub struct Session {
     pre_existing: HashSet<PathBuf>,
     warnings: Vec<Warning>,
     evidence: Vec<Evidence>,
+    last_cleanup: Option<CleanupReport>,
 }
 
 impl Session {
@@ -89,6 +90,7 @@ impl Session {
             pre_existing,
             warnings: Vec::new(),
             evidence: Vec::new(),
+            last_cleanup: None,
         }
     }
 
@@ -168,13 +170,11 @@ impl Session {
         Ok(self.snapshot())
     }
 
-    /// Execute one step. The step's target directory is created (mkdir -p)
-    /// just before mounting, since fstab targets like `/boot/efi` may not
-    /// exist under the session root yet.
+    /// Execute one step. Only the empty root mountpoint may be created.
+    /// Nested mountpoints must already exist as real directories in the
+    /// read-only target and may not contain symlink components.
     fn execute_step(&mut self, step: &crate::model::mount::MountStep) -> Result<(), SyscallError> {
-        // Make the target path (and parents) if missing. mount(2) requires
-        // the mountpoint to exist as a directory.
-        if let Err(msg) = std::fs::create_dir_all(&step.target) {
+        if let Err(msg) = prepare_mount_target(&self.target_root, &step.target) {
             return Err(SyscallError {
                 syscall: "mkdir",
                 errno: classify_io_errno(&msg),
@@ -216,9 +216,20 @@ impl Session {
     pub fn cleanup(&mut self) -> CleanupReport {
         if matches!(
             self.state,
-            MountSessionState::Cleaned | MountSessionState::Finished
+            MountSessionState::Cleaned
+                | MountSessionState::Finished
+                | MountSessionState::CleanupIncomplete
         ) {
-            return CleanupReport::default();
+            return self.last_cleanup.clone().unwrap_or_default();
+        }
+        if self.state == MountSessionState::Ready
+            && self.namespace_setup.is_none()
+            && self.mounts.is_empty()
+        {
+            let report = CleanupReport::default();
+            self.last_cleanup = Some(report.clone());
+            self.state = MountSessionState::Finished;
+            return report;
         }
         let report = self.cleanup_internal();
         self.state = if report.all_clean {
@@ -302,7 +313,13 @@ impl Session {
             }
         }
 
-        report.all_clean = report.residual.is_empty();
+        if report.residual.is_empty() {
+            if let Err(error) = remove_session_tree(&self.session_root) {
+                report.directory_cleanup_error = Some(error);
+            }
+        }
+        report.all_clean = report.residual.is_empty() && report.directory_cleanup_error.is_none();
+        self.last_cleanup = Some(report.clone());
         report
     }
 
@@ -372,25 +389,151 @@ pub fn current_mounts() -> Vec<PathBuf> {
         .collect()
 }
 
-/// Create the session_root directory and all parents. Refuses world-
-/// writable parents (the session_root is a privileged working directory).
+/// Create a private session directory under the fixed runtime parent.
+/// Every existing component is checked with symlink_metadata, and the
+/// final directory is created exclusively so a guessed session id cannot
+/// redirect privileged mounts.
 fn ensure_session_root(path: &Path) -> Result<(), String> {
-    std::fs::create_dir_all(path).map_err(|e| e.to_string())?;
-    // Restrictive perms: 0700. Only the running root-owned process can
-    // touch this directory.
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let meta = std::fs::metadata(path).map_err(|e| e.to_string())?;
-        let mut perms = meta.permissions();
-        perms.set_mode(0o700);
-        std::fs::set_permissions(path, perms).map_err(|e| e.to_string())?;
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+    let parent = Path::new(SESSION_ROOT_PARENT);
+    if path.parent() != Some(parent) || path.file_name().is_none() {
+        return Err(format!(
+            "session root must be a direct child of {SESSION_ROOT_PARENT}"
+        ));
+    }
+
+    validate_existing_runtime_dir(Path::new("/run"), None)?;
+    create_or_validate_runtime_dir(Path::new("/run/catos-system"), 0o700)?;
+    create_or_validate_runtime_dir(parent, 0o700)?;
+
+    std::fs::create_dir(path).map_err(|error| {
+        format!(
+            "could not exclusively create session directory {}: {error}",
+            path.display()
+        )
+    })?;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
+        .map_err(|error| error.to_string())?;
+    let metadata = std::fs::symlink_metadata(path).map_err(|error| error.to_string())?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err("new session path is not a real directory".into());
+    }
+    let euid = effective_uid();
+    if metadata.uid() != euid || metadata.mode() & 0o077 != 0 {
+        return Err("new session directory ownership or permissions are unsafe".into());
     }
     Ok(())
 }
 
+fn create_or_validate_runtime_dir(path: &Path, mode: u32) -> Result<(), String> {
+    use std::os::unix::fs::PermissionsExt;
+
+    match std::fs::create_dir(path) {
+        Ok(()) => {
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))
+                .map_err(|error| error.to_string())?;
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(error) => return Err(format!("cannot create {}: {error}", path.display())),
+    }
+    validate_existing_runtime_dir(path, Some(effective_uid()))
+}
+
+fn validate_existing_runtime_dir(path: &Path, required_owner: Option<u32>) -> Result<(), String> {
+    use std::os::unix::fs::MetadataExt;
+
+    let metadata = std::fs::symlink_metadata(path)
+        .map_err(|error| format!("cannot inspect {}: {error}", path.display()))?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(format!("{} is not a real directory", path.display()));
+    }
+    if let Some(owner) = required_owner {
+        if metadata.uid() != owner {
+            return Err(format!("{} has unexpected owner", path.display()));
+        }
+    }
+    if metadata.mode() & 0o022 != 0 {
+        return Err(format!("{} is group/world writable", path.display()));
+    }
+    Ok(())
+}
+
+fn prepare_mount_target(target_root: &Path, target: &Path) -> Result<(), std::io::Error> {
+    if target == target_root {
+        return match std::fs::create_dir(target) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                let metadata = std::fs::symlink_metadata(target)?;
+                if metadata.is_dir() && !metadata.file_type().is_symlink() {
+                    Ok(())
+                } else {
+                    Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        "root mountpoint is not a real directory",
+                    ))
+                }
+            }
+            Err(error) => Err(error),
+        };
+    }
+
+    let relative = target.strip_prefix(target_root).map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "mount target is outside the session target root",
+        )
+    })?;
+    let mut current = target_root.to_path_buf();
+    for component in relative.components() {
+        let std::path::Component::Normal(part) = component else {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "mount target contains an unsafe path component",
+            ));
+        };
+        current.push(part);
+        let metadata = std::fs::symlink_metadata(&current)?;
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("{} is not a real directory", current.display()),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn remove_session_tree(path: &Path) -> Result<(), String> {
+    if path.parent() != Some(Path::new(SESSION_ROOT_PARENT)) {
+        return Err("refusing to remove a path outside the session parent".into());
+    }
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            Err("refusing to remove a symlink session path".into())
+        }
+        Ok(_) => std::fs::remove_dir_all(path).map_err(|error| error.to_string()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.to_string()),
+    }
+}
+
+fn effective_uid() -> u32 {
+    unsafe extern "C" {
+        fn geteuid() -> u32;
+    }
+    // SAFETY: geteuid has no arguments and no failure mode.
+    unsafe { geteuid() }
+}
+
 fn classify_io_errno(err: &std::io::Error) -> i32 {
-    err.raw_os_error().unwrap_or(-1)
+    err.raw_os_error().unwrap_or_else(|| match err.kind() {
+        std::io::ErrorKind::NotFound => 2,
+        std::io::ErrorKind::PermissionDenied => 13,
+        std::io::ErrorKind::AlreadyExists => 17,
+        std::io::ErrorKind::InvalidInput => 22,
+        _ => -1,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -417,6 +560,17 @@ mod tests {
     #[test]
     fn default_session_state_is_ready() {
         assert_eq!(MountSessionState::default(), MountSessionState::Ready);
+    }
+
+    #[test]
+    fn synthetic_invalid_target_error_maps_to_unsafe_target() {
+        let error = std::io::Error::new(std::io::ErrorKind::InvalidInput, "unsafe target");
+        let syscall_error = SyscallError {
+            syscall: "mkdir",
+            errno: classify_io_errno(&error),
+        };
+        assert_eq!(syscall_error.errno, 22);
+        assert_eq!(syscall_error.classify(), MountErrorKind::UnsafeTargetPath);
     }
 
     /// MountErrorKind::CleanupIncomplete is part of the JSON contract

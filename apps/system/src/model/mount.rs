@@ -311,7 +311,12 @@ pub struct CleanupReport {
     /// respected ownership.
     #[serde(default)]
     pub observed_pre_existing: Vec<String>,
-    /// Whether the final state is clean (no residuals).
+    /// Runtime directory cleanup error, if all mounts were gone but the
+    /// private session tree could not be removed safely.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub directory_cleanup_error: Option<String>,
+    /// Whether the final state is clean (no residuals and no runtime
+    /// directory cleanup error).
     pub all_clean: bool,
 }
 
@@ -323,6 +328,7 @@ impl Default for CleanupReport {
             unmounted: Vec::new(),
             residual: Vec::new(),
             observed_pre_existing: Vec::new(),
+            directory_cleanup_error: None,
             all_clean: true,
         }
     }

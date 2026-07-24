@@ -5,6 +5,7 @@
 
 use crate::error::{exit_code, Error};
 use crate::system_root::SystemRoot;
+use std::path::{Component, Path, PathBuf};
 
 /// One of the phase-1 or phase-2 commands.
 ///
@@ -17,9 +18,8 @@ use crate::system_root::SystemRoot;
 ///   * `target plan` — reads a target fstab + discovers devices and emits
 ///     a [`crate::model::mount::MountPlan`] without executing any mount.
 ///   * `target mount` — same as `target plan` then executes the plan in a
-///     private mount namespace, emits a
-///     [`crate::model::mount::MountSession`], and waits for SIGINT/SIGTERM
-///     before cleaning up.
+///     private mount namespace, inspects the target, cleans up, and emits
+///     the final session/cleanup report.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Command {
     Environment,
@@ -91,6 +91,15 @@ pub struct CliArgs {
     pub command: Command,
     pub root: SystemRoot,
     pub json: bool,
+    pub target: TargetSelection,
+}
+
+/// Explicit storage choices for a target that is not already mounted.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TargetSelection {
+    pub root_device: Option<PathBuf>,
+    pub root_subvolume: Option<String>,
+    pub esp_device: Option<PathBuf>,
 }
 
 /// Top-level options that bypass subcommand routing (help/version).
@@ -175,6 +184,7 @@ pub fn parse(argv: &[String], default_root: SystemRoot) -> Result<ParseOutcome, 
     let mut command: Option<Command> = None;
     let mut root: Option<SystemRoot> = None;
     let mut json = false;
+    let mut target = TargetSelection::default();
 
     let mut idx = 0;
     while idx < argv.len() {
@@ -201,6 +211,45 @@ pub fn parse(argv: &[String], default_root: SystemRoot) -> Result<ParseOutcome, 
                 root = Some(SystemRoot::from_user_input(val)?);
                 idx += 1;
             }
+            "--root-device" => {
+                let value = argv.get(idx + 1).ok_or_else(|| Error::InvalidArgument {
+                    message: "--root-device requires a /dev path".into(),
+                })?;
+                target.root_device = Some(parse_device_path(value, "--root-device")?);
+                idx += 2;
+            }
+            a if a.starts_with("--root-device=") => {
+                target.root_device = Some(parse_device_path(
+                    &a["--root-device=".len()..],
+                    "--root-device",
+                )?);
+                idx += 1;
+            }
+            "--root-subvolume" => {
+                let value = argv.get(idx + 1).ok_or_else(|| Error::InvalidArgument {
+                    message: "--root-subvolume requires a subvolume path".into(),
+                })?;
+                target.root_subvolume = Some(parse_subvolume(value)?);
+                idx += 2;
+            }
+            a if a.starts_with("--root-subvolume=") => {
+                target.root_subvolume = Some(parse_subvolume(&a["--root-subvolume=".len()..])?);
+                idx += 1;
+            }
+            "--esp-device" => {
+                let value = argv.get(idx + 1).ok_or_else(|| Error::InvalidArgument {
+                    message: "--esp-device requires a /dev path".into(),
+                })?;
+                target.esp_device = Some(parse_device_path(value, "--esp-device")?);
+                idx += 2;
+            }
+            a if a.starts_with("--esp-device=") => {
+                target.esp_device = Some(parse_device_path(
+                    &a["--esp-device=".len()..],
+                    "--esp-device",
+                )?);
+                idx += 1;
+            }
             // First positional (no leading dash) becomes the subcommand.
             positional if !positional.starts_with('-') && command.is_none() => {
                 command = Some(parse_command(positional, argv, &mut idx)?);
@@ -225,12 +274,70 @@ pub fn parse(argv: &[String], default_root: SystemRoot) -> Result<ParseOutcome, 
     let command = command.ok_or_else(|| Error::InvalidArgument {
         message: "no subcommand supplied. Try --help.".to_string(),
     })?;
+    if target.root_subvolume.is_some() && target.root_device.is_none() {
+        return Err(Error::InvalidArgument {
+            message: "--root-subvolume requires --root-device".into(),
+        });
+    }
+    if target != TargetSelection::default()
+        && !matches!(command, Command::TargetPlan | Command::TargetMount)
+    {
+        return Err(Error::InvalidArgument {
+            message: "explicit device options are valid only for target plan or target mount"
+                .into(),
+        });
+    }
 
     Ok(ParseOutcome::Run(CliArgs {
         command,
         root: root.unwrap_or(default_root),
         json,
+        target,
     }))
+}
+
+fn parse_device_path(value: &str, option: &str) -> Result<PathBuf, Error> {
+    let path = Path::new(value);
+    let mut components = path.components();
+    if components.next() != Some(Component::RootDir)
+        || components.next() != Some(Component::Normal("dev".as_ref()))
+    {
+        return Err(Error::InvalidArgument {
+            message: format!("{option} must be an absolute path below /dev"),
+        });
+    }
+    if value.contains('\0')
+        || path
+            .components()
+            .any(|component| matches!(component, Component::ParentDir | Component::Prefix(_)))
+    {
+        return Err(Error::InvalidArgument {
+            message: format!("{option} contains an unsafe path component"),
+        });
+    }
+    Ok(path.to_path_buf())
+}
+
+fn parse_subvolume(value: &str) -> Result<String, Error> {
+    if value.is_empty() || value.contains([',', '\0']) {
+        return Err(Error::InvalidArgument {
+            message: "--root-subvolume must be a non-empty path without commas or NUL".into(),
+        });
+    }
+    let normalized = if value.starts_with('/') {
+        value.to_string()
+    } else {
+        format!("/{value}")
+    };
+    if Path::new(&normalized)
+        .components()
+        .any(|component| matches!(component, Component::ParentDir | Component::Prefix(_)))
+    {
+        return Err(Error::InvalidArgument {
+            message: "--root-subvolume cannot contain parent components".into(),
+        });
+    }
+    Ok(normalized)
 }
 
 pub fn help_text() -> String {
@@ -257,6 +364,12 @@ PHASE-2 SUBCOMMANDS (read-only storage discovery + safe RO target mount):
 OPTIONS:
     --root PATH   Inspect a different target root (default: /).
                   PATH must be an absolute path to an existing directory.
+    --root-device /dev/...
+                  Explicit root block device for an unmounted target.
+    --root-subvolume PATH
+                  Explicit Btrfs root subvolume (requires --root-device).
+    --esp-device /dev/...
+                  Override the EFI System Partition for the target plan.
     --json        Emit a stable JSON report on stdout instead of human text.
     -h, --help    Show this help message and exit.
     -V, --version Print program version and exit.
@@ -275,7 +388,7 @@ NOTES:
       flips / to MS_REC|MS_PRIVATE so its mounts do NOT propagate to the
       host. Pre-existing mounts are never unmounted.
     * Phase 2 mounts are read-only with filesystem-specific safety options
-      (ext4 noload, xfs norecovery, btrfs ro-only, etc.) so journal replay
+      (ext4 noload, xfs norecovery, btrfs rescue=nologreplay, etc.) so journal replay
       and superblock updates are suppressed.
     * argv[0] is honoured only for the JSON 'invocation' field and for help
       text. The three symlinks catos-update / catos-recovery / catos-doctor
@@ -417,6 +530,69 @@ mod tests {
         } else {
             panic!("expected Run");
         }
+    }
+
+    #[test]
+    fn parses_explicit_target_devices() {
+        let r = parse(
+            &args(&[
+                "target",
+                "plan",
+                "--root-device",
+                "/dev/nvme0n1p2",
+                "--root-subvolume",
+                "@",
+                "--esp-device=/dev/nvme0n1p1",
+            ]),
+            default_root(),
+        )
+        .unwrap();
+        let ParseOutcome::Run(args) = r else {
+            panic!("expected run");
+        };
+        assert_eq!(
+            args.target.root_device.as_deref(),
+            Some(Path::new("/dev/nvme0n1p2"))
+        );
+        assert_eq!(args.target.root_subvolume.as_deref(), Some("/@"));
+        assert_eq!(
+            args.target.esp_device.as_deref(),
+            Some(Path::new("/dev/nvme0n1p1"))
+        );
+    }
+
+    #[test]
+    fn explicit_device_options_are_rejected_for_storage_scan() {
+        let error = parse(
+            &args(&["storage", "scan", "--root-device", "/dev/sda2"]),
+            default_root(),
+        )
+        .unwrap_err();
+        assert_eq!(error.exit_code(), exit_code::ARG_ERROR);
+    }
+
+    #[test]
+    fn subvolume_requires_root_device_and_rejects_escape() {
+        let missing_device = parse(
+            &args(&["target", "plan", "--root-subvolume", "@"]),
+            default_root(),
+        )
+        .unwrap_err();
+        assert_eq!(missing_device.exit_code(), exit_code::ARG_ERROR);
+
+        let escape = parse(
+            &args(&[
+                "target",
+                "plan",
+                "--root-device",
+                "/dev/sda2",
+                "--root-subvolume",
+                "../host",
+            ]),
+            default_root(),
+        )
+        .unwrap_err();
+        assert_eq!(escape.exit_code(), exit_code::ARG_ERROR);
     }
 
     #[test]

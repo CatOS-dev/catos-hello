@@ -3,13 +3,14 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::time::Duration;
 
 use crate::model::evidence::Evidence;
 use crate::model::inspection::Warning;
-use crate::model::storage::{BlockDevice, DeviceClass, DiskKind, PartitionRole};
+use crate::model::storage::{BlockDevice, DeviceClass, DiskKind, MountObservation, PartitionRole};
 use crate::parse::{blkid, mountinfo};
 use crate::probe::fs_probe::FilesystemProbe;
+use crate::process::run_trusted_tool;
 
 const BLOCK_ROOT: &str = "/sys/class/block";
 const MOUNTINFO: &str = "/proc/self/mountinfo";
@@ -18,6 +19,7 @@ const LINUX_FILESYSTEM_GUID: &str = "0fc63daf-8483-4772-8e79-3d69d8477de4";
 /// Discover block devices and supplement their signatures with `blkid` when available.
 pub fn discover_devices(fs: &dyn FilesystemProbe) -> (Vec<BlockDevice>, Vec<Warning>) {
     let (mut devices, mut warnings) = discover_sysfs(fs);
+    warnings.extend(supplement_from_udev_database(fs, &mut devices));
     warnings.extend(supplement_with_blkid(fs, &mut devices));
     (devices, warnings)
 }
@@ -28,19 +30,78 @@ pub fn supplement_with_blkid(
     devices: &mut [BlockDevice],
 ) -> Vec<Warning> {
     supplement_with_blkid_using(devices, |device| {
-        let output = Command::new("blkid")
-            .args(["-p", "-o", "udev", &format!("/dev/{}", device.name)])
-            .output()
-            .map_err(|error| format!("could not run blkid for /dev/{}: {error}", device.name))?;
-        if output.status.success() {
+        if device.filesystem.is_some() && device.uuid.is_some() {
+            return Ok(Vec::new());
+        }
+        let path = device
+            .dev_path
+            .as_ref()
+            .ok_or_else(|| format!("no device path for {}", device.name))?;
+        let path = path
+            .to_str()
+            .ok_or_else(|| format!("device path for {} is not UTF-8", device.name))?;
+        let output = run_trusted_tool(
+            "blkid",
+            &["-p", "-o", "udev", path],
+            Duration::from_secs(2),
+            64 * 1024,
+        )?;
+        if output.timed_out {
+            return Err(format!(
+                "{} timed out probing {path}",
+                output.path.display()
+            ));
+        }
+        if output.stdout_truncated || output.stderr_truncated {
+            return Err(format!(
+                "{} output exceeded safety limit for {path}",
+                output.path.display()
+            ));
+        }
+        if output.success() {
             Ok(output.stdout)
         } else {
+            let stderr = String::from_utf8_lossy(&output.stderr);
             Err(format!(
-                "blkid failed for /dev/{} with status {}",
-                device.name, output.status
+                "{} failed for {path} with status {}: {}",
+                output.path.display(),
+                output.status,
+                stderr.trim()
             ))
         }
     })
+}
+
+fn supplement_from_udev_database(
+    fs: &dyn FilesystemProbe,
+    devices: &mut [BlockDevice],
+) -> Vec<Warning> {
+    let mut warnings = Vec::new();
+    for device in devices {
+        let Some(major_minor) = device.major_minor.as_deref() else {
+            continue;
+        };
+        let path = PathBuf::from(format!("/run/udev/data/b{major_minor}"));
+        match fs.read_to_string(&path) {
+            Ok(body) => {
+                let info = blkid::parse_udev(&body);
+                if info.present {
+                    apply_blkid(device, info);
+                    device.evidence.push(Evidence::new(
+                        "UDEV_SIGNATURE",
+                        path.display().to_string(),
+                        "filesystem signature read from udev database",
+                    ));
+                }
+            }
+            Err(crate::error::FsError::NotFound) => {}
+            Err(error) => warnings.push(Warning::new(
+                "UDEV_DATABASE_UNREADABLE",
+                format!("cannot read {}: {error}", path.display()),
+            )),
+        }
+    }
+    warnings
 }
 
 fn discover_sysfs(fs: &dyn FilesystemProbe) -> (Vec<BlockDevice>, Vec<Warning>) {
@@ -105,9 +166,33 @@ fn device_from_sysfs(
     let partition = fs.read_to_string(&partition_path).ok();
     let class = classify(name, partition.is_some());
     let dev_path = PathBuf::from("/dev").join(name);
-    let mount = mounts
+    let major_minor = match (uevent.get("MAJOR"), uevent.get("MINOR")) {
+        (Some(major), Some(minor)) => Some(format!("{major}:{minor}")),
+        _ => fs
+            .read_to_string(&base.join("dev"))
+            .ok()
+            .map(|value| value.trim().to_string()),
+    };
+    let matching_mounts: Vec<&mountinfo::MountInfo> = mounts
         .iter()
-        .find(|entry| entry.is_block_backed() && entry.source == dev_path.to_string_lossy());
+        .filter(|entry| {
+            entry.is_block_backed()
+                && (major_minor
+                    .as_ref()
+                    .is_some_and(|value| entry.major_minor == *value)
+                    || entry.source == dev_path.to_string_lossy())
+        })
+        .collect();
+    let mount = matching_mounts.first().copied();
+    let mount_observations: Vec<MountObservation> = matching_mounts
+        .iter()
+        .map(|entry| MountObservation {
+            mount_point: entry.mount_point.clone(),
+            root: PathBuf::from(&entry.root),
+            fstype: entry.fstype.clone(),
+            read_only: entry.is_read_only(),
+        })
+        .collect();
     let mut evidence = vec![Evidence::new(
         "BLOCK_DEVICE_DISCOVERED",
         base.display().to_string(),
@@ -149,10 +234,7 @@ fn device_from_sysfs(
             .cloned()
             .unwrap_or_else(|| name.to_string()),
         dev_path: Some(dev_path),
-        major_minor: match (uevent.get("MAJOR"), uevent.get("MINOR")) {
-            (Some(major), Some(minor)) => Some(format!("{major}:{minor}")),
-            _ => None,
-        },
+        major_minor,
         parent: if partition.is_some() {
             parent_name(name)
         } else {
@@ -176,13 +258,14 @@ fn device_from_sysfs(
         size_sectors,
         read_only,
         removable,
-        filesystem: None,
+        filesystem: mount.map(|entry| entry.fstype.clone()),
         uuid: None,
         part_uuid: None,
         label: None,
         part_label: None,
         mount_point: mount.map(|entry| entry.mount_point.clone()),
-        mounted_before_session: mount.is_some(),
+        mounts: mount_observations,
+        mounted_before_session: !matching_mounts.is_empty(),
         evidence,
     }
 }
@@ -421,6 +504,7 @@ mod tests {
             label: None,
             part_label: None,
             mount_point: None,
+            mounts: vec![],
             mounted_before_session: false,
             evidence: Vec::new(),
         }
@@ -452,7 +536,7 @@ mod tests {
         let (devices, _) = discover_sysfs(&fs);
         assert_eq!(devices.len(), 3);
         assert_eq!(devices[1].parent, "nvme0n1");
-        assert_eq!(devices[2].filesystem, None);
+        assert_eq!(devices[2].filesystem.as_deref(), Some("btrfs"));
         assert_eq!(devices[2].mount_point, Some(PathBuf::from("/")));
     }
 
@@ -556,5 +640,19 @@ mod tests {
         assert!(warnings.is_empty());
         assert_eq!(devices[0].partition_role, PartitionRole::Esp);
         assert_eq!(devices[1].partition_role, PartitionRole::LinuxFilesystem);
+    }
+
+    #[test]
+    fn udev_database_is_used_before_privileged_blkid() {
+        let fs = FixtureFilesystem::new().file(
+            "/run/udev/data/b8:1",
+            "E:ID_FS_TYPE=ext4\nE:ID_FS_UUID=root-uuid\n",
+        );
+        let mut devices = vec![device("sda1")];
+        devices[0].major_minor = Some("8:1".into());
+        let warnings = supplement_from_udev_database(&fs, &mut devices);
+        assert!(warnings.is_empty());
+        assert_eq!(devices[0].filesystem.as_deref(), Some("ext4"));
+        assert_eq!(devices[0].uuid.as_deref(), Some("root-uuid"));
     }
 }

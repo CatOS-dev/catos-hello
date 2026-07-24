@@ -121,16 +121,19 @@ impl SyscallError {
             (_, 16) => MountErrorKind::DeviceBusy,
             // EEXIST — mountpoint already has a mount we did not create.
             ("mount", 17) => MountErrorKind::AlreadyMounted,
+            ("mkdir", 17) => MountErrorKind::UnsafeTargetPath,
             // EXDEV — cross-device move / invalid bind.
             ("mount", 18) => MountErrorKind::InvalidMountOption,
             // ENODEV — fstype not registered in the kernel.
             ("mount", 19) => MountErrorKind::UnsupportedFilesystem,
             // ENOTDIR — target path's parent is not a directory.
             ("mount", 20) => MountErrorKind::UnsafeTargetPath,
+            ("mkdir", 20) => MountErrorKind::UnsafeTargetPath,
             // EINVAL — bad option string, bad flags, or wrong superblock
             // signature. The most common real cause is a wrong fstype
             // argument; second most common is a bad mount option.
             ("mount", 22) => MountErrorKind::InvalidMountOption,
+            ("mkdir", 22) => MountErrorKind::UnsafeTargetPath,
             ("umount2", 22) => MountErrorKind::UnmountFailed,
             ("unshare", 22) => MountErrorKind::NamespaceUnavailable,
             // ENOSPC — namespace quota or journal space.
@@ -197,12 +200,10 @@ pub fn mount(
     })?;
     let fstype_c = opt_cstr(fstype)?;
 
-    // Convert data string to a raw pointer. Empty data → NULL (the kernel
-    // treats an empty string and NULL differently for some filesystems).
-    let data_c = match data {
-        Some(d) if !d.is_empty() => CString::new(d).ok(),
-        _ => None,
-    };
+    // Convert data string to a raw pointer. Invalid C strings must fail
+    // closed: silently turning `ro,noload,...` into NULL would drop the
+    // filesystem-specific no-replay options and could write to the target.
+    let data_c = opt_cstr_with_errno(data, 22)?;
 
     let rc = unsafe {
         syscall(
@@ -280,6 +281,13 @@ pub fn unshare(flags: i32) -> Result<(), SyscallError> {
 }
 
 fn opt_cstr(s: Option<&str>) -> Result<Option<CString>, SyscallError> {
+    opt_cstr_with_errno(s, 2)
+}
+
+fn opt_cstr_with_errno(
+    s: Option<&str>,
+    invalid_errno: i32,
+) -> Result<Option<CString>, SyscallError> {
     match s {
         Some(inner) => {
             // Empty string → treat as None (NULL), matching kernel semantics
@@ -289,7 +297,7 @@ fn opt_cstr(s: Option<&str>) -> Result<Option<CString>, SyscallError> {
             } else {
                 CString::new(inner).map(Some).map_err(|_| SyscallError {
                     syscall: "mount",
-                    errno: 2,
+                    errno: invalid_errno,
                 })
             }
         }
@@ -323,6 +331,9 @@ mod tests {
             ("mount", 17, MountErrorKind::AlreadyMounted),
             ("mount", 19, MountErrorKind::UnsupportedFilesystem),
             ("mount", 20, MountErrorKind::UnsafeTargetPath),
+            ("mkdir", 17, MountErrorKind::UnsafeTargetPath),
+            ("mkdir", 20, MountErrorKind::UnsafeTargetPath),
+            ("mkdir", 22, MountErrorKind::UnsafeTargetPath),
             ("mount", 22, MountErrorKind::InvalidMountOption),
             ("unshare", 22, MountErrorKind::NamespaceUnavailable),
             ("unshare", 28, MountErrorKind::NamespaceUnavailable),
@@ -383,5 +394,14 @@ mod tests {
         let s = format!("{e}");
         assert!(s.contains("mount"));
         assert!(s.contains("13"));
+    }
+
+    /// A NUL in the option string must not degrade to a NULL data pointer,
+    /// because that would discard noload/rescue=nologreplay/norecovery.
+    #[test]
+    fn mount_data_with_nul_is_rejected() {
+        let err = opt_cstr_with_errno(Some("ro,noload\0discard"), 22).unwrap_err();
+        assert_eq!(err.errno, 22);
+        assert_eq!(err.classify(), MountErrorKind::InvalidMountOption);
     }
 }

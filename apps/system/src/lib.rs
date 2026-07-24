@@ -23,6 +23,7 @@ pub mod output;
 pub mod parse;
 pub mod phase2;
 pub mod probe;
+pub mod process;
 pub mod system_root;
 
 pub use error::{exit_code, Error, FsError};

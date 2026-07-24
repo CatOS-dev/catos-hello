@@ -173,8 +173,10 @@ fn run_phase2(invocation: Invocation, args: crate::cli::CliArgs) -> i32 {
 
     let outcome_result = match args.command {
         crate::cli::Command::StorageScan => crate::phase2::run_storage_scan(&args.root),
-        crate::cli::Command::TargetPlan => crate::phase2::run_target_plan(&args.root),
-        crate::cli::Command::TargetMount => crate::phase2::run_target_mount(&args.root),
+        crate::cli::Command::TargetPlan => crate::phase2::run_target_plan(&args.root, &args.target),
+        crate::cli::Command::TargetMount => {
+            crate::phase2::run_target_mount(&args.root, &args.target)
+        }
         // Phase-1 commands never reach here (is_phase1() routes them away).
         other => unreachable!("run_phase2 called with phase-1 command {other:?}"),
     };
@@ -206,8 +208,27 @@ fn run_phase2(invocation: Invocation, args: crate::cli::CliArgs) -> i32 {
             }
         }
         Err(e) => {
-            eprintln!("{invocation}: {e}");
-            e.exit_code()
+            let exit = e.exit_code();
+            if args.json {
+                match crate::output::render_phase2_error_json(
+                    &e,
+                    invocation.as_str(),
+                    args.root.as_path(),
+                )
+                .and_then(|json| {
+                    write_json_stdout(&json)
+                        .map_err(|error| Error::SerializeFailed(format!("stdout write: {error}")))
+                }) {
+                    Ok(()) => exit,
+                    Err(render_error) => {
+                        eprintln!("{invocation}: {render_error}");
+                        render_error.exit_code()
+                    }
+                }
+            } else {
+                eprintln!("{invocation}: {e}");
+                exit
+            }
         }
     }
 }

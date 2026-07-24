@@ -14,7 +14,7 @@
 //! | fstype           | safe option set                              | why                                                                                              | kernel source                                                                                                       |
 //! |------------------|----------------------------------------------|--------------------------------------------------------------------------------------------------|---------------------------------------------------------------------------------------------------------------------|
 //! | ext2 / ext3 / ext4 | `ro,noload`                                 | `noload` skips `ext4_load_journal` so a dirty journal is NOT replayed. `ro` alone replays it.    | `fs/ext4/super.c::ext4_fill_super`, `EXT4_MOUNT_NOLOAD`                                                             |
-//! | btrfs            | `ro` (+ `subvol=`/`subvolid=` if non-default) | `btrfs_recover_log_trees` is gated on `!sb_rdonly(sb)` so log replay is skipped on RO.         | `fs/btrfs/disk-io.c::open_ctree`, `fs/btrfs/tree-log.c::btrfs_recover_log_trees`                                    |
+//! | btrfs            | `ro,rescue=nologreplay` (+ `subvol=`/`subvolid=`) | suppresses tree-log replay; standalone `nologreplay` was removed in Linux 6.16. | Btrfs mount-option documentation / `fs/btrfs/fs_context.c` |
 //! | xfs              | `ro,norecovery`                              | `norecovery` sets `XFS_MOUNT_NORECOVERY`, skipping `xlog_recover`. Plain `ro` replays the log.   | `fs/xfs/xfs_super.c::xfs_fs_fill_super`, `fs/xfs/xfs_log.c::xlog_recover`                                           |
 //! | f2fs             | `ro,norecovery,disable_roll_forward`         | both options together skip `f2fs_recover_fsync_data` and roll-forward recovery.                 | `fs/f2fs/super.c::f2fs_fill_super`, `CP_DISABLE_ROLL_FORWARD` flag                                                 |
 //! | vfat / fat       | `ro`                                         | no journal, no recovery path.                                                                    | `fs/fat/inode.c::fat_fill_super`                                                                                    |
@@ -81,10 +81,13 @@ impl FstypePolicy {
                 failure_modes: vec!["on a dirty journal the visible data is the pre-journal state"],
             },
             "btrfs" => FstypePolicy::Safe {
-                // `ro` is sufficient: btrfs_recover_log_trees is gated on
-                // `!sb_rdonly(sb)`. subvol/subvolid are pure lookups.
-                options: vec![],
-                failure_modes: vec![],
+                // Btrfs replays the tree log even for a read-only mount.
+                // Linux 6.16 removed the deprecated standalone
+                // `nologreplay`; the supported form is rescue=nologreplay.
+                options: vec!["rescue=nologreplay"],
+                failure_modes: vec![
+                    "pending tree-log updates are deliberately not replayed; the visible state may be older",
+                ],
             },
             "xfs" => FstypePolicy::Safe {
                 options: vec!["norecovery"],
@@ -317,6 +320,13 @@ pub fn build_plan(inputs: PlanInputs<'_>) -> Result<MountPlan, MountError> {
     });
 
     for entry in sorted {
+        if entry.noauto {
+            rationale.push(format!(
+                "skipped noauto entry: target={} (explicit selection is required)",
+                entry.target
+            ));
+            continue;
+        }
         // Skip kinds we never mount.
         match entry.kind {
             FstabEntryKind::Swap => {
@@ -408,32 +418,30 @@ pub fn build_plan(inputs: PlanInputs<'_>) -> Result<MountPlan, MountError> {
             }
         };
 
-        // Compose options: ro + fstype safety + user-supplied subvol
-        // (preserved from fstab because btrfs root identification depends
-        // on it). Any rw-style options in the original fstab are stripped.
+        // Compose options from a strict allow-list. Recovery code must not
+        // forward arbitrary fstab options such as recovery, clear_cache,
+        // discard, journal_dev, logdev or rtdev. For btrfs we preserve only
+        // subvol=/subvolid= because selecting the intended root depends on
+        // them. Everything else is reported as deliberately ignored.
         let mut options = vec!["ro".to_string()];
         options.extend(fstype_opts.iter().cloned());
         for o in &entry.options {
-            let lower = o.as_str();
-            if lower == "rw" || lower == "defaults" || lower == "noauto" || lower == "nofail" {
-                continue;
-            }
-            if lower.starts_with("x-systemd.") {
-                continue;
-            }
-            if !options.iter().any(|existing| existing == lower) {
-                options.push(lower.to_string());
+            if is_allowed_fstab_mount_option(&entry.fstype, o)
+                && !options.iter().any(|existing| existing == o)
+            {
+                options.push(o.clone());
+            } else if !is_ignored_bookkeeping_option(o) {
+                rationale.push(format!(
+                    "ignored unsafe or unnecessary fstab option for {}: {}",
+                    entry.target, o
+                ));
             }
         }
 
-        // Build target path under session_root. fstab targets are
-        // absolute ("/", "/boot/efi"); we strip the leading "/" and join.
-        let relative = entry.target.trim_start_matches('/');
-        let target_path = if relative.is_empty() {
-            target_root.clone()
-        } else {
-            target_root.join(relative)
-        };
+        // Build the target path under session_root with lexical confinement.
+        // fstab is untrusted input in a damaged system; `/../../host` must
+        // never escape the controlled target directory.
+        let target_path = safe_target_path(&target_root, &entry.target)?;
 
         // For btrfs, surface the subvol as the plan-level root_subvolume
         // when this is the root entry. This is how the session and the
@@ -533,10 +541,155 @@ pub fn build_plan(inputs: PlanInputs<'_>) -> Result<MountPlan, MountError> {
     })
 }
 
+/// Build a one-device, one-step plan used for short-lived candidate
+/// inspection. `selector` is restricted to a btrfs `subvol=` or
+/// `subvolid=` option; arbitrary mount options are never accepted here.
+pub fn build_probe_plan(
+    session_root: PathBuf,
+    source: &str,
+    fstype: &str,
+    selector: Option<&str>,
+) -> Result<MountPlan, MountError> {
+    let policy = FstypePolicy::for_fstype(fstype);
+    let (policy_options, failure_modes) = match policy {
+        FstypePolicy::Safe {
+            options,
+            failure_modes,
+        } => (options, failure_modes),
+        FstypePolicy::Refused { kind, reason } => {
+            return Err(MountError {
+                kind,
+                message: reason.to_string(),
+                device_or_path: Some(source.to_string()),
+                errno: None,
+                completed_steps: vec![],
+                cleanup_complete: true,
+                residual_mounts: vec![],
+            });
+        }
+    };
+
+    let mut options = vec!["ro".to_string()];
+    options.extend(policy_options.into_iter().map(str::to_string));
+    if let Some(selector) = selector {
+        if fstype != "btrfs" || !valid_btrfs_selector(selector) {
+            return Err(MountError {
+                kind: MountErrorKind::InvalidMountOption,
+                message: "candidate probe selector is not a safe btrfs subvolume selector".into(),
+                device_or_path: Some(selector.to_string()),
+                errno: None,
+                completed_steps: vec![],
+                cleanup_complete: true,
+                residual_mounts: vec![],
+            });
+        }
+        options.push(selector.to_string());
+    }
+
+    let target_root = session_root.join("target");
+    Ok(MountPlan {
+        session_root,
+        target_root: target_root.clone(),
+        namespace: NamespaceState::PrivateNamespace,
+        root_device: Some(source.to_string()),
+        root_subvolume: selector
+            .and_then(|value| value.strip_prefix("subvol="))
+            .map(str::to_string),
+        extra_partitions: vec![],
+        steps: vec![MountStep {
+            order: 10,
+            source: source.to_string(),
+            fstype: fstype.to_string(),
+            target: target_root,
+            options,
+            rationale: "temporary read-only candidate inspection".into(),
+            depends_on: vec![],
+            failure_modes: failure_modes.into_iter().map(str::to_string).collect(),
+            evidence: vec![Evidence::new(
+                "PROBE_MOUNT",
+                source,
+                "short-lived read-only candidate probe",
+            )],
+        }],
+        selection_rationale: vec!["explicit candidate probe plan".into()],
+        safety_constraints: vec![
+            "read-only mount".into(),
+            "filesystem recovery and log replay disabled".into(),
+            "mount is cleaned immediately after inspection".into(),
+        ],
+        warnings: vec![],
+    })
+}
+
+fn valid_btrfs_selector(selector: &str) -> bool {
+    if selector.contains([',', '\0']) {
+        return false;
+    }
+    if let Some(path) = selector.strip_prefix("subvol=") {
+        return path.starts_with('/') && !path.split('/').any(|part| part == "..");
+    }
+    selector
+        .strip_prefix("subvolid=")
+        .is_some_and(|id| !id.is_empty() && id.bytes().all(|byte| byte.is_ascii_digit()))
+}
+
 /// Convenience predicate: does this path denote the target root inside
 /// the session? Used by `session` to find the root step.
 pub fn is_target_root(target: &Path, session_root: &Path) -> bool {
     target == session_root.join("target")
+}
+
+fn is_ignored_bookkeeping_option(option: &str) -> bool {
+    matches!(option, "ro" | "rw" | "defaults" | "noauto" | "nofail")
+        || option.starts_with("x-systemd.")
+}
+
+fn is_allowed_fstab_mount_option(fstype: &str, option: &str) -> bool {
+    match fstype {
+        "btrfs" => option.starts_with("subvol=") || option.starts_with("subvolid="),
+        _ => false,
+    }
+}
+
+fn safe_target_path(target_root: &Path, target: &str) -> Result<PathBuf, MountError> {
+    use std::path::Component;
+
+    let path = Path::new(target);
+    if !path.is_absolute() && !target.is_empty() {
+        return Err(unsafe_target_error(target, "fstab target is not absolute"));
+    }
+
+    let mut relative = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::RootDir | Component::CurDir => {}
+            Component::Normal(part) => relative.push(part),
+            Component::ParentDir | Component::Prefix(_) => {
+                return Err(unsafe_target_error(
+                    target,
+                    "fstab target contains an escaping path component",
+                ));
+            }
+        }
+    }
+
+    Ok(if relative.as_os_str().is_empty() {
+        target_root.to_path_buf()
+    } else {
+        target_root.join(relative)
+    })
+}
+
+fn unsafe_target_error(target: &str, message: &str) -> MountError {
+    MountError {
+        kind: MountErrorKind::UnsafeTargetPath,
+        message: message.to_string(),
+        device_or_path: Some(target.to_string()),
+        errno: None,
+        completed_steps: vec![],
+        cleanup_complete: true,
+        residual_mounts: vec![],
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -567,6 +720,7 @@ mod tests {
             label: Some("root".into()),
             part_label: None,
             mount_point: None,
+            mounts: vec![],
             mounted_before_session: false,
             evidence: vec![],
         }
@@ -601,6 +755,7 @@ mod tests {
             label: Some("EFI".into()),
             part_label: None,
             mount_point: None,
+            mounts: vec![],
             mounted_before_session: false,
             evidence: vec![],
         }
@@ -675,6 +830,7 @@ mod tests {
         let root = &plan.steps[0];
         // rw must be stripped; ro added; subvol preserved.
         assert!(root.options.contains(&"ro".into()));
+        assert!(root.options.contains(&"rescue=nologreplay".into()));
         assert!(!root.options.contains(&"rw".into()));
         assert!(
             root.options.iter().any(|o| o == "subvol=/@"),
@@ -682,6 +838,97 @@ mod tests {
             root.options
         );
         assert_eq!(plan.root_subvolume.as_deref(), Some("/@"));
+        assert!(!root.options.iter().any(|o| o.starts_with("compress=")));
+        assert!(!root.options.contains(&"relatime".into()));
+    }
+
+    /// A damaged fstab must not escape the controlled mount root.
+    #[test]
+    fn fstab_target_parent_escape_is_rejected() {
+        let dev = ext4_root_device();
+        let fstab = vec![FstabEntry {
+            source: FstabSource::Uuid(dev.uuid.clone().unwrap()),
+            target: "/../../host".into(),
+            fstype: "ext4".into(),
+            options: vec!["defaults".into()],
+            dump: 0,
+            pass: 1,
+            kind: FstabEntryKind::Root,
+            noauto: false,
+            nofail: false,
+            has_systemd_options: false,
+        }];
+        let err = build_plan(PlanInputs {
+            session_root: PathBuf::from("/run/catos-system/sessions/abc"),
+            devices: &[dev],
+            fstab: &fstab,
+            include_boot: false,
+        })
+        .unwrap_err();
+        assert_eq!(err.kind, MountErrorKind::UnsafeTargetPath);
+    }
+
+    /// User fstab options are not an execution policy. Only the btrfs
+    /// subvolume selectors needed to locate the root may pass through.
+    #[test]
+    fn unsafe_fstab_options_are_not_forwarded() {
+        let dev = btrfs_root_device();
+        let fstab = vec![FstabEntry {
+            source: FstabSource::Uuid(dev.uuid.clone().unwrap()),
+            target: "/".into(),
+            fstype: "btrfs".into(),
+            options: vec![
+                "subvol=/@".into(),
+                "clear_cache".into(),
+                "recovery".into(),
+                "discard".into(),
+            ],
+            dump: 0,
+            pass: 0,
+            kind: FstabEntryKind::Root,
+            noauto: false,
+            nofail: false,
+            has_systemd_options: false,
+        }];
+        let plan = build_plan(PlanInputs {
+            session_root: PathBuf::from("/run/catos-system/sessions/abc"),
+            devices: &[dev],
+            fstab: &fstab,
+            include_boot: false,
+        })
+        .expect("plan");
+        let options = &plan.steps[0].options;
+        assert!(options.contains(&"subvol=/@".into()));
+        assert!(options.contains(&"rescue=nologreplay".into()));
+        assert!(!options.contains(&"clear_cache".into()));
+        assert!(!options.contains(&"recovery".into()));
+        assert!(!options.contains(&"discard".into()));
+    }
+
+    #[test]
+    fn probe_plan_uses_no_replay_options() {
+        let plan = build_probe_plan(
+            PathBuf::from("/run/catos-system/sessions/probe"),
+            "/dev/sda2",
+            "btrfs",
+            Some("subvolid=5"),
+        )
+        .unwrap();
+        assert!(plan.steps[0].options.contains(&"ro".into()));
+        assert!(plan.steps[0].options.contains(&"rescue=nologreplay".into()));
+        assert!(plan.steps[0].options.contains(&"subvolid=5".into()));
+    }
+
+    #[test]
+    fn probe_plan_rejects_unsafe_selector() {
+        let err = build_probe_plan(
+            PathBuf::from("/run/catos-system/sessions/probe"),
+            "/dev/sda2",
+            "btrfs",
+            Some("subvol=/@,clear_cache"),
+        )
+        .unwrap_err();
+        assert_eq!(err.kind, MountErrorKind::InvalidMountOption);
     }
 
     /// xfs root must get `norecovery`. Without it a dirty xfs log replays
@@ -808,6 +1055,50 @@ mod tests {
             .selection_rationale
             .iter()
             .any(|r| r.contains("skipped swap")));
+    }
+
+    #[test]
+    fn noauto_boot_entry_is_not_mounted() {
+        let root_dev = ext4_root_device();
+        let esp_dev = esp_device();
+        let fstab = vec![
+            FstabEntry {
+                source: FstabSource::Uuid(root_dev.uuid.clone().unwrap()),
+                target: "/".into(),
+                fstype: "ext4".into(),
+                options: vec![],
+                dump: 0,
+                pass: 1,
+                kind: FstabEntryKind::Root,
+                noauto: false,
+                nofail: false,
+                has_systemd_options: false,
+            },
+            FstabEntry {
+                source: FstabSource::Uuid(esp_dev.uuid.clone().unwrap()),
+                target: "/boot/efi".into(),
+                fstype: "vfat".into(),
+                options: vec!["noauto".into()],
+                dump: 0,
+                pass: 2,
+                kind: FstabEntryKind::Boot,
+                noauto: true,
+                nofail: false,
+                has_systemd_options: false,
+            },
+        ];
+        let plan = build_plan(PlanInputs {
+            session_root: PathBuf::from("/run/catos-system/sessions/abc"),
+            devices: &[root_dev, esp_dev],
+            fstab: &fstab,
+            include_boot: true,
+        })
+        .unwrap();
+        assert_eq!(plan.steps.len(), 1);
+        assert!(plan
+            .selection_rationale
+            .iter()
+            .any(|item| item.contains("skipped noauto")));
     }
 
     /// A refused fstype (zfs, ntfs3, ...) must produce a structured

@@ -153,6 +153,11 @@ pub struct BlockDevice {
     /// "not mounted as far as we can see".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mount_point: Option<PathBuf>,
+    /// Every mount observed for this device. `mount_point` remains the
+    /// primary/first mount for compatibility; this vector preserves
+    /// multiple Btrfs subvolumes and repeated mounts.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mounts: Vec<MountObservation>,
     /// Whether the device was mounted BEFORE this program started. If
     /// true, the device must NEVER be unmounted by our mount session.
     /// We track this as an explicit field (not derived from `mount_point`)
@@ -163,6 +168,14 @@ pub struct BlockDevice {
     /// Sub-probe evidence: why we classified this device the way we did.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub evidence: Vec<Evidence>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MountObservation {
+    pub mount_point: PathBuf,
+    pub root: PathBuf,
+    pub fstype: String,
+    pub read_only: bool,
 }
 
 impl BlockDevice {
@@ -389,6 +402,10 @@ pub struct StorageReport {
     pub root_candidates: Vec<RootCandidate>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub esp_candidates: Vec<EspCandidate>,
+    /// Btrfs subvolumes observed while probing an unmounted filesystem.
+    /// Empty when no btrfs filesystem was probed or the helper was absent.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub btrfs_subvolumes: Vec<BtrfsSubvolume>,
     /// Non-fatal notices from the discovery layer (e.g. "blkid not found,
     /// continuing with sysfs only").
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -480,6 +497,7 @@ mod tests {
             label: None,
             part_label: None,
             mount_point: None,
+            mounts: vec![],
             mounted_before_session: false,
             evidence: vec![],
         };
