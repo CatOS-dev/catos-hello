@@ -59,7 +59,7 @@ QString InstallAppsTab::locateDesktopYaml() const
 {
     const QStringList candidates = {
         QStringLiteral("/var/lib/catos-hello/desktop.yaml"),
-        QDir::currentPath() + QStringLiteral("/desktop.yaml"),
+        QDir::currentPath() + QStringLiteral("/data/desktop.yaml"),
         QCoreApplication::applicationDirPath() + QStringLiteral("/desktop.yaml")
     };
 

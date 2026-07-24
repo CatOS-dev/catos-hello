@@ -2,7 +2,7 @@
 #include <QTemporaryFile>
 #include <QFile>
 #include <QTextStream>
-#include "../RepoListWindow.h"
+#include "RepoListWindow.h"
 
 class TestRepoListWindow : public QObject
 {

@@ -43,7 +43,7 @@ QString TipsTab::locateTipsHtml(const QString& uiLang) const
 
     const QStringList baseDirs = {
         QStringLiteral("/var/lib/catos-hello/news"),
-        QDir::currentPath() + QStringLiteral("/news"),
+        QDir::currentPath() + QStringLiteral("/data/news"),
         QCoreApplication::applicationDirPath() + QStringLiteral("/news")
     };
 
