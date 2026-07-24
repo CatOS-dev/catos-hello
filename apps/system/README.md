@@ -41,8 +41,12 @@ catos-system --version
 catos-system --help
 ```
 
-The three symlinks accept the same subcommands and produce identical probe
-results:
+The three symlinks accept the same subcommands and use the same probe core.
+The selected subcommand controls which report sections are rendered:
+
+- `environment`: runtime facts only
+- `capabilities`: capability results only
+- `inspect`: runtime, capabilities, and target inspection
 
 ```
 catos-doctor inspect --json
@@ -69,7 +73,7 @@ Top-level shape (all keys are English, stable, and version-pinned):
 
 ```json
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "programVersion": "0.1.0",
   "invocation": "catos-system",
   "targetRoot": "/",
@@ -85,15 +89,15 @@ Top-level shape (all keys are English, stable, and version-pinned):
   "target": {
     "root": "/",
     "os_release": { "name": "...", "id": "...", "id_like": "...", "version": "...", "pretty_name": "...", "raw_fields": [ ["KEY","VALUE"], ... ] },
-    "has_fstab": false,
-    "has_crypttab": false,
-    "has_pacman_db": false,
-    "has_usr": true,
-    "has_boot": true,
-    "has_efi": false,
-    "has_boot_efi": false,
+    "has_fstab": "present",
+    "has_crypttab": "absent",
+    "has_pacman_db": "present",
+    "has_usr": "present",
+    "has_boot": "present",
+    "has_efi": "absent",
+    "has_boot_efi": "absent",
     "is_catos_target": { "status": "unknown", "evidence": [ ... ] },
-    "tool_paths": [ { "name": "pacman", "path": "/usr/bin/pacman", "exists": true, "executable": true }, ... ]
+    "tool_paths": [ { "name": "pacman", "path": "/usr/bin/pacman", "status": "available", "evidence": [ ... ] }, ... ]
   },
   "warnings": [ { "code": "PROBE_WARNING", "message": "..." } ]
 }
@@ -101,18 +105,18 @@ Top-level shape (all keys are English, stable, and version-pinned):
 
 Stable invariants of the JSON contract:
 
-1. `schemaVersion` is currently `1`. It will only change on a
+1. `schemaVersion` is currently `2`. It will only change on a
    backward-incompatible report change.
-2. Top-level keys (`schemaVersion`, `programVersion`, `invocation`,
-   `targetRoot`, `runtime`, `capabilities`, `target`, `warnings`) are
-   guaranteed to be present.
+2. `schemaVersion`, `programVersion`, `invocation`, `targetRoot`, and
+   `warnings` are always present. `runtime`, `capabilities`, and `target` are
+   emitted according to the selected subcommand.
 3. Enum values are `snake_case` and stable:
    - `Detection.status`: `detected` | `not_detected` | `unknown`
    - `CapabilityStatus`: `available` | `unavailable` | `unknown`
    - `PrimaryRuntimeMode`: `running_system` | `chroot` | `live_environment`
      | `initramfs` | `unknown`
    - `CapabilityKind.name`: `read_target_root` | `read_proc` | `read_sysfs`
-     | `read_block_sysfs` | `access_dev` | `run_external_commands`
+     | `read_block_sysfs` | `access_dev` | `shell_available`
      | `mount_operations_possible` | `write_efivars_possible`
      | `systemd_available` | `pacman_present_in_target`
      | `mkinitcpio_present_in_target` | `bootloadu_present_in_target`
@@ -127,6 +131,13 @@ Stable invariants of the JSON contract:
 7. `targetRoot` is the exact string the user supplied via `--root` (default
    `/`); it is not canonicalised, so a user who passes `/mnt/` sees
    `/mnt/` in the report.
+8. Target-side presence and tool status are three-state. Permission errors,
+   I/O errors, and unsafe path resolution are represented as `unknown`, not
+   collapsed into `false` or `missing`.
+
+Schema 2 intentionally replaces the initial internal schema 1 contract. It
+introduces subcommand-specific sections, three-state target presence, and
+three-state target tool results.
 
 A formal JSON Schema file is intentionally **not** provided in phase 1. The
 above is the contract. If the report grows enough that machine validation
@@ -141,14 +152,14 @@ src/
   entry.rs           multicall argv[0] dispatch + top-level wiring
   cli.rs             hand-rolled arg parser + exit codes
   error.rs           Error + FsError + stable exit codes
-  system_root.rs     SystemRoot abstraction (single chokepoint for /mnt-style roots)
+  system_root.rs     validated display/canonical target-root paths
   model/             pure data + serde; no I/O
     evidence.rs        Evidence: code/source/message/value
     runtime.rs         Detection, DetectionStatus, RuntimeFacts, PrimaryRuntimeMode
     capability.rs      Capability, CapabilityKind, CapabilityStatus
     inspection.rs      TargetInspection, OsRelease, ToolPath, Warning, InspectionReport
   probe/             reads the world via FilesystemProbe trait
-    fs_probe.rs        FilesystemProbe trait + RealFilesystem + FixtureFilesystem
+    fs_probe.rs        filesystem abstraction + confined target-root access
     runtime.rs         detect_runtime + six detectors (initramfs/chroot/live/snapshot/systemd/ro)
     target.rs          inspect_target + os-release parsing + tool probes
     capability.rs      detect_capabilities (16 phase-1 capabilities)
@@ -165,6 +176,11 @@ Layering rules:
   optional value).
 - Probes that cannot gather enough evidence MUST return `Unknown`, never
   `NotDetected` and never a guess.
+- Real target-root reads use Linux `openat2(2)` with `RESOLVE_IN_ROOT` and
+  `RESOLVE_NO_MAGICLINKS`. Absolute symlinks are interpreted inside the
+  selected target root, and magic-link escapes are rejected. Kernels without
+  `openat2` are handled fail-closed: target-root probes return `unknown`
+  instead of falling back to a race-prone pathname check.
 
 ## Build
 
@@ -236,9 +252,16 @@ Three surfaces, all wired into CTest when `-DBUILD_TESTS=ON`:
 
 | Test                              | What it guards against                                |
 |-----------------------------------|-------------------------------------------------------|
-| `catos-system-cargo-test`         | Rust unit + integration (63 tests). Includes probe fixtures simulating initramfs, chroot, LiveCD, container, snapshot, and read-only-root scenarios; SystemRoot path edge cases; CLI exit codes; JSON purity; multicall single-inode invariant. |
+| `catos-system-cargo-test`         | Rust unit + integration (108 tests at this revision). Includes probe fixtures simulating initramfs, chroot, LiveCD, container, snapshot, capability and permission states; target-root path and symlink confinement; CLI exit codes; JSON purity; multicall single-inode invariant. |
 | `catos-system-static-check`       | The musl binary silently regressing to dynamic linking (would break initramfs and recovery use). |
-| `catos-system-initramfs-smoke`    | The musl binary refusing to start in a minimal Linux user space without systemd, dbus, network, or `/usr`. **Opt-in**: `-DCATOS_SYSTEM_INITRAMFS_SMOKE=ON`. Requires `qemu-system-x86_64`, a kernel image, and `busybox`. Uses KVM acceleration when `/dev/kvm` is writable; falls back to TCG otherwise. Skips cleanly with exit code 77 when prerequisites are missing. |
+| `catos-system-initramfs-smoke-bare` | The static binary refusing to start in a minimal Linux user space without systemd, dbus, network, or `/usr`. |
+| `catos-system-initramfs-smoke-with-marker` | Runtime detection failing to identify a mkinitcpio-style initramfs containing `/etc/initrd-release`. |
+
+The two QEMU tests are opt-in through
+`-DCATOS_SYSTEM_INITRAMFS_SMOKE=ON`. They require
+`qemu-system-x86_64`, a kernel image, and static `busybox`; they use KVM when
+available, otherwise TCG, and skip with exit code 77 when prerequisites are
+missing.
 
 Run them:
 
@@ -272,7 +295,7 @@ On this host (rustc 1.96.1, x86_64-unknown-linux-musl):
 
 ```
 $ stat -c %s <binary>
-455224
+467512
 $ file <binary>
 ... static-pie linked ... stripped
 $ readelf -l <binary> | grep INTERP     # (empty)
