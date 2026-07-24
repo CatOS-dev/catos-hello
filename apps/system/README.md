@@ -43,7 +43,9 @@ catos-system inspect      [--root PATH] [--json]
 # Phase 2 — read-only storage discovery + safe RO target mount
 catos-system storage scan                [--root PATH] [--json]
 catos-system target plan                 [--root PATH] [--json]
+    [--root-device /dev/...] [--root-subvolume PATH] [--esp-device /dev/...]
 catos-system target mount                [--root PATH] [--json]
+    [--root-device /dev/...] [--root-subvolume PATH] [--esp-device /dev/...]
 
 catos-system --version
 catos-system --help
@@ -56,16 +58,20 @@ rendered:
 - `environment`: runtime facts only
 - `capabilities`: capability results only
 - `inspect`: runtime, capabilities, and target inspection
-- `storage scan`: walks `/sys/class/block`, blkid, and `/proc/self/mountinfo`;
-  emits a `StorageReport` of discovered devices, root candidates, ESP
-  candidates, and ambiguities.
-- `target plan`: reads `<root>/etc/fstab`, discovers devices, builds a
-  `MountPlan` with per-fstype read-only safety options applied; **does
-  not execute any mount**.
-- `target mount`: same as `target plan` then executes the plan inside a
-  private mount namespace (`unshare(CLONE_NEWNS)` + `MS_REC|MS_PRIVATE`
-  on `/`), mounts each step read-only, and rolls back in reverse order
-  on completion or failure.
+- `storage scan`: walks `/sys/class/block`, `/proc/self/mountinfo`, the udev
+  database, and a fixed trusted `blkid` path. With `CAP_SYS_ADMIN`, unmounted
+  candidates are briefly mounted in a private namespace for content-based
+  root/ESP identification. Btrfs is mounted at `subvolid=5`, subvolumes are
+  enumerated, and obvious snapshots are excluded from root candidates.
+- `target plan`: reads the selected target's own fstab through confined
+  `openat2` access and builds a `MountPlan`; **does not leave any mount**.
+  For an unmounted LiveCD/initramfs target, `--root-device` performs a
+  short-lived read-only probe to obtain that device's fstab. Optional
+  `--root-subvolume` and `--esp-device` override ambiguous choices.
+- `target mount`: performs a one-shot `mount -> inspect -> cleanup` flow in
+  a private mount namespace (`unshare(CLONE_NEWNS)` plus
+  `MS_REC|MS_PRIVATE`). The returned session is the truthful final state
+  (`finished` or `cleanup_incomplete`), not a stale active snapshot.
 
 ```
 catos-doctor inspect --json
@@ -148,7 +154,10 @@ Stable invariants of the JSON contract:
 5. Adding fields to nested objects is allowed and is considered
    backward-compatible. Consumers MUST ignore unknown fields.
 6. JSON output never contains ANSI colour escapes, log lines, or progress
-   text. Errors are written to stderr; stdout in `--json` mode is pure JSON.
+   text. Phase-1 argument/probe errors use stderr. Phase-2 commands in
+   `--json` mode return a structured `{ "kind": "error", ... }` envelope
+   on stdout, preserving mount errno, completed steps, cleanup status, and
+   residual mounts.
 7. `targetRoot` is the exact string the user supplied via `--root` (default
    `/`); it is not canonicalised, so a user who passes `/mnt/` sees
    `/mnt/` in the report.
@@ -173,6 +182,7 @@ src/
   entry.rs           multicall argv[0] dispatch + top-level wiring
   cli.rs             hand-rolled arg parser + exit codes
   error.rs           Error + FsError + stable exit codes
+  process.rs         fixed-path, bounded, timed external-tool runner
   system_root.rs     validated display/canonical target-root paths
   phase2.rs          phase-2 orchestrators: storage scan / target plan / target mount
   model/             pure data + serde; no I/O
@@ -180,11 +190,11 @@ src/
     runtime.rs         Detection, DetectionStatus, RuntimeFacts, PrimaryRuntimeMode
     capability.rs      Capability, CapabilityKind, CapabilityStatus
     inspection.rs      TargetInspection, OsRelease, ToolPath, Warning, InspectionReport
-    storage.rs         phase 2: BlockDevice, RootCandidate, EspCandidate, StorageReport, Ambiguity
+    storage.rs         phase 2: devices, mount observations, Btrfs subvolumes, candidates
     mount.rs           phase 2: MountError taxonomy, MountPlan, MountSession, CleanupReport
     fstab.rs           re-exports of parse::fstab types
   parse/             pure parsers; no I/O
-    fstab.rs           /etc/fstab parser (UUID/PARTUUID/LABEL/Path sources, swap/bind/network classification)
+    fstab.rs           /etc/fstab parser + malformed-line diagnostics
     mountinfo.rs       /proc/self/mountinfo parser (octal escapes, VFS vs superblock options)
     blkid.rs           blkid udev + human-format parser (ID_FS_*, ID_PART_ENTRY_*)
   probe/             reads the world via FilesystemProbe trait
@@ -192,12 +202,13 @@ src/
     runtime.rs         detect_runtime + six detectors (initramfs/chroot/live/snapshot/systemd/ro)
     target.rs          inspect_target + os-release parsing + tool probes
     capability.rs      detect_capabilities (16 phase-1 capabilities)
-    block.rs           phase 2: sysfs discovery + mountinfo merge + blkid supplement
+    block.rs           sysfs + mountinfo + udev DB + trusted blkid supplement
     candidate.rs       phase 2: evidence-driven root/ESP candidate identification
   mount/             state-changing layer (phase 2); only read-only mounts
     syscall.rs         raw FFI for mount/umount2/unshare + errno→MountErrorKind table
     namespace.rs       unshare(CLONE_NEWNS) + MS_REC|MS_PRIVATE on / + verify
     plan.rs            per-fstype RO option table + MountPlan builder
+    probe.rs           short-lived root/ESP probes + Btrfs subvolume discovery
     session.rs         private namespace + ordered mounts + reverse-order rollback
   output/            renders model
     human.rs           plain ASCII human output (phase 1)
@@ -210,11 +221,14 @@ Layering rules:
 - `model/*` is pure data + serde. No I/O, no side effects.
 - `parse/*` is pure functions of bytes-in, model-out. No I/O.
 - `probe/*` reads the world via `FilesystemProbe` and returns structured
-  models. It never prints, never mounts, never spawns subprocesses
-  outside `blkid` (which is non-fatal if missing).
+  models. It never prints or mounts. Optional external metadata helpers
+  are launched only through `process.rs`, with a fixed trusted path,
+  minimal environment, timeout, and output limits.
 - `mount/*` is the ONLY place that issues mount/umount/unshare syscalls.
   It receives a fully-built `MountPlan` from `mount::plan` and a
-  pre-snapshotted pre-existing-mount set from `mount::session`.
+  pre-snapshotted pre-existing-mount set from `mount::session`. Probe mounts
+  are short-lived and clean before returning; target mounts inspect before
+  reverse-order cleanup.
 - `output/*` consumes models. It never probes.
 - `phase2.rs` orchestrates between `entry.rs` and the probe/mount layers.
 - Every detection carries an `Evidence` trail (code, source, message,
@@ -293,17 +307,19 @@ no CLI framework. CLI parsing is hand-rolled.
 
 ## Tests
 
-Three surfaces, all wired into CTest when `-DBUILD_TESTS=ON`:
+The following surfaces are wired into CTest when `-DBUILD_TESTS=ON`:
 
 | Test                              | What it guards against                                |
 |-----------------------------------|-------------------------------------------------------|
-| `catos-system-cargo-test`         | Rust unit + integration (108 tests at this revision). Includes probe fixtures simulating initramfs, chroot, LiveCD, container, snapshot, capability and permission states; target-root path and symlink confinement; CLI exit codes; JSON purity; multicall single-inode invariant. |
+| `catos-system-cargo-test`         | Rust unit + integration (227 tests at this revision). Includes runtime/capability fixtures, target-root confinement, mount policy, fstab diagnostics, candidate evidence, Btrfs parsing, structured errors, CLI and multicall contracts. |
 | `catos-system-static-check`       | The musl binary silently regressing to dynamic linking (would break initramfs and recovery use). |
 | `catos-system-initramfs-smoke-bare` | The static binary refusing to start in a minimal Linux user space without systemd, dbus, network, or `/usr`. |
 | `catos-system-initramfs-smoke-with-marker` | Runtime detection failing to identify a mkinitcpio-style initramfs containing `/etc/initrd-release`. |
+| `catos-system-storage-qemu-smoke` | A real writable ext4 root, FAT ESP, and Btrfs `@`/snapshot image: discovery, explicit planning, mount-inspect-cleanup, snapshot exclusion, session cleanup, and byte-for-byte no-write verification. |
 
-The two QEMU tests are opt-in through
-`-DCATOS_SYSTEM_INITRAMFS_SMOKE=ON`. They require
+The two minimal initramfs tests are opt-in through
+`-DCATOS_SYSTEM_INITRAMFS_SMOKE=ON`. The real storage test is enabled with
+`-DCATOS_SYSTEM_STORAGE_SMOKE=ON`. They require
 `qemu-system-x86_64`, a kernel image, and static `busybox`; they use KVM when
 available, otherwise TCG, and skip with exit code 77 when prerequisites are
 missing.
@@ -316,11 +332,13 @@ cmake --build build
 ( cd build && ctest --output-on-failure )
 ```
 
-To explicitly run the opt-in initramfs/QEMU smoke:
+To explicitly run all QEMU smoke tests:
 
 ```
-cmake -S . -B build -DBUILD_TESTS=ON -DCATOS_SYSTEM_INITRAMFS_SMOKE=ON
-( cd build && ctest -R initramfs --output-on-failure )
+cmake -S . -B build -DBUILD_TESTS=ON \
+  -DCATOS_SYSTEM_INITRAMFS_SMOKE=ON \
+  -DCATOS_SYSTEM_STORAGE_SMOKE=ON
+( cd build && ctest -L qemu --output-on-failure )
 ```
 
 Run the Rust tests directly (faster iteration, no CMake):
@@ -340,7 +358,7 @@ On this host (rustc 1.96.1, x86_64-unknown-linux-musl):
 
 ```
 $ stat -c %s <binary>
-668208
+778912
 $ file <binary>
 ... static-pie linked ... stripped
 $ readelf -l <binary> | grep INTERP     # (empty)
@@ -349,22 +367,21 @@ $ bash scripts/verify-static.sh <binary>
 ok: no PT_INTERP segment
 ok: no NEEDED entries
 ok: ELF magic bytes present
-info: binary size 668208 bytes (652 KiB)
+info: binary size 778912 bytes (761 KiB)
 RESULT: OK (binary is fully static)
 ```
 
-Phase 2 grew the binary from 467512 → 668208 bytes (~196 KiB / +42%):
-storage discovery, fstab/mountinfo/blkid parsers, the per-fstype RO
-mount option table, the namespace + session machinery, and phase-2
-output rendering. Still well under the 4 MiB warning threshold enforced
-by `verify-static.sh`.
+The completed phase-2 backend is 778912 bytes. The additional size covers
+confined target selection, bounded helper execution, temporary candidate
+probe mounts, Btrfs subvolume/snapshot discovery, structured mount errors,
+and truthful mount-inspect-cleanup reporting. It remains well below the
+4 MiB warning threshold enforced by `verify-static.sh`.
 
 ## What is NOT implemented (deferred to later phases)
 
 - LUKS unlock (`cryptsetup` integration)
-- Btrfs subvolume enumeration (post-mount inspection of `/subvols`)
-- snapshot creation or rollback (read-only snapshot detection is in
-  phase 2; mutation is not)
+- snapshot creation or rollback (phase 2 only enumerates and classifies
+  Btrfs subvolumes/snapshots through a no-log-replay read-only probe)
 - pacman-driven update workflow
 - Bootloader repair (GRUB, Limine, UKI regeneration via `mkinitcpio`,
   `bootloadu`)
