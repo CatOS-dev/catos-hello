@@ -13,45 +13,66 @@ All three symlinks point to the same inode. There is exactly one binary
 target. `argv[0]` is honoured only for the JSON `invocation` field and for
 help text; it never gates a permission.
 
-## Phase 1 scope
+## Scope (phase 1 + phase 2)
 
-This is **phase 1** only. The program performs read-only probes and reports
-structured results. It does **not**:
+This is **phase 1 + phase 2**. Both phases are read-only with respect to
+the target system. Phase 2 adds storage discovery and safe read-only
+mounting of the target system inside a private mount namespace; it never
+writes to the target device (no journal replay, no superblock updates,
+no LUKS unlock, no LVM/mdraid changes, no fsck, no btrfs rollback).
 
-- discover block devices
-- mount or unmount filesystems
-- unlock LUKS devices
-- detect or manipulate Btrfs subvolumes
-- perform pacman updates
-- create or roll back snapshots
-- repair bootloaders (GRUB / Limine / UKI)
-- modify the target root in any way
-- run as a long-lived daemon
-- expose a TUI
+Neither phase performs:
 
-Even when invoked as root the program performs **only read operations**.
+- pacman updates
+- bootloader repair (GRUB / Limine / UKI)
+- LUKS unlock
+- LVM / mdraid manipulation
+- snapshot creation or rollback
+- fsck
+- writes to the target root in any form
+- long-lived daemon or TUI
 
 ## CLI
 
 ```
-catos-system environment [--root PATH] [--json]
+# Phase 1 — read-only environment + target inspection
+catos-system environment  [--root PATH] [--json]
 catos-system capabilities [--root PATH] [--json]
-catos-system inspect     [--root PATH] [--json]
+catos-system inspect      [--root PATH] [--json]
+
+# Phase 2 — read-only storage discovery + safe RO target mount
+catos-system storage scan                [--root PATH] [--json]
+catos-system target plan                 [--root PATH] [--json]
+catos-system target mount                [--root PATH] [--json]
+
 catos-system --version
 catos-system --help
 ```
 
-The three symlinks accept the same subcommands and use the same probe core.
-The selected subcommand controls which report sections are rendered:
+The three symlinks accept the same subcommands and use the same probe
+core. The selected subcommand controls which report sections are
+rendered:
 
 - `environment`: runtime facts only
 - `capabilities`: capability results only
 - `inspect`: runtime, capabilities, and target inspection
+- `storage scan`: walks `/sys/class/block`, blkid, and `/proc/self/mountinfo`;
+  emits a `StorageReport` of discovered devices, root candidates, ESP
+  candidates, and ambiguities.
+- `target plan`: reads `<root>/etc/fstab`, discovers devices, builds a
+  `MountPlan` with per-fstype read-only safety options applied; **does
+  not execute any mount**.
+- `target mount`: same as `target plan` then executes the plan inside a
+  private mount namespace (`unshare(CLONE_NEWNS)` + `MS_REC|MS_PRIVATE`
+  on `/`), mounts each step read-only, and rolls back in reverse order
+  on completion or failure.
 
 ```
 catos-doctor inspect --json
 catos-recovery environment --json
 catos-update capabilities --json
+catos-recovery storage scan --json
+catos-recovery target plan --json
 ```
 
 ### Exit codes
@@ -153,25 +174,49 @@ src/
   cli.rs             hand-rolled arg parser + exit codes
   error.rs           Error + FsError + stable exit codes
   system_root.rs     validated display/canonical target-root paths
+  phase2.rs          phase-2 orchestrators: storage scan / target plan / target mount
   model/             pure data + serde; no I/O
     evidence.rs        Evidence: code/source/message/value
     runtime.rs         Detection, DetectionStatus, RuntimeFacts, PrimaryRuntimeMode
     capability.rs      Capability, CapabilityKind, CapabilityStatus
     inspection.rs      TargetInspection, OsRelease, ToolPath, Warning, InspectionReport
+    storage.rs         phase 2: BlockDevice, RootCandidate, EspCandidate, StorageReport, Ambiguity
+    mount.rs           phase 2: MountError taxonomy, MountPlan, MountSession, CleanupReport
+    fstab.rs           re-exports of parse::fstab types
+  parse/             pure parsers; no I/O
+    fstab.rs           /etc/fstab parser (UUID/PARTUUID/LABEL/Path sources, swap/bind/network classification)
+    mountinfo.rs       /proc/self/mountinfo parser (octal escapes, VFS vs superblock options)
+    blkid.rs           blkid udev + human-format parser (ID_FS_*, ID_PART_ENTRY_*)
   probe/             reads the world via FilesystemProbe trait
-    fs_probe.rs        filesystem abstraction + confined target-root access
+    fs_probe.rs        filesystem abstraction + confined target-root access (openat2)
     runtime.rs         detect_runtime + six detectors (initramfs/chroot/live/snapshot/systemd/ro)
     target.rs          inspect_target + os-release parsing + tool probes
     capability.rs      detect_capabilities (16 phase-1 capabilities)
+    block.rs           phase 2: sysfs discovery + mountinfo merge + blkid supplement
+    candidate.rs       phase 2: evidence-driven root/ESP candidate identification
+  mount/             state-changing layer (phase 2); only read-only mounts
+    syscall.rs         raw FFI for mount/umount2/unshare + errno→MountErrorKind table
+    namespace.rs       unshare(CLONE_NEWNS) + MS_REC|MS_PRIVATE on / + verify
+    plan.rs            per-fstype RO option table + MountPlan builder
+    session.rs         private namespace + ordered mounts + reverse-order rollback
   output/            renders model
-    human.rs           plain ASCII human output
-    json.rs            serde_json wrapper (single source of JSON contract)
+    human.rs           plain ASCII human output (phase 1)
+    json.rs            serde_json wrapper (phase 1, single source of JSON contract)
+    phase2.rs          phase 2: human + JSON for StorageReport / MountPlan / MountSession
 ```
 
 Layering rules:
 
-- `probe/*` returns structured models. It never prints.
+- `model/*` is pure data + serde. No I/O, no side effects.
+- `parse/*` is pure functions of bytes-in, model-out. No I/O.
+- `probe/*` reads the world via `FilesystemProbe` and returns structured
+  models. It never prints, never mounts, never spawns subprocesses
+  outside `blkid` (which is non-fatal if missing).
+- `mount/*` is the ONLY place that issues mount/umount/unshare syscalls.
+  It receives a fully-built `MountPlan` from `mount::plan` and a
+  pre-snapshotted pre-existing-mount set from `mount::session`.
 - `output/*` consumes models. It never probes.
+- `phase2.rs` orchestrates between `entry.rs` and the probe/mount layers.
 - Every detection carries an `Evidence` trail (code, source, message,
   optional value).
 - Probes that cannot gather enough evidence MUST return `Unknown`, never
@@ -295,19 +340,31 @@ On this host (rustc 1.96.1, x86_64-unknown-linux-musl):
 
 ```
 $ stat -c %s <binary>
-467512
+668208
 $ file <binary>
 ... static-pie linked ... stripped
 $ readelf -l <binary> | grep INTERP     # (empty)
 $ readelf -d <binary> | grep NEEDED     # (empty)
+$ bash scripts/verify-static.sh <binary>
+ok: no PT_INTERP segment
+ok: no NEEDED entries
+ok: ELF magic bytes present
+info: binary size 668208 bytes (652 KiB)
+RESULT: OK (binary is fully static)
 ```
+
+Phase 2 grew the binary from 467512 → 668208 bytes (~196 KiB / +42%):
+storage discovery, fstab/mountinfo/blkid parsers, the per-fstype RO
+mount option table, the namespace + session machinery, and phase-2
+output rendering. Still well under the 4 MiB warning threshold enforced
+by `verify-static.sh`.
 
 ## What is NOT implemented (deferred to later phases)
 
-- Block device discovery (`lsblk` integration, sysfs walk)
-- Filesystem mount/unmount
 - LUKS unlock (`cryptsetup` integration)
-- Btrfs subvolume enumeration and snapshot rollback
+- Btrfs subvolume enumeration (post-mount inspection of `/subvols`)
+- snapshot creation or rollback (read-only snapshot detection is in
+  phase 2; mutation is not)
 - pacman-driven update workflow
 - Bootloader repair (GRUB, Limine, UKI regeneration via `mkinitcpio`,
   `bootloadu`)
