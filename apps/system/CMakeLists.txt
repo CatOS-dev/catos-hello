@@ -116,14 +116,34 @@ if(BUILD_TESTS)
            "Enable initramfs/QEMU smoke test (opt-in; needs qemu + kernel + busybox)"
            OFF)
     if(CATOS_SYSTEM_INITRAMFS_SMOKE)
+        # Two test variants:
+        #   * bare:         no initramfs markers; verifies binary starts
+        #                    without systemd/dbus/network and produces valid
+        #                    JSON. Does NOT assert initramfs detection.
+        #   * with-marker:  includes /etc/initrd-release; additionally asserts
+        #                    is_initramfs.status == "detected". Catches the
+        #                    false-green where the binary runs but the runtime
+        #                    detector fails to recognise its environment.
         add_test(
-            NAME catos-system-initramfs-smoke
+            NAME catos-system-initramfs-smoke-bare
             COMMAND "${BASH_CMD}"
                     "${CMAKE_CURRENT_SOURCE_DIR}/scripts/initramfs-smoke.sh"
+                    --mode bare
                     --bin "${CATOS_SYSTEM_BIN}"
         )
-        # Exit 77 means "skipped due to missing prerequisites", not a failure.
-        set_tests_properties(catos-system-initramfs-smoke PROPERTIES
+        set_tests_properties(catos-system-initramfs-smoke-bare PROPERTIES
+            TIMEOUT 180
+            SKIP_RETURN_CODE 77
+            LABELS "rust;integration;qemu"
+        )
+        add_test(
+            NAME catos-system-initramfs-smoke-with-marker
+            COMMAND "${BASH_CMD}"
+                    "${CMAKE_CURRENT_SOURCE_DIR}/scripts/initramfs-smoke.sh"
+                    --mode with-marker
+                    --bin "${CATOS_SYSTEM_BIN}"
+        )
+        set_tests_properties(catos-system-initramfs-smoke-with-marker PROPERTIES
             TIMEOUT 180
             SKIP_RETURN_CODE 77
             LABELS "rust;integration;qemu"

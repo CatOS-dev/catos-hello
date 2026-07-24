@@ -8,14 +8,16 @@
 #     static-link check, but this is the runtime counterpart).
 #   * Probe code panics when /proc, /sys, /dev are missing or unusual.
 #   * JSON output gets polluted by something that only triggers in initramfs.
+#   * The runtime detector fails to identify a real initramfs as such.
 #
-# What this test does:
-#   1. Builds a minimal initramfs containing catos-system and (busybox) init.
-#   2. Boots the host kernel under QEMU with that initramfs as PID 1 rootfs.
-#   3. The init script mounts /proc /sys /dev, runs `catos-system inspect
-#      --json`, prints the output to serial, then powers off.
-#   4. We capture the serial output and assert the JSON is well-formed and
-#      contains the expected schemaVersion=1 top-level contract.
+# Two modes:
+#   bare         No initramfs markers (no /etc/initrd-release, no /run/initramfs).
+#                Verifies the binary starts and produces valid JSON. Does NOT
+#                assert anything about is_initramfs.status. Use this to prove
+#                the binary does not depend on systemd/dbus/network.
+#   with-marker  Includes /etc/initrd-release (matching mkinitcpio output).
+#                Additionally asserts is_initramfs.status == "detected".
+#                This is the contract the doctor/recovery tools will rely on.
 #
 # This test is OPT-IN. It is not part of the default `cargo test` or
 # `cmake --build . --target check` runs because it requires QEMU + a usable
@@ -34,17 +36,20 @@ usage() {
 usage: $0 [options]
 
 options:
-  --kernel PATH    Kernel image (bzImage). Default: auto-detect from
-                   /usr/lib/modules/\$(uname -r)/vmlinuz and /boot/vmlinuz*.
-  --busybox PATH   Static busybox binary. Default: search PATH.
-  --bin PATH       catos-system binary to test. Default: auto-detect from
-                   the cargo musl release target dir relative to this script.
-  --workdir DIR    Working directory for cpio build. Default: tempdir.
-  --qemu PATH      qemu-system-x86_64 binary. Default: search PATH.
-  --keep           Keep workdir on exit for inspection.
+  --mode MODE     Test mode: bare (no markers) or with-marker (asserts
+                  is_initramfs.status == "detected"). Default: with-marker.
+  --kernel PATH   Kernel image (bzImage). Default: auto-detect from
+                  /usr/lib/modules/\$(uname -r)/vmlinuz and /boot/vmlinuz*.
+  --busybox PATH  Static busybox binary. Default: search PATH.
+  --bin PATH      catos-system binary to test. Default: auto-detect from
+                  the cargo musl release target dir relative to this script.
+  --workdir DIR   Working directory for cpio build. Default: tempdir.
+  --qemu PATH     qemu-system-x86_64 binary. Default: search PATH.
+  --keep          Keep workdir on exit for inspection.
 EOF
 }
 
+MODE="with-marker"
 KERNEL=""
 BUSYBOX=""
 BIN=""
@@ -54,6 +59,7 @@ KEEP=0
 
 while [ "$#" -gt 0 ]; do
     case "$1" in
+        --mode)    MODE="$2"; shift 2 ;;
         --kernel)  KERNEL="$2"; shift 2 ;;
         --busybox) BUSYBOX="$2"; shift 2 ;;
         --bin)     BIN="$2"; shift 2 ;;
@@ -64,6 +70,11 @@ while [ "$#" -gt 0 ]; do
         *) echo "unknown option: $1" >&2; usage; exit 2 ;;
     esac
 done
+
+case "$MODE" in
+    bare|with-marker) ;;
+    *) echo "error: --mode must be 'bare' or 'with-marker', got: $MODE" >&2; exit 2 ;;
+esac
 
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 
@@ -158,7 +169,7 @@ trap cleanup EXIT
 
 # Build initramfs tree.
 rm -rf "$INITRAMFS"
-mkdir -p "$INITRAMFS"/{bin,proc,sys,dev,usr/bin,usr/sbin,sbin}
+mkdir -p "$INITRAMFS"/{bin,proc,sys,dev,etc,run,usr/bin,usr/sbin,sbin}
 
 cp "$BUSYBOX" "$INITRAMFS/bin/busybox"
 chmod +x "$INITRAMFS/bin/busybox"
@@ -171,6 +182,15 @@ for applet in sh mount echo poweroff cat; do
     ln -sf /bin/busybox "$INITRAMFS/bin/$applet"
 done
 ln -sf /bin/busybox "$INITRAMFS/sbin/poweroff"
+
+# In with-marker mode, populate /etc/initrd-release to mirror what mkinitcpio
+# places in real initramfs images. This is the canonical initramfs marker
+# that the runtime detector keys on; without it, the detector correctly
+# reports "not_detected", which is the right answer for the bare mode.
+if [ "$MODE" = "with-marker" ]; then
+    echo "NAME=CatOS" > "$INITRAMFS/etc/initrd-release"
+    echo "VERSION_ID=initramfs" >> "$INITRAMFS/etc/initrd-release"
+fi
 
 # /init script: PID 1.
 cat >"$INITRAMFS/init" <<'INIT_EOF'
@@ -274,24 +294,52 @@ json_block=$(awk '
 ' "$SERIAL_LOG")
 
 # Validate JSON via python (qemu env may not have jq).
-if ! python3 -c "
+# In with-marker mode, additionally assert that the runtime detector
+# identified the environment as initramfs. Without this assertion the test
+# would pass even if the detector returned "not_detected", which is the
+# exact false-green the original review caught.
+if [ "$MODE" = "with-marker" ]; then
+    if ! python3 -c "
 import sys, json
 text = sys.stdin.read()
 data = json.loads(text)
-assert data['schemaVersion'] == 1, 'schemaVersion is not 1'
+assert data['schemaVersion'] == 2, 'schemaVersion is not 2'
 assert 'runtime' in data, 'missing runtime'
 assert 'capabilities' in data, 'missing capabilities'
 assert 'target' in data, 'missing target'
-print('json ok: schemaVersion=%d, caps=%d, invocation=%s' % (
-    data['schemaVersion'], len(data['capabilities']), data['invocation']))
+status = data['runtime']['is_initramfs']['status']
+assert status == 'detected', \
+    f'is_initramfs.status should be detected (initrd-release marker present), got {status!r}'
+print('json ok: schemaVersion=%d, caps=%d, invocation=%s, is_initramfs=%s' % (
+    data['schemaVersion'], len(data['capabilities']), data['invocation'], status))
 " <<<"$json_block"; then
-    echo "fail: JSON validation failed" >&2
-    echo "----- extracted JSON -----" >&2
-    echo "$json_block" >&2
-    echo "--------------------------" >&2
-    KEEP=1
-    exit 1
+        echo "fail: JSON or is_initramfs assertion failed (mode=$MODE)" >&2
+        echo "----- extracted JSON -----" >&2
+        echo "$json_block" >&2
+        echo "--------------------------" >&2
+        KEEP=1
+        exit 1
+    fi
+else
+    if ! python3 -c "
+import sys, json
+text = sys.stdin.read()
+data = json.loads(text)
+assert data['schemaVersion'] == 2, 'schemaVersion is not 2'
+assert 'runtime' in data, 'missing runtime'
+assert 'capabilities' in data, 'missing capabilities'
+assert 'target' in data, 'missing target'
+print('json ok (bare mode, no is_initramfs assertion): schemaVersion=%d, caps=%d' % (
+    data['schemaVersion'], len(data['capabilities'])))
+" <<<"$json_block"; then
+        echo "fail: JSON validation failed (mode=$MODE)" >&2
+        echo "----- extracted JSON -----" >&2
+        echo "$json_block" >&2
+        echo "--------------------------" >&2
+        KEEP=1
+        exit 1
+    fi
 fi
 
-echo "pass: catos-system ran in initramfs and produced valid JSON"
+echo "pass: catos-system ran in initramfs (mode=$MODE) and produced valid JSON"
 exit 0

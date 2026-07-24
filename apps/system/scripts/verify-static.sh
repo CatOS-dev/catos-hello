@@ -36,9 +36,19 @@ if ! command -v readelf >/dev/null 2>&1; then
 fi
 
 fail=0
+TMPDIR=$(mktemp -d -t catos-static-check-XXXXXX)
+trap 'rm -rf "$TMPDIR"' EXIT
 
 # 1. PT_INTERP must be absent. A static binary has no interpreter.
-interp=$(readelf -l "$BIN" 2>/dev/null | awk '/^[[:space:]]*INTERP /{print; exit}')
+# readelf exits non-zero on a malformed ELF; capture that explicitly so a
+# corrupt or truncated binary does not get a false pass via empty output.
+interp=$(readelf -l "$BIN" 2>"$TMPDIR/readelf-program.err" | awk '/^[[:space:]]*INTERP /{print; exit}')
+readelf_rc=${PIPESTATUS[0]}
+if [ "$readelf_rc" -ne 0 ]; then
+    echo "FAIL: readelf -l exited $readelf_rc; cannot trust empty INTERP output"
+    cat "$TMPDIR/readelf-program.err" >&2
+    exit 1
+fi
 if [ -n "$interp" ]; then
     echo "FAIL: PT_INTERP present (binary has a dynamic linker):"
     echo "  $interp"
@@ -48,8 +58,16 @@ else
 fi
 
 # 2. No NEEDED entries in the dynamic section. A static binary does not need
-#    any shared object at runtime.
-needed=$(readelf -d "$BIN" 2>/dev/null | awk '/\(NEEDED\)/{print}')
+# any shared object at runtime. As above, capture readelf's exit code so a
+# malformed ELF does not silently slip through.
+needed_raw=$(readelf -d "$BIN" 2>"$TMPDIR/readelf-dynamic.err")
+readelf_rc=$?
+if [ "$readelf_rc" -ne 0 ]; then
+    echo "FAIL: readelf -d exited $readelf_rc; cannot trust empty NEEDED output"
+    cat "$TMPDIR/readelf-dynamic.err" >&2
+    exit 1
+fi
+needed=$(echo "$needed_raw" | awk '/\(NEEDED\)/{print}')
 if [ -n "$needed" ]; then
     echo "FAIL: dynamic NEEDED entries present:"
     echo "$needed"
