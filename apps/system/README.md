@@ -264,11 +264,13 @@ src/
   recovery/          phase-3 transaction layer; only place that writes to target btrfs
     state.rs           pure state machine: transition(), happy_path_successor(), reconcile_with_disk_facts()
     identity.rs        SubvolumePath validation, IdentityDrift, confirmation token verification
-    plan.rs            PlanInputs, build_plan(), FNV-1a confirmation token
-    store.rs           persist_record/load_record temp+fsync+atomic-rename+parent-fsync protocol
-    external.rs        Trusted btrfs-progs wrapper (subcommand allow-list, bounded execution)
-    boot.rs            detect_layout() / UKI/kernel/initramfs detection (purely descriptive; no boot writes)
-    engine.rs          Engine: begin/load/drive/revert, renameat2 root swap, flock, fault injection
+    plan.rs            PlanInputs, schema-v4 SHA-256 plan digest and confirmation binding
+    confined.rs        openat2-confined records, Btrfs snapshot ioctl, dirfd root exchange
+    lock.rs            non-blocking per-FSID flock
+    store.rs           schema checks and durable confined state/plan persistence
+    external.rs        trusted read-only btrfs-progs wrapper with bounded execution
+    boot.rs            read-only BootConsistencyReport and external boot-resource gate
+    engine.rs          begin/load/drive/revert, state persistence and fault injection
   output/            renders model
     human.rs           plain ASCII human output (phase 1)
     json.rs            serde_json wrapper (phase 1, single source of JSON contract)
@@ -379,12 +381,13 @@ The following surfaces are wired into CTest when `-DBUILD_TESTS=ON`:
 
 | Test                              | What it guards against                                |
 |-----------------------------------|-------------------------------------------------------|
-| `catos-system-cargo-test`         | Rust unit + integration tests. Includes runtime/capability fixtures, target-root confinement, mount policy, fstab diagnostics, candidate evidence, Btrfs parsing, structured errors, CLI and multicall contracts, phase-3 recovery state machine, transaction record durability, identity drift detection, FNV-1a confirmation tokens, btrfs-progs wrappers, boot layout detection, and crash-resumable transaction flow. |
+| `catos-system-cargo-test`         | Rust unit + integration tests. Includes runtime/capability fixtures, target-root confinement, mount policy, fstab diagnostics, candidate evidence, Btrfs parsing, structured errors, CLI and multicall contracts, phase-3 recovery state machine, transaction durability, SHA-256 plan/token binding, confined path attacks, boot-consistency gating, and crash-resumable transaction flow. |
+| `catos-system-cargo-clippy`       | All Rust targets and features remain warning-free at the declared MSRV contract. |
 | `catos-system-static-check`       | The musl binary silently regressing to dynamic linking (would break initramfs and recovery use). |
 | `catos-system-initramfs-smoke-bare` | The static binary refusing to start in a minimal Linux user space without systemd, dbus, network, or `/usr`. |
 | `catos-system-initramfs-smoke-with-marker` | Runtime detection failing to identify a mkinitcpio-style initramfs containing `/etc/initrd-release`. |
 | `catos-system-storage-qemu-smoke` | A real writable ext4 root, FAT ESP, and Btrfs `@`/snapshot image: discovery, explicit planning, mount-inspect-cleanup, snapshot exclusion, session cleanup, and byte-for-byte no-write verification. |
-| `catos-system-recovery-qemu-smoke` | Real Btrfs image with `@`, `@home`, two readonly snapshots, and an independent FAT ESP. Boots the fault-injection binary inside an initramfs and exercises the full phase-3 lifecycle: `recovery plan`, `recovery apply` with crash injection at every persistent state (`backup_created`, `replacement_created`, `old_root_moved`, `new_root_installed`) via `raise(SIGKILL)`, repeated `recovery resume` until `completed`, and final ESP byte-for-byte no-write verification. |
+| `catos-system-recovery-qemu-smoke` | Authoritative real-Btrfs acceptance in QEMU. Exercises the happy path, all three fault windows, resume reconciliation, Completed revert including the reverse-swap crash window, non-default source identity, guest-side data/backup/readonly assertions, nested-layout refusal, external-ESP refusal, and byte-for-byte ESP no-write verification. Once QEMU starts, skipped assertions are hard failures. |
 
 The two minimal initramfs tests are opt-in through
 `-DCATOS_SYSTEM_INITRAMFS_SMOKE=ON`. The real storage test is enabled with
@@ -444,15 +447,13 @@ info: binary size 1036992 bytes (1012 KiB)
 RESULT: OK (binary is fully static)
 ```
 
-The completed phase-3 backend is 1036992 bytes. The additional ~234 KiB
-over phase 2 covers the recovery transaction layer: pure state machine,
-identity drift detection, FNV-1a confirmation tokens, durable
-transaction record persistence (temp + fsync + atomic rename + parent
-fsync), trusted btrfs-progs wrappers, descriptive boot layout
-detection, the renameat2 root swap, the recovery state-machine engine,
-and JSON + human renderers for all phase-3 outcomes. It remains well
-below the
-4 MiB warning threshold enforced by `verify-static.sh`.
+The phase-3 backend includes the recovery transaction layer, identity
+drift detection, SHA-256-bound plan and confirmation records, confined
+openat2 storage, durable transaction persistence, Btrfs ioctl snapshot
+creation, the renameat2 root exchange, read-only boot consistency
+reporting, and JSON + human renderers for all phase-3 outcomes. Static
+size is checked by `verify-static.sh` against the 4 MiB warning
+threshold; the exact binary size depends on the current toolchain.
 
 ## What is NOT implemented (deferred to later phases)
 
@@ -460,9 +461,10 @@ below the
 - pacman-driven update workflow
 - Bootloader repair of any kind (GRUB, Limine, UKI, sd-boot). Recovery
   swaps the root subvolume only; it does NOT call any bootloader tool
-  and does NOT write to the ESP. A read-only boot-consistency check
-  that refuses the first persistent write when external boot
-  resources disagree with the new root is planned for a later phase.
+  and does NOT write to the ESP. A read-only `BootConsistencyReport`
+  is sealed into schema-v4 plans and recomputed at apply time before
+  the first persistent write. Separate `/boot`, separate boot
+  subvolumes, external ESPs, and unknown boot topology are refused.
 - Automatic deletion of recovery backups (`/.catos-recovery/backups/`
   content is preserved indefinitely until the operator runs
   `recovery revert` or removes it manually)

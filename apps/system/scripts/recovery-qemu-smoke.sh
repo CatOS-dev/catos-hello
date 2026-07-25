@@ -1,34 +1,8 @@
 #!/usr/bin/env bash
-# recovery-qemu-smoke.sh - real Btrfs snapshot recovery crash/resume in QEMU.
-#
-# This test creates a real Btrfs image with:
-#   /@                  current CatOS root
-#   /@home              separate @home subvolume (must NOT change)
-#   /@/.snapshots/1/snapshot   readonly snapshot of /@
-#   /@/.snapshots/2/snapshot   readonly snapshot with DISTINCTIVE content
-# Plus an independent FAT ESP that we leave untouched.
-#
-# It boots a static catos-system binary built with the
-# `recovery_fault_injection` cargo feature inside a minimal initramfs
-# and exercises the full phase-3 lifecycle:
-#
-#   1. recovery plan  -> emits a plan record bound to plan_id+token
-#   2. recovery apply with CATOS_RECOVERY_FAULT_AT=backup_created
-#      -> process is SIGKILLed after persisting backup_created
-#   3. recovery status -> reconciles disk facts, reports resumable
-#   4. recovery resume -> continues from backup_created, may be killed
-#      again at the next fault point
-#   5. (repeat for replacement_created, old_root_moved,
-#      new_root_installed, boot_finalization_pending)
-#   6. final recovery resume -> reaches `completed`
-#   7. assert /@ now contains the snapshot's distinctive file
-#   8. assert /.catos-recovery/backups/.../root-before contains the
-#      original /@ content
-#   9. assert /@home content unchanged
-#  10. assert snapshot readonly attribute unchanged
-#  11. assert ESP image byte-for-byte unchanged
-#
-# Exit 77 means a prerequisite is unavailable.
+# Authoritative phase-3 recovery acceptance on a real Btrfs image in QEMU.
+# Exit 77 is reserved for missing host prerequisites. Once QEMU starts,
+# every missing marker, skipped assertion, unexpected exit code, or
+# unverifiable filesystem state is a hard failure.
 
 set -u
 
@@ -37,17 +11,14 @@ usage() {
 usage: $0 [options]
 
 options:
-  --kernel PATH       Kernel image. Default: auto-detect host kernel.
-  --busybox PATH      Static busybox. Default: search PATH.
-  --bin PATH          Static catos-system musl binary (release).
-  --test-bin PATH     Static catos-system musl binary built with
-                      --features recovery_fault_injection. Required.
-  --qemu PATH         qemu-system-x86_64. Default: search PATH.
-  --workdir DIR       Work directory. Default: temporary directory.
-  --keep              Keep workdir after completion.
-  --skip-crash        Skip the crash-injection iterations; only run a
-                      single apply -> completed. Useful for fast
-                      verification of the happy path.
+  --kernel PATH       Kernel image (default: auto-detect)
+  --busybox PATH      Static busybox (default: PATH)
+  --bin PATH          Production static catos-system musl binary
+  --test-bin PATH     Static binary with recovery_fault_injection
+  --qemu PATH         qemu-system-x86_64 (default: PATH)
+  --workdir DIR       Work directory (default: temporary)
+  --keep              Preserve work directory
+  --skip-crash        Skip the three crash-window matrices
 EOF
 }
 
@@ -85,59 +56,56 @@ if [ -z "$BIN" ]; then
 fi
 if [ -z "$TEST_BIN" ]; then
     for candidate in \
-        "$SCRIPT_DIR/../../target/x86_64-unknown-linux-musl/release/catos-system" \
-        "$SCRIPT_DIR/../../build/apps/system/cargo-target/x86_64-unknown-linux-musl/release/catos-system"; do
+        "$SCRIPT_DIR/../../target-fault/x86_64-unknown-linux-musl/release/catos-system" \
+        "$SCRIPT_DIR/../../build/apps/system/cargo-target-fault/x86_64-unknown-linux-musl/release/catos-system"; do
         if [ -x "$candidate" ]; then TEST_BIN="$candidate"; break; fi
     done
 fi
-if [ -z "$QEMU_BIN" ] && command -v qemu-system-x86_64 >/dev/null 2>&1; then
-    QEMU_BIN=$(command -v qemu-system-x86_64)
-fi
-if [ -z "$BUSYBOX" ] && command -v busybox >/dev/null 2>&1; then
-    BUSYBOX=$(command -v busybox)
-fi
+[ -n "$QEMU_BIN" ] || QEMU_BIN=$(command -v qemu-system-x86_64 2>/dev/null || true)
+[ -n "$BUSYBOX" ] || BUSYBOX=$(command -v busybox 2>/dev/null || true)
 if [ -z "$KERNEL" ]; then
-    for candidate in \
-        "/usr/lib/modules/$(uname -r)/vmlinuz" \
-        /usr/lib/modules/*/vmlinuz \
-        /boot/vmlinuz-linux \
-        /boot/vmlinuz-linux-lts \
-        /boot/vmlinuz-*; do
-        if [ -e "$candidate" ]; then KERNEL="$candidate"; break; fi
+    for candidate in "/usr/lib/modules/$(uname -r)/vmlinuz" /usr/lib/modules/*/vmlinuz /boot/vmlinuz-*; do
+        if [ -f "$candidate" ]; then KERNEL="$candidate"; break; fi
     done
 fi
 
 missing=()
-[ -z "$BIN" ] && missing+=("catos-system release musl binary")
-[ -z "$TEST_BIN" ] && missing+=("catos-system recovery_fault_injection musl binary")
-[ -z "$QEMU_BIN" ] && missing+=("qemu-system-x86_64")
-[ -z "$BUSYBOX" ] && missing+=("static busybox")
-[ -z "$KERNEL" ] && missing+=("kernel image")
-for tool in cpio gzip timeout mkfs.btrfs mkfs.vfat sha256sum zstd python3 modinfo ldd; do
+[ -x "$BIN" ] || missing+=("production catos-system musl binary")
+[ -x "$TEST_BIN" ] || missing+=("fault-injection catos-system musl binary")
+[ -x "$QEMU_BIN" ] || missing+=("qemu-system-x86_64")
+[ -x "$BUSYBOX" ] || missing+=("static busybox")
+[ -f "$KERNEL" ] || missing+=("kernel image")
+for tool in cpio gzip timeout mkfs.btrfs mkfs.vfat mmd mcopy sha256sum python3 ldd readelf awk sed grep head find; do
     command -v "$tool" >/dev/null 2>&1 || missing+=("$tool")
 done
 if [ "${#missing[@]}" -gt 0 ]; then
-    echo "skip: recovery QEMU smoke test missing prerequisites:" >&2
+    echo "skip: missing recovery QEMU prerequisites:" >&2
     printf '  - %s\n' "${missing[@]}" >&2
     exit 77
 fi
-
-if [ "$BIN" != "$TEST_BIN" ]; then
-    echo "note: --bin and --test-bin differ; using --test-bin for crash injection" >&2
+if ! "$SCRIPT_DIR/verify-static.sh" "$BUSYBOX" >/dev/null; then
+    echo "skip: busybox is not static: $BUSYBOX" >&2
+    exit 77
 fi
+for binary in "$BIN" "$TEST_BIN"; do
+    if ! "$SCRIPT_DIR/verify-static.sh" "$binary" >/dev/null; then
+        echo "fail: QEMU binary is not fully static: $binary" >&2
+        exit 1
+    fi
+done
 
 WORKDIR="${WORKDIR:-$(mktemp -d -t catos-recovery-qemu-XXXXXX)}"
 INITRAMFS="$WORKDIR/initramfs"
-INITRAMFS_IMG="$WORKDIR/initramfs.cpio.gz"
-INITRAMFS_IMG_PLAN="$WORKDIR/initramfs-plan.cpio.gz"
-INITRAMFS_IMG_RUN="$WORKDIR/initramfs-run.cpio.gz"
+INITRAMFS_PLAN="$WORKDIR/initramfs-plan.cpio.gz"
+INITRAMFS_RUN="$WORKDIR/initramfs-run.cpio.gz"
 PLAN_FILE="$WORKDIR/plan.json"
-SERIAL_LOG="$WORKDIR/serial.log"
-BTREE_TREE="$WORKDIR/btrfs-tree"
 BTRFS_IMG="$WORKDIR/btrfs.img"
 ESP_IMG="$WORKDIR/esp.img"
+TREE="$WORKDIR/tree"
+LAST_LOG=""
+RUN_INDEX=0
 KVER=$(basename "$(dirname "$KERNEL")")
-if [ "$KVER" = "modules" ] || [ ! -d "/usr/lib/modules/$KVER" ]; then
+if [ "$KVER" = modules ] || [ ! -d "/usr/lib/modules/$KVER" ]; then
     KVER=$(uname -r)
 fi
 
@@ -150,112 +118,48 @@ cleanup() {
 }
 trap cleanup EXIT
 
-rm -rf "$INITRAMFS" "$BTREE_TREE"
-mkdir -p "$INITRAMFS"/{bin,sbin,proc,sys,dev,etc,run,usr/bin,usr/sbin,"lib/modules/$KVER/kernel/fs/fat"}
-mkdir -p "$BTREE_TREE/@"/{etc,usr/lib/modules,boot,var/lib/pacman/local}
-mkdir -p "$BTREE_TREE/@home"
-mkdir -p "$BTREE_TREE/@/.snapshots/1/snapshot"/{etc,usr/lib/modules,boot,var/lib/pacman/local}
-mkdir -p "$BTREE_TREE/@/.snapshots/2/snapshot"/{etc,usr/lib/modules,boot,var/lib/pacman/local}
+fail() {
+    echo "fail: $*" >&2
+    KEEP=1
+    if [ -n "$LAST_LOG" ] && [ -f "$LAST_LOG" ]; then
+        echo "--- serial log: $LAST_LOG ---" >&2
+        cat "$LAST_LOG" >&2
+    fi
+    exit 1
+}
 
-# Current /@: an identifiable CatOS root.
-cat > "$BTREE_TREE/@/etc/os-release" <<'EOF'
+prepare_initramfs() {
+    rm -rf "$INITRAMFS"
+    mkdir -p "$INITRAMFS"/{bin,sbin,proc,sys,dev,etc,run,tmp,mnt,usr/bin,usr/sbin}
+    cp "$BUSYBOX" "$INITRAMFS/bin/busybox"
+    cp "$BIN" "$INITRAMFS/bin/catos-system"
+    cp "$TEST_BIN" "$INITRAMFS/bin/catos-system-test"
+    chmod +x "$INITRAMFS/bin/"*
+    for applet in sh mount umount cat echo sleep poweroff mkdir grep awk find ls sync sed head test; do
+        ln -sf /bin/busybox "$INITRAMFS/bin/$applet"
+    done
+    ln -sf /bin/busybox "$INITRAMFS/sbin/poweroff"
+
+    cp /usr/bin/btrfs "$INITRAMFS/usr/bin/btrfs"
+    ldd /usr/bin/btrfs | awk '/=> \/[^ ]+/ {print $3} $1 ~ /^\// {print $1}' \
+        | while read -r library; do
+            [ -f "$library" ] || continue
+            mkdir -p "$INITRAMFS$(dirname "$library")"
+            cp -L "$library" "$INITRAMFS$library"
+        done
+
+    cat > "$INITRAMFS/etc/initrd-release" <<'EOF'
 NAME=CatOS
-ID=catos
-ID_LIKE=arch
-PRETTY_NAME="CatOS Recovery QEMU Current Root"
-EOF
-echo 'current-root-marker' > "$BTREE_TREE/@/var/lib/pacman/local/CURRENT_MARKER"
-echo 'home-data-must-not-change' > "$BTREE_TREE/@home/user-file"
-
-# Snapshot 1: identical content (not used in this test).
-cp -r "$BTREE_TREE/@/.snapshots/1/snapshot/." "$BTREE_TREE/@/." 2>/dev/null || true
-
-# Snapshot 2: DISTINCTIVE content the recovery should swap in.
-cat > "$BTREE_TREE/@/.snapshots/2/snapshot/etc/os-release" <<'EOF'
-NAME=CatOS
-ID=catos
-ID_LIKE=arch
-PRETTY_NAME="CatOS Recovery QEMU SNAPSHOT 2"
-EOF
-echo 'snapshot-2-marker' > "$BTREE_TREE/@/.snapshots/2/snapshot/var/lib/pacman/local/SNAPSHOT_2_MARKER"
-
-truncate -s 512M "$BTRFS_IMG"
-mkfs.btrfs -q -f -U 22222222-3333-4444-5555-666666666666 \
-    -r "$BTREE_TREE" \
-    --subvol default:@ \
-    --subvol rw:@home \
-    --subvol ro:@/.snapshots/1/snapshot \
-    --subvol ro:@/.snapshots/2/snapshot \
-    "$BTRFS_IMG"
-
-# Independent FAT ESP.
-truncate -s 32M "$ESP_IMG"
-mkfs.vfat -i C4705E12 "$ESP_IMG" >/dev/null
-mmd -i "$ESP_IMG" ::/EFI ::/EFI/CatOS
-printf 'CatOS ESP fixture\n' > "$WORKDIR/test.efi"
-mcopy -i "$ESP_IMG" "$WORKDIR/test.efi" ::/EFI/CatOS/test.efi
-
-BTRFS_HASH_BEFORE=$(sha256sum "$BTRFS_IMG" | awk '{print $1}')
-ESP_HASH_BEFORE=$(sha256sum "$ESP_IMG" | awk '{print $1}')
-
-cp "$BUSYBOX" "$INITRAMFS/bin/busybox"
-cp "$TEST_BIN" "$INITRAMFS/bin/catos-system-test"
-[ "$BIN" != "$TEST_BIN" ] && cp "$BIN" "$INITRAMFS/bin/catos-system" || cp "$TEST_BIN" "$INITRAMFS/bin/catos-system"
-chmod +x "$INITRAMFS/bin/busybox" "$INITRAMFS/bin/catos-system" "$INITRAMFS/bin/catos-system-test"
-for applet in sh mount cat echo sleep modprobe poweroff mkdir grep awk find ls; do
-    ln -sf /bin/busybox "$INITRAMFS/bin/$applet"
-done
-ln -sf /bin/busybox "$INITRAMFS/sbin/poweroff"
-
-# Include btrfs-progs so the guest can run real subvolume operations.
-cp /usr/bin/btrfs "$INITRAMFS/usr/bin/btrfs"
-ldd /usr/bin/btrfs | awk '
-    /=> \/[^ ]+/ { print $3 }
-    $1 ~ /^\// { print $1 }
-' | while read -r library; do
-    [ -f "$library" ] || continue
-    mkdir -p "$INITRAMFS$(dirname "$library")"
-    cp -L "$library" "$INITRAMFS$library"
-done
-
-FAT_MODULE=$(modinfo -k "$KVER" -n fat 2>/dev/null || true)
-VFAT_MODULE=$(modinfo -k "$KVER" -n vfat 2>/dev/null || true)
-if [ -n "$FAT_MODULE" ] && [ -f "$FAT_MODULE" ]; then
-    case "$FAT_MODULE" in
-        *.zst) zstd -q -d -c "$FAT_MODULE" > "$INITRAMFS/lib/modules/$KVER/kernel/fs/fat/fat.ko" ;;
-        *) cp "$FAT_MODULE" "$INITRAMFS/lib/modules/$KVER/kernel/fs/fat/fat.ko" ;;
-    esac
-fi
-if [ -n "$VFAT_MODULE" ] && [ -f "$VFAT_MODULE" ]; then
-    case "$VFAT_MODULE" in
-        *.zst) zstd -q -d -c "$VFAT_MODULE" > "$INITRAMFS/lib/modules/$KVER/kernel/fs/fat/vfat.ko" ;;
-        *) cp "$VFAT_MODULE" "$INITRAMFS/lib/modules/$KVER/kernel/fs/fat/vfat.ko" ;;
-    esac
-fi
-cat > "$INITRAMFS/lib/modules/$KVER/modules.dep" <<EOF
-kernel/fs/fat/fat.ko:
-kernel/fs/fat/vfat.ko: kernel/fs/fat/fat.ko
-EOF
-: > "$INITRAMFS/lib/modules/$KVER/modules.alias"
-: > "$INITRAMFS/lib/modules/$KVER/modules.symbols"
-
-cat > "$INITRAMFS/etc/initrd-release" <<'EOF'
-NAME=CatOS
-VERSION_ID=recovery-smoke
+VERSION_ID=recovery-acceptance
 EOF
 
-# The init script runs the requested scenario. The scenario name is
-# passed via the kernel cmdline as RECOVERY_SCENARIO=<name>.
-cat > "$INITRAMFS/init" <<'INIT_EOF'
+    cat > "$INITRAMFS/init" <<'GUEST'
 #!/bin/sh
 PATH=/bin:/sbin:/usr/bin:/usr/sbin
 export PATH
-
 mount -t proc none /proc 2>/dev/null
 mount -t sysfs none /sys 2>/dev/null
 mount -t devtmpfs none /dev 2>/dev/null
-modprobe vfat 2>/dev/null || true
-
 for _ in 1 2 3 4 5 6 7 8 9 10; do
     [ -b /dev/vda ] && [ -b /dev/vdb ] && break
     sleep 1
@@ -265,308 +169,440 @@ if [ ! -b /dev/vda ] || [ ! -b /dev/vdb ]; then
     poweroff -f
 fi
 
-cmdline=$(cat /proc/cmdline)
 scenario=""
 plan_id=""
 token=""
-fault_at=""
-for tok in $cmdline; do
-    case "$tok" in
-        RECOVERY_SCENARIO=*) scenario="${tok#RECOVERY_SCENARIO=}" ;;
-        RECOVERY_PLAN_ID=*) plan_id="${tok#RECOVERY_PLAN_ID=}" ;;
-        RECOVERY_TOKEN=*) token="${tok#RECOVERY_TOKEN=}" ;;
-        RECOVERY_FAULT_AT=*) fault_at="${tok#RECOVERY_FAULT_AT=}" ;;
+post_fault=""
+pre_fault=""
+before_fault=""
+for arg in $(cat /proc/cmdline); do
+    case "$arg" in
+        RECOVERY_SCENARIO=*) scenario=${arg#RECOVERY_SCENARIO=} ;;
+        RECOVERY_PLAN_ID=*) plan_id=${arg#RECOVERY_PLAN_ID=} ;;
+        RECOVERY_TOKEN=*) token=${arg#RECOVERY_TOKEN=} ;;
+        RECOVERY_POST_FAULT_AT=*) post_fault=${arg#RECOVERY_POST_FAULT_AT=} ;;
+        RECOVERY_PRE_FAULT_AT=*) pre_fault=${arg#RECOVERY_PRE_FAULT_AT=} ;;
+        RECOVERY_BEFORE_FAULT_AT=*) before_fault=${arg#RECOVERY_BEFORE_FAULT_AT=} ;;
     esac
 done
-[ -n "$fault_at" ] && export CATOS_RECOVERY_FAULT_AT="$fault_at"
+[ -n "$post_fault" ] && export CATOS_RECOVERY_FAULT_AT="$post_fault"
+[ -n "$pre_fault" ] && export CATOS_RECOVERY_FAULT_PRE_AT="$pre_fault"
+[ -n "$before_fault" ] && export CATOS_RECOVERY_FAULT_BEFORE_AT="$before_fault"
 
+ROOT_ARGS="--root-device /dev/vda --root-subvolume /@"
+SNAPSHOT_ARGS="--snapshot-subvolume /@snapshots/2"
 BIN=/bin/catos-system
-[ "$scenario" = "crash" ] || [ "$scenario" = "resume" ] && BIN=/bin/catos-system-test
+case "$scenario" in
+    apply_fault|resume_fault|revert_fault) BIN=/bin/catos-system-test ;;
+esac
 
-if [ "$scenario" = "plan" ]; then
-    echo "===RECOVERY_PLAN_BEGIN==="
-    $BIN recovery plan \
-        --root-device /dev/vda \
-        --root-subvolume /@ \
-        --snapshot-subvolume /@/.snapshots/2/snapshot \
-        --json
-    plan_rc=$?
-    echo "===RECOVERY_PLAN_END=== rc=$plan_rc"
+run_and_poweroff() {
+    label=$1
+    shift
+    echo "===RECOVERY_${label}_BEGIN==="
+    "$@"
+    rc=$?
+    echo "===RECOVERY_${label}_END=== rc=$rc"
     sync
     poweroff -f
-fi
-
-if [ -z "$plan_id" ] || [ -z "$token" ]; then
-    # Apply/resume without a plan_id pair: re-issue plan to obtain one.
-    $BIN recovery plan \
-        --root-device /dev/vda \
-        --root-subvolume /@ \
-        --snapshot-subvolume /@/.snapshots/2/snapshot \
-        --json > /tmp/plan.json 2>/dev/null
-    plan_id=$(grep -o '"plan_id"[^"]*"[^"]*"' /tmp/plan.json | head -1 | sed 's/.*"\([^"]*\)"$/\1/')
-    token=$(grep -o '"confirmation_token"[^"]*"[^"]*"' /tmp/plan.json | head -1 | sed 's/.*"\([^"]*\)"$/\1/')
-fi
-
-echo "===RECOVERY_IDS=== plan_id=$plan_id token=$token"
-
-if [ -z "$plan_id" ] || [ -z "$token" ]; then
-    echo "===RECOVERY_NO_IDS==="
-    sync; poweroff -f
-fi
-
-if [ "$scenario" = "apply" ] || [ "$scenario" = "crash" ]; then
-    cmd=apply
-elif [ "$scenario" = "resume" ]; then
-    cmd=resume
-else
-    echo "===RECOVERY_FATAL=== unknown scenario $scenario"
-    sync; poweroff -f
-fi
-
-echo "===RECOVERY_${cmd}_BEGIN==="
-if [ "$cmd" = "apply" ]; then
-    plan_file_arg=""
-    [ -f /plan.json ] && plan_file_arg="--plan-file /plan.json"
-    if [ -z "$plan_file_arg" ]; then
-        plan_file_arg="--plan-file /tmp/plan.json"
-    fi
-    $BIN recovery apply \
-        --root-device /dev/vda \
-        --root-subvolume /@ \
-        --snapshot-subvolume /@/.snapshots/2/snapshot \
-        --plan-id "$plan_id" \
-        --confirm "$token" \
-        $plan_file_arg \
-        --json
-else
-    $BIN recovery resume \
-        --root-device /dev/vda \
-        --root-subvolume /@ \
-        --snapshot-subvolume /@/.snapshots/2/snapshot \
-        --transaction "$plan_id" \
-        --json
-fi
-rc=$?
-echo "===RECOVERY_${cmd}_END=== rc=$rc"
-
-sync
-poweroff -f
-INIT_EOF
-chmod +x "$INITRAMFS/init"
-
-(
-    cd "$INITRAMFS" || exit 1
-    find . -print0 | cpio --null --create --format=newc 2>/dev/null
-) | gzip -9 > "$INITRAMFS_IMG"
-
-build_initramfs() {
-    local extra_plan_file="$1"
-    local out="$2"
-    if [ -n "$extra_plan_file" ] && [ -f "$extra_plan_file" ]; then
-        cp "$extra_plan_file" "$INITRAMFS/plan.json"
-    else
-        rm -f "$INITRAMFS/plan.json"
-    fi
-    (
-        cd "$INITRAMFS" || exit 1
-        find . -print0 | cpio --null --create --format=newc 2>/dev/null
-    ) | gzip -9 > "$out"
 }
 
-# Two initramfs builds: the first lacks /plan.json (used for the
-# read-only plan phase); the second embeds the plan emitted by phase
-# one and is used by every subsequent apply/crash/resume run.
-build_initramfs "" "$INITRAMFS_IMG_PLAN"
+case "$scenario" in
+    plan)
+        # shellcheck disable=SC2086
+        run_and_poweroff PLAN /bin/catos-system recovery plan $ROOT_ARGS $SNAPSHOT_ARGS --json
+        ;;
+    plan_nested)
+        # shellcheck disable=SC2086
+        run_and_poweroff PLAN /bin/catos-system recovery plan $ROOT_ARGS \
+            --snapshot-subvolume /@/.snapshots/2/snapshot --json
+        ;;
+    inspect)
+        # shellcheck disable=SC2086
+        run_and_poweroff INSPECT /bin/catos-system recovery inspect $ROOT_ARGS $SNAPSHOT_ARGS --json
+        ;;
+    status)
+        [ -n "$plan_id" ] || { echo "===RECOVERY_FATAL=== status missing plan id"; poweroff -f; }
+        # shellcheck disable=SC2086
+        run_and_poweroff STATUS /bin/catos-system recovery status $ROOT_ARGS \
+            --transaction "$plan_id" --json
+        ;;
+    apply|apply_fault)
+        [ -n "$plan_id" ] && [ -n "$token" ] && [ -f /plan.json ] \
+            || { echo "===RECOVERY_FATAL=== apply missing plan inputs"; poweroff -f; }
+        # shellcheck disable=SC2086
+        run_and_poweroff APPLY "$BIN" recovery apply $ROOT_ARGS $SNAPSHOT_ARGS \
+            --plan-file /plan.json --plan-id "$plan_id" --confirm "$token" --json
+        ;;
+    resume|resume_fault)
+        [ -n "$plan_id" ] || { echo "===RECOVERY_FATAL=== resume missing plan id"; poweroff -f; }
+        # shellcheck disable=SC2086
+        run_and_poweroff RESUME "$BIN" recovery resume $ROOT_ARGS \
+            --transaction "$plan_id" --json
+        ;;
+    revert|revert_fault)
+        [ -n "$plan_id" ] && [ -n "$token" ] \
+            || { echo "===RECOVERY_FATAL=== revert missing confirmation"; poweroff -f; }
+        # shellcheck disable=SC2086
+        run_and_poweroff REVERT "$BIN" recovery revert $ROOT_ARGS \
+            --transaction "$plan_id" --confirm "$token" --json
+        ;;
+    verify_applied|verify_reverted|verify_untouched)
+        mkdir -p /mnt
+        if ! mount -t btrfs -o ro,subvolid=5 /dev/vda /mnt; then
+            echo "===VERIFY_FAIL=== cannot mount btrfs image"
+            poweroff -f
+        fi
+        ok=1
+        if ! grep -q 'home-data-must-not-change' /mnt/@home/user-file; then
+            echo "===VERIFY_FAIL=== @home changed"; ok=0
+        fi
+        snapshot_path=/mnt/@snapshots/2
+        [ -e "$snapshot_path" ] || snapshot_path=/mnt/@/.snapshots/2/snapshot
+        snapshot_ro=$(btrfs property get "$snapshot_path" ro 2>&1)
+        if ! echo "$snapshot_ro" | grep -q 'ro=true'; then
+            echo "===VERIFY_FAIL=== source snapshot is not readonly: $snapshot_ro"; ok=0
+        fi
+        case "$scenario" in
+            verify_applied)
+                [ -f /mnt/@/var/lib/pacman/local/SNAPSHOT_2_MARKER ] \
+                    || { echo "===VERIFY_FAIL=== active root lacks snapshot marker"; ok=0; }
+                [ -f "/mnt/.catos-recovery/backups/$plan_id/root-before/var/lib/pacman/local/CURRENT_MARKER" ] \
+                    || { echo "===VERIFY_FAIL=== backup lacks original marker"; ok=0; }
+                ;;
+            verify_reverted)
+                [ -f /mnt/@/var/lib/pacman/local/CURRENT_MARKER ] \
+                    || { echo "===VERIFY_FAIL=== active root was not restored"; ok=0; }
+                [ ! -f /mnt/@/var/lib/pacman/local/SNAPSHOT_2_MARKER ] \
+                    || { echo "===VERIFY_FAIL=== reverted root still has snapshot marker"; ok=0; }
+                ;;
+            verify_untouched)
+                [ -f /mnt/@/var/lib/pacman/local/CURRENT_MARKER ] \
+                    || { echo "===VERIFY_FAIL=== untouched root marker missing"; ok=0; }
+                [ ! -e /mnt/.catos-recovery/transactions ] \
+                    || { echo "===VERIFY_FAIL=== refusal path wrote a transaction"; ok=0; }
+                ;;
+        esac
+        umount /mnt
+        if [ "$ok" -eq 1 ]; then echo "===VERIFY_OK==="; else echo "===VERIFY_FAILED==="; fi
+        sync
+        poweroff -f
+        ;;
+    *)
+        echo "===RECOVERY_FATAL=== unknown scenario $scenario"
+        poweroff -f
+        ;;
+esac
+GUEST
+    chmod +x "$INITRAMFS/init"
+}
 
-accel_args=()
+build_initramfs() {
+    plan=${1:-}
+    output=$2
+    if [ -n "$plan" ]; then cp "$plan" "$INITRAMFS/plan.json"; else rm -f "$INITRAMFS/plan.json"; fi
+    (cd "$INITRAMFS" && find . -print0 | cpio --null --create --format=newc 2>/dev/null) \
+        | gzip -9 > "$output"
+}
+
+write_root() {
+    root=$1
+    pretty=$2
+    marker=$3
+    external_esp=$4
+    mkdir -p "$root"/{etc,usr/lib/modules,boot,var/lib/pacman/local}
+    cat > "$root/etc/os-release" <<EOF
+NAME=CatOS
+ID=catos
+ID_LIKE=arch
+PRETTY_NAME="$pretty"
+EOF
+    if [ "$marker" = current ]; then
+        echo current-root-marker > "$root/var/lib/pacman/local/CURRENT_MARKER"
+    else
+        echo snapshot-2-marker > "$root/var/lib/pacman/local/SNAPSHOT_2_MARKER"
+    fi
+    cat > "$root/etc/fstab" <<EOF
+UUID=22222222-3333-4444-5555-666666666666 / btrfs rw,subvol=/@ 0 0
+EOF
+    if [ "$external_esp" -eq 1 ]; then
+        mkdir -p "$root/boot/efi"
+        echo '/dev/vdb /boot/efi vfat defaults 0 0' >> "$root/etc/fstab"
+    fi
+}
+
+create_fixture() {
+    layout=$1
+    rm -rf "$TREE" "$BTRFS_IMG" "$ESP_IMG"
+    mkdir -p "$TREE/@home"
+    echo home-data-must-not-change > "$TREE/@home/user-file"
+    external=0
+    [ "$layout" = external ] && external=1
+    write_root "$TREE/@" "CatOS Recovery Current Root" current "$external"
+    if [ "$layout" = nested ]; then
+        source_dir="$TREE/@/.snapshots/2/snapshot"
+        source_subvol='@/.snapshots/2/snapshot'
+    else
+        source_dir="$TREE/@snapshots/2"
+        source_subvol='@snapshots/2'
+    fi
+    write_root "$source_dir" "CatOS Recovery Snapshot 2" snapshot "$external"
+
+    truncate -s 512M "$BTRFS_IMG"
+    mkfs.btrfs -q -f -U 22222222-3333-4444-5555-666666666666 \
+        -r "$TREE" --subvol default:@ --subvol rw:@home --subvol "ro:$source_subvol" \
+        "$BTRFS_IMG" || fail "mkfs.btrfs failed for $layout fixture"
+
+    truncate -s 32M "$ESP_IMG"
+    mkfs.vfat -i C4705E12 "$ESP_IMG" >/dev/null || fail "mkfs.vfat failed"
+    mmd -i "$ESP_IMG" ::/EFI ::/EFI/CatOS >/dev/null || fail "cannot create ESP dirs"
+    printf 'CatOS ESP fixture\n' > "$WORKDIR/test.efi"
+    mcopy -i "$ESP_IMG" "$WORKDIR/test.efi" ::/EFI/CatOS/test.efi >/dev/null \
+        || fail "cannot populate ESP"
+    ESP_HASH_BEFORE=$(sha256sum "$ESP_IMG" | awk '{print $1}')
+}
+
+prepare_initramfs
+build_initramfs "" "$INITRAMFS_PLAN"
+
+accel=()
 if [ -w /dev/kvm ] && "$QEMU_BIN" -accel help 2>&1 | grep -q '^kvm$'; then
-    accel_args=(-enable-kvm -cpu host)
+    accel=(-enable-kvm -cpu host)
 fi
 
-run_qemu() {
-    local scenario="$1"
-    local fault="$2"
-    local plan_id_arg="${3:-}"
-    local token_arg="${4:-}"
-    local initramfs="${5:-$INITRAMFS_IMG_RUN}"
-    local extra_append=""
-    [ -n "$fault" ] && extra_append="$extra_append RECOVERY_FAULT_AT=$fault"
-    [ -n "$plan_id_arg" ] && extra_append="$extra_append RECOVERY_PLAN_ID=$plan_id_arg"
-    [ -n "$token_arg" ] && extra_append="$extra_append RECOVERY_TOKEN=$token_arg"
-
-    timeout 90 "$QEMU_BIN" \
-        -M pc \
-        -m 1024M \
-        -no-reboot \
-        -nographic \
-        "${accel_args[@]}" \
-        -kernel "$KERNEL" \
-        -initrd "$initramfs" \
-        -append "console=ttyS0 panic=1 rdinit=/init RECOVERY_SCENARIO=$scenario$extra_append" \
+run_guest() {
+    scenario=$1
+    fault=${2:-}
+    plan_id=${3:-}
+    token=${4:-}
+    initramfs=${5:-$INITRAMFS_RUN}
+    RUN_INDEX=$((RUN_INDEX + 1))
+    LAST_LOG="$WORKDIR/serial-$(printf '%03d' "$RUN_INDEX")-$scenario.log"
+    append="console=ttyS0 panic=1 rdinit=/init RECOVERY_SCENARIO=$scenario"
+    case "$fault" in
+        post:*) append="$append RECOVERY_POST_FAULT_AT=${fault#post:}" ;;
+        pre:*) append="$append RECOVERY_PRE_FAULT_AT=${fault#pre:}" ;;
+        before:*) append="$append RECOVERY_BEFORE_FAULT_AT=${fault#before:}" ;;
+        '') ;;
+        *) fail "unknown fault selector: $fault" ;;
+    esac
+    [ -n "$plan_id" ] && append="$append RECOVERY_PLAN_ID=$plan_id"
+    [ -n "$token" ] && append="$append RECOVERY_TOKEN=$token"
+    timeout 120 "$QEMU_BIN" -M pc -m 1024M -no-reboot -nographic \
+        "${accel[@]}" -kernel "$KERNEL" -initrd "$initramfs" -append "$append" \
         -drive if=none,id=btrfs,file="$BTRFS_IMG",format=raw,cache=none \
         -device virtio-blk-pci,drive=btrfs \
         -drive if=none,id=esp,file="$ESP_IMG",format=raw,cache=none \
-        -device virtio-blk-pci,drive=esp \
-        < /dev/null > "$SERIAL_LOG" 2>&1
-    return $?
+        -device virtio-blk-pci,drive=esp < /dev/null > "$LAST_LOG" 2>&1
+    qemu_rc=$?
+    [ "$qemu_rc" -ne 124 ] || fail "QEMU timed out for $scenario"
+    [ "$qemu_rc" -eq 0 ] || fail "QEMU exited $qemu_rc for $scenario"
+    grep -q '===RECOVERY_FATAL===' "$LAST_LOG" && fail "guest reported fatal error for $scenario"
 }
 
-# Step 1: PLAN phase — emits the plan JSON to stdout.
-run_qemu plan "" "" "" "$INITRAMFS_IMG_PLAN"
-plan_qemu_rc=$?
-if [ "$plan_qemu_rc" -eq 124 ]; then
-    echo "fail: QEMU plan phase timed out" >&2
-    KEEP=1
-    exit 1
-fi
+command_rc() {
+    label=$1
+    sed -n "s/.*===RECOVERY_${label}_END=== rc=\([0-9][0-9]*\).*/\1/p" "$LAST_LOG" | tail -1
+}
 
-awk '/===RECOVERY_PLAN_BEGIN===/,/===RECOVERY_PLAN_END===/' "$SERIAL_LOG" \
-    | grep -v '^===RECOVERY' > "$PLAN_FILE"
-if ! grep -q '"plan_id"' "$PLAN_FILE"; then
-    echo "fail: plan phase did not emit a valid plan JSON" >&2
-    KEEP=1
-    cat "$SERIAL_LOG" >&2
-    exit 1
-fi
-plan_id=$(grep -o '"plan_id"[^"]*"[^"]*"' "$PLAN_FILE" | head -1 | sed 's/.*"\([^"]*\)"$/\1/')
-token=$(grep -o '"confirmation_token"[^"]*"[^"]*"' "$PLAN_FILE" | head -1 | sed 's/.*"\([^"]*\)"$/\1/')
-if [ -z "$plan_id" ] || [ -z "$token" ]; then
-    echo "fail: could not extract plan_id and token from plan file" >&2
-    KEEP=1
-    cat "$PLAN_FILE" >&2
-    exit 1
-fi
-echo "info: plan_id=$plan_id token=$token"
+assert_rc() {
+    label=$1
+    expected=$2
+    actual=$(command_rc "$label")
+    [ -n "$actual" ] || fail "missing $label end marker"
+    [ "$actual" = "$expected" ] || fail "$label returned $actual, expected $expected"
+}
 
-build_initramfs "$PLAN_FILE" "$INITRAMFS_IMG_RUN"
+assert_nonzero_rc() {
+    label=$1
+    actual=$(command_rc "$label")
+    [ -n "$actual" ] || fail "missing $label end marker"
+    [ "$actual" -ne 0 ] || fail "$label unexpectedly succeeded"
+}
 
-if [ "$SKIP_CRASH" -eq 1 ]; then
-    run_qemu apply "" "$plan_id" "$token"
-    apply_rc=$?
-    if [ "$apply_rc" -eq 124 ]; then
-        echo "fail: QEMU apply phase timed out" >&2
-        KEEP=1
-        exit 1
-    fi
-    if ! grep -q '===RECOVERY_apply_END=== rc=0' "$SERIAL_LOG"; then
-        echo "fail: apply did not exit cleanly" >&2
-        KEEP=1
-        cat "$SERIAL_LOG" >&2
-        exit 1
-    fi
-else
-    crash_points=(
-        backup_created
-        replacement_created
-        old_root_moved
-        new_root_installed
-        boot_finalization_pending
-    )
-    iter=0
-    for fault in "${crash_points[@]}"; do
-        iter=$((iter + 1))
-        # The first iteration must use `apply` (no transaction exists
-        # yet). Every subsequent iteration must use `resume` because
-        # the previous crash persisted state mid-transaction.
-        if [ "$iter" -eq 1 ]; then
-            scenario=crash
-        else
-            scenario=resume
-        fi
-        echo "info: injecting fault at $fault (scenario=$scenario)"
-        run_qemu "$scenario" "$fault" "$plan_id" "$token"
-        # Preserve per-iteration serial log for debugging.
-        cp "$SERIAL_LOG" "$WORKDIR/serial-$iter-$fault.log"
-        if ! grep -q "===RECOVERY_IDS===" "$SERIAL_LOG"; then
-            echo "fail: crash run ($fault) did not reach the apply step" >&2
-            KEEP=1
-            cat "$SERIAL_LOG" >&2
-            exit 1
-        fi
-        cmd_label=$( [ "$scenario" = "crash" ] && echo apply || echo resume )
-        if grep -q "===RECOVERY_${cmd_label}_END=== rc=" "$SERIAL_LOG"; then
-            apply_rc=$(sed -n "s/.*===RECOVERY_${cmd_label}_END=== rc=\([0-9]*\).*/\1/p" "$SERIAL_LOG" | tail -1)
-            echo "info:   fault=$fault $cmd_label exited rc=$apply_rc"
-            if [ "$apply_rc" != "137" ] && [ "$apply_rc" != "0" ]; then
-                echo "warn:   fault=$fault $cmd_label exited rc=$apply_rc (expected 137 for SIGKILL or 0 for completion)"
-            fi
-        else
-            echo "info:   fault=$fault $cmd_label did not print end marker (likely SIGKILL at $fault)"
-        fi
+capture_json() {
+    label=$1
+    output=$2
+    python3 - "$LAST_LOG" "$label" "$output" <<'PY'
+import json, pathlib, sys
+log, label, output = sys.argv[1:]
+lines = pathlib.Path(log).read_text(errors='replace').splitlines()
+start = f"===RECOVERY_{label}_BEGIN==="
+end_prefix = f"===RECOVERY_{label}_END==="
+inside = False
+document = []
+for line in lines:
+    if line.strip() == start:
+        inside = True
+        continue
+    if inside and line.startswith(end_prefix):
+        break
+    if inside:
+        document.append(line.rstrip('\r'))
+while document and not document[0].lstrip().startswith('{'):
+    document.pop(0)
+if not document:
+    raise SystemExit(f"no JSON object found between {start} and {end_prefix}")
+text = '\n'.join(document)
+try:
+    value, _ = json.JSONDecoder().raw_decode(text.lstrip())
+except json.JSONDecodeError as error:
+    raise SystemExit(f"invalid JSON between {start} and {end_prefix}: {error}")
+pathlib.Path(output).write_text(json.dumps(value))
+PY
+    [ "$?" -eq 0 ] || fail "could not capture $label JSON"
+}
+
+json_value() {
+    file=$1
+    path=$2
+    python3 - "$file" "$path" <<'PY'
+import json, sys
+value = json.load(open(sys.argv[1]))
+for part in sys.argv[2].split('.'):
+    value = value[part]
+if isinstance(value, bool): print(str(value).lower())
+elif value is None: print('')
+else: print(value)
+PY
+}
+
+assert_json_value() {
+    file=$1 path=$2 expected=$3
+    actual=$(json_value "$file" "$path") || fail "missing JSON field $path"
+    [ "$actual" = "$expected" ] || fail "$path=$actual, expected $expected"
+}
+
+assert_esp_unchanged() {
+    after=$(sha256sum "$ESP_IMG" | awk '{print $1}')
+    [ "$after" = "$ESP_HASH_BEFORE" ] || fail "ESP image changed"
+}
+
+emit_plan() {
+    expected_boot=$1
+    run_guest plan "" "" "" "$INITRAMFS_PLAN"
+    assert_rc PLAN 0
+    capture_json PLAN "$PLAN_FILE"
+    assert_json_value "$PLAN_FILE" kind recovery_plan
+    assert_json_value "$PLAN_FILE" payload.schema_version 4
+    assert_json_value "$PLAN_FILE" payload.boot_consistency.status "$expected_boot"
+    PLAN_ID=$(json_value "$PLAN_FILE" payload.plan_id)
+    APPLY_TOKEN=$(json_value "$PLAN_FILE" payload.confirmation_token)
+    [ -n "$PLAN_ID" ] && [ -n "$APPLY_TOKEN" ] || fail "plan lacks id/token"
+    build_initramfs "$PLAN_FILE" "$INITRAMFS_RUN"
+}
+
+assert_completed_and_verify() {
+    run_guest status "" "$PLAN_ID" ""
+    assert_rc STATUS 0
+    capture_json STATUS "$WORKDIR/status.json"
+    assert_json_value "$WORKDIR/status.json" payload.reconciled_state completed
+    run_guest verify_applied "" "$PLAN_ID" ""
+    grep -q '===VERIFY_OK===' "$LAST_LOG" || fail "guest applied-state verification failed"
+    assert_esp_unchanged
+}
+
+run_fault_matrix() {
+    phase=$1
+    shift
+    create_fixture internal
+    emit_plan consistent
+    index=0
+    for point in "$@"; do
+        index=$((index + 1))
+        if [ "$index" -eq 1 ]; then scenario=apply_fault; label=APPLY; else scenario=resume_fault; label=RESUME; fi
+        echo "info: $phase fault at $point"
+        run_guest "$scenario" "$point" "$PLAN_ID" "$APPLY_TOKEN"
+        assert_rc "$label" 137
     done
+    run_guest resume "" "$PLAN_ID" ""
+    assert_rc RESUME 0
+    assert_completed_and_verify
+    echo "pass: $phase crash matrix"
+}
 
-    echo "info: final resume -> completed"
-    run_qemu resume "" "$plan_id" "$token"
-    cp "$SERIAL_LOG" "$WORKDIR/serial-resume-final.log"
-    if ! grep -q '===RECOVERY_resume_END=== rc=0' "$SERIAL_LOG"; then
-        echo "fail: final resume did not reach resume end rc=0" >&2
-        KEEP=1
-        cat "$SERIAL_LOG" >&2
-        exit 1
-    fi
+# Happy path is always exercised, even when crash matrices are skipped.
+create_fixture internal
+emit_plan consistent
+run_guest apply "" "$PLAN_ID" "$APPLY_TOKEN"
+assert_rc APPLY 0
+assert_completed_and_verify
+echo "pass: real Btrfs apply happy path"
+
+if [ "$SKIP_CRASH" -eq 0 ]; then
+    run_fault_matrix before-operation \
+        before:create_backup before:create_replacement before:swap_roots
+    run_fault_matrix after-operation-before-state \
+        pre:create_backup pre:create_replacement pre:swap_roots
+    run_fault_matrix after-state-persist \
+        post:backup_created post:replacement_created post:old_root_moved post:new_root_installed
 fi
 
-# Step verification: image-level assertions on the btrfs image.
-# We re-mount the image read-only on the host (Linux + btrfs) and
-# inspect the resulting tree. Skip if host has no btrfs module.
-if ! modprobe btrfs 2>/dev/null; then
-    echo "skip: host has no btrfs module; deferring image verification to guest-side checks"
-else
-    VERIFY_MNT="$WORKDIR/verify-mnt"
-    rm -rf "$VERIFY_MNT"
-    mkdir -p "$VERIFY_MNT"
-    if mount -o loop,subvolid=5,ro "$BTRFS_IMG" "$VERIFY_MNT" 2>/dev/null; then
-        # 1. /@ now contains the snapshot-2 marker.
-        if [ -r "$VERIFY_MNT/@/var/lib/pacman/local/SNAPSHOT_2_MARKER" ]; then
-            echo "pass: /@ contains snapshot-2 content"
-        else
-            echo "fail: /@ does not contain SNAPSHOT_2_MARKER" >&2
-            KEEP=1
-            umount "$VERIFY_MNT" 2>/dev/null || true
-            exit 1
-        fi
-        # 2. Backup path contains the original current-root marker.
-        backup_path=$(ls -d "$VERIFY_MNT/.catos-recovery/backups/"*/root-before 2>/dev/null | head -1)
-        if [ -n "$backup_path" ] && [ -r "$backup_path/var/lib/pacman/local/CURRENT_MARKER" ]; then
-            echo "pass: backup contains original /@ content"
-        else
-            echo "fail: backup missing or lacks CURRENT_MARKER" >&2
-            KEEP=1
-            umount "$VERIFY_MNT" 2>/dev/null || true
-            exit 1
-        fi
-        # 3. @home content unchanged.
-        if grep -q 'home-data-must-not-change' "$VERIFY_MNT/@home/user-file"; then
-            echo "pass: @home unchanged"
-        else
-            echo "fail: @home content changed" >&2
-            KEEP=1
-            umount "$VERIFY_MNT" 2>/dev/null || true
-            exit 1
-        fi
-        # 4. Snapshot readonly attribute preserved.
-        ro_check=$(btrfs property get "$VERIFY_MNT/@/.snapshots/2/snapshot" ro 2>&1 || true)
-        if echo "$ro_check" | grep -q 'ro=true'; then
-            echo "pass: snapshot readonly attribute preserved"
-        else
-            echo "fail: snapshot readonly attribute changed: $ro_check" >&2
-            KEEP=1
-            umount "$VERIFY_MNT" 2>/dev/null || true
-            exit 1
-        fi
-        umount "$VERIFY_MNT" 2>/dev/null || true
-    else
-        echo "skip: host cannot mount the btrfs image for verification"
-    fi
-fi
+# Completed revert, including the reverse-swap pre-persist crash window.
+create_fixture internal
+emit_plan consistent
+run_guest inspect "" "$PLAN_ID" ""
+assert_rc INSPECT 0
+capture_json INSPECT "$WORKDIR/inspect-pre.json"
+pre_id=$(json_value "$WORKDIR/inspect-pre.json" payload.current_root.subvolume_id)
+run_guest apply "" "$PLAN_ID" "$APPLY_TOKEN"
+assert_rc APPLY 0
+run_guest inspect "" "$PLAN_ID" ""
+assert_rc INSPECT 0
+capture_json INSPECT "$WORKDIR/inspect-post.json"
+post_id=$(json_value "$WORKDIR/inspect-post.json" payload.current_root.subvolume_id)
+[ -n "$pre_id" ] && [ -n "$post_id" ] && [ "$pre_id" != "$post_id" ] \
+    || fail "root identity did not change after apply (pre=$pre_id post=$post_id)"
+run_guest status "" "$PLAN_ID" ""
+assert_rc STATUS 0
+capture_json STATUS "$WORKDIR/status-completed.json"
+assert_json_value "$WORKDIR/status-completed.json" payload.reconciled_state completed
+REVERT_TOKEN=$(json_value "$WORKDIR/status-completed.json" payload.revert_confirmation_token)
+[ -n "$REVERT_TOKEN" ] || fail "completed status did not emit revert token"
+run_guest revert_fault pre:swap_roots_back "$PLAN_ID" "$REVERT_TOKEN"
+assert_rc REVERT 137
+run_guest status "" "$PLAN_ID" ""
+assert_rc STATUS 0
+capture_json STATUS "$WORKDIR/status-reconciled-reverted.json"
+assert_json_value "$WORKDIR/status-reconciled-reverted.json" payload.reconciled_state reverted
+REVERT_TOKEN=$(json_value "$WORKDIR/status-reconciled-reverted.json" payload.revert_confirmation_token)
+[ -n "$REVERT_TOKEN" ] || fail "reconciled Reverted status did not emit idempotent token"
+run_guest revert "" "$PLAN_ID" "$REVERT_TOKEN"
+assert_rc REVERT 0
+run_guest inspect "" "$PLAN_ID" ""
+assert_rc INSPECT 0
+capture_json INSPECT "$WORKDIR/inspect-reverted.json"
+reverted_id=$(json_value "$WORKDIR/inspect-reverted.json" payload.current_root.subvolume_id)
+[ "$reverted_id" = "$pre_id" ] || fail "revert restored id $reverted_id, expected $pre_id"
+run_guest verify_reverted "" "$PLAN_ID" ""
+grep -q '===VERIFY_OK===' "$LAST_LOG" || fail "guest reverted-state verification failed"
+assert_esp_unchanged
+echo "pass: completed revert and reverse-swap crash recovery"
 
-# ESP must be byte-for-byte unchanged.
-ESP_HASH_AFTER=$(sha256sum "$ESP_IMG" | awk '{print $1}')
-if [ "$ESP_HASH_BEFORE" != "$ESP_HASH_AFTER" ]; then
-    echo "fail: ESP image changed during recovery" >&2
-    KEEP=1
-    exit 1
-fi
-echo "pass: ESP byte-for-byte unchanged"
+# Nested Snapper-style source is explicitly unsupported and must not write.
+create_fixture nested
+run_guest plan_nested "" "" "" "$INITRAMFS_PLAN"
+assert_nonzero_rc PLAN
+capture_json PLAN "$WORKDIR/nested-error.json"
+assert_json_value "$WORKDIR/nested-error.json" kind error
+assert_json_value "$WORKDIR/nested-error.json" payload.kind unsupported_nested_snapshot_layout
+run_guest verify_untouched "" "" "" "$INITRAMFS_PLAN"
+grep -q '===VERIFY_OK===' "$LAST_LOG" || fail "nested-layout refusal wrote to target"
+assert_esp_unchanged
+echo "pass: nested snapshot layout refused without target writes"
 
-echo "pass: phase-3 recovery QEMU smoke succeeded"
+# External ESP is understood but unsupported: plan reports it, apply refuses
+# before Engine::begin, and neither target nor ESP may change.
+create_fixture external
+emit_plan unsupported
+run_guest apply "" "$PLAN_ID" "$APPLY_TOKEN"
+assert_nonzero_rc APPLY
+capture_json APPLY "$WORKDIR/external-error.json"
+assert_json_value "$WORKDIR/external-error.json" kind error
+assert_json_value "$WORKDIR/external-error.json" payload.kind unsupported_external_boot_layout
+run_guest verify_untouched "" "$PLAN_ID" "" "$INITRAMFS_PLAN"
+grep -q '===VERIFY_OK===' "$LAST_LOG" || fail "external-ESP refusal wrote to target"
+assert_esp_unchanged
+echo "pass: external ESP refused before persistent recovery writes"
+
+echo "pass: authoritative phase-3 recovery QEMU acceptance succeeded"

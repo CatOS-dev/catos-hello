@@ -93,12 +93,26 @@ if(BUILD_TESTS)
         NAME catos-system-cargo-test
         COMMAND ${CMAKE_COMMAND} -E env
                 "CARGO_TARGET_DIR=${CATOS_SYSTEM_CARGO_TARGET_DIR}"
-                "${CARGO_CMD}" test --no-fail-fast --locked
+                "${CARGO_CMD}" test --no-fail-fast --all-targets
+                --all-features --locked
         WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
     )
     set_tests_properties(catos-system-cargo-test PROPERTIES
         TIMEOUT 300
         LABELS "rust;unit"
+    )
+
+    add_test(
+        NAME catos-system-cargo-clippy
+        COMMAND ${CMAKE_COMMAND} -E env
+                "CARGO_TARGET_DIR=${CATOS_SYSTEM_CARGO_TARGET_DIR}"
+                "${CARGO_CMD}" clippy --all-targets --all-features
+                --locked -- -D warnings
+        WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+    )
+    set_tests_properties(catos-system-cargo-clippy PROPERTIES
+        TIMEOUT 300
+        LABELS "rust;lint"
     )
 
     add_test(
@@ -189,7 +203,11 @@ if(BUILD_TESTS)
             COMMENT "Building catos-system with recovery_fault_injection (Rust ${CATOS_SYSTEM_TARGET}, release)"
             VERBATIM
         )
-        add_custom_target(catos-system-fault-bin DEPENDS "${CATOS_SYSTEM_FAULT_BIN}")
+        # ALL is intentional: CTest cannot build a custom target through
+        # the test DEPENDS property. When recovery smoke is enabled, the
+        # fault binary must exist after the normal build step.
+        add_custom_target(catos-system-fault-bin ALL
+                          DEPENDS "${CATOS_SYSTEM_FAULT_BIN}")
 
         add_test(
             NAME catos-system-recovery-qemu-smoke
@@ -199,10 +217,9 @@ if(BUILD_TESTS)
                     --test-bin "${CATOS_SYSTEM_FAULT_BIN}"
         )
         set_tests_properties(catos-system-recovery-qemu-smoke PROPERTIES
-            TIMEOUT 600
+            TIMEOUT 1800
             SKIP_RETURN_CODE 77
             LABELS "rust;integration;qemu;recovery"
-            DEPENDS catos-system-fault-bin
         )
     endif()
 endif()
