@@ -159,6 +159,11 @@ fn resume_cannot_exit_success_with_a_failure_state() {
     let outcome = Phase3Outcome::Resume {
         record,
         final_state: TransactionState::FailedRecoverable,
+        cleanup: catos_system::model::recovery::CleanupSummary {
+            unmounted: Vec::new(),
+            residual: Vec::new(),
+            all_clean: true,
+        },
     };
     assert_ne!(exit_code_for(&outcome), catos_system::exit_code::SUCCESS);
 }

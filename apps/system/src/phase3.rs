@@ -28,8 +28,9 @@ use crate::model::recovery::{
 };
 use crate::mount::namespace;
 use crate::mount::plan::build_probe_plan;
-use crate::mount::session::{Session, SESSION_ROOT_PARENT};
-use crate::mount::syscall::{self, ms_flags};
+use crate::mount::secure_dir::{create_session_dir, remove_session_dir, SESSION_ROOT_PARENT};
+use crate::mount::session::Session;
+use crate::mount::syscall::{self, mnt_flags, ms_flags};
 use crate::parse::fstab::{self, FstabEntry, FstabEntryKind, FstabSource};
 use crate::recovery::confined;
 use crate::recovery::engine::{Engine, EngineOptions};
@@ -57,15 +58,18 @@ pub enum Phase3Outcome {
     Apply {
         record: TransactionRecord,
         final_state: TransactionState,
+        cleanup: CleanupSummary,
     },
     Status(Box<RecoveryStatusReport>),
     Resume {
         record: TransactionRecord,
         final_state: TransactionState,
+        cleanup: CleanupSummary,
     },
     Revert {
         record: TransactionRecord,
         final_state: TransactionState,
+        cleanup: CleanupSummary,
     },
     Error(Box<RecoveryError>),
 }
@@ -87,9 +91,10 @@ pub fn run_recovery(args: RecoveryArgs) -> Phase3Outcome {
             Err(error) => Phase3Outcome::Error(Box::new(error)),
         },
         RecoverySubcommand::Apply => match run_apply(&args) {
-            Ok((record, final_state)) => Phase3Outcome::Apply {
+            Ok((record, final_state, cleanup)) => Phase3Outcome::Apply {
                 record,
                 final_state,
+                cleanup,
             },
             Err(error) => Phase3Outcome::Error(Box::new(error)),
         },
@@ -98,16 +103,18 @@ pub fn run_recovery(args: RecoveryArgs) -> Phase3Outcome {
             Err(error) => Phase3Outcome::Error(Box::new(error)),
         },
         RecoverySubcommand::Resume => match run_resume(&args) {
-            Ok((record, final_state)) => Phase3Outcome::Resume {
+            Ok((record, final_state, cleanup)) => Phase3Outcome::Resume {
                 record,
                 final_state,
+                cleanup,
             },
             Err(error) => Phase3Outcome::Error(Box::new(error)),
         },
         RecoverySubcommand::Revert => match run_revert(&args) {
-            Ok((record, final_state)) => Phase3Outcome::Revert {
+            Ok((record, final_state, cleanup)) => Phase3Outcome::Revert {
                 record,
                 final_state,
+                cleanup,
             },
             Err(error) => Phase3Outcome::Error(Box::new(error)),
         },
@@ -238,7 +245,6 @@ fn run_plan(args: &RecoveryArgs) -> Result<RecoveryPlan, RecoveryError> {
             "insufficient space: --snapshot-subvolume is required for plan",
         )
     })?;
-    let _ = selection.esp_device;
 
     let probe = probe_target_readonly(&device, root_subvolume.as_deref(), Some(&snapshot))?;
 
@@ -268,7 +274,9 @@ fn run_plan(args: &RecoveryArgs) -> Result<RecoveryPlan, RecoveryError> {
 // apply
 // ---------------------------------------------------------------------------
 
-fn run_apply(args: &RecoveryArgs) -> Result<(TransactionRecord, TransactionState), RecoveryError> {
+fn run_apply(
+    args: &RecoveryArgs,
+) -> Result<(TransactionRecord, TransactionState, CleanupSummary), RecoveryError> {
     let plan_id_arg = args.plan_id.as_deref().ok_or_else(|| {
         RecoveryError::new(
             RecoveryErrorKind::ConfirmationTokenMismatch,
@@ -288,13 +296,19 @@ fn run_apply(args: &RecoveryArgs) -> Result<(TransactionRecord, TransactionState
         )
     })?;
 
+    // CLI-contract check FIRST: --esp-device is rejected before any
+    // root check, plan load, or mount. A wrapper script that learned
+    // the flag from phase-2 `target plan` must learn it is unsupported
+    // here without paying for a privilege check or touching the plan
+    // file.
+    let selection = args.require_target_selection()?;
+
     require_root()?;
 
     let plan = store::load_plan(plan_file)?;
     crate::recovery::identity::validate_plan_shape(&plan)?;
     crate::recovery::identity::verify_confirmation_token(&plan, plan_id_arg, confirm)?;
 
-    let selection = args.require_target_selection()?;
     ensure_cli_root_matches_plan(selection.root_subvolume.as_deref(), &plan.current_root.path)?;
     ensure_supported_snapshot_layout(&plan.current_root.path, &plan.source_snapshot.path)?;
 
@@ -338,21 +352,62 @@ fn run_apply(args: &RecoveryArgs) -> Result<(TransactionRecord, TransactionState
     ensure_target_is_not_running_root(&fresh.filesystem, &fresh.current_root)?;
     let device = fresh.canonical_device;
 
-    let mount_session = mount_btrfs_toplevel_rw(&device)?;
-    let top_level_mount = mount_session.top_level_mount.clone();
+    let mut mount_session = RecoveryRwSession::mount(&device)?;
+    let top_level_mount = mount_session.top_level_mount().to_path_buf();
     let rw_target = validate_mounted_filesystem(&top_level_mount, &device)?;
 
-    let mut engine = Engine::begin(
-        EngineOptions {
-            top_level_mount,
-            device_path: device,
-            validated_filesystem: rw_target.filesystem,
-        },
-        plan,
-    )?;
+    let drive_outcome = (|| {
+        let mut engine = Engine::begin(
+            EngineOptions {
+                top_level_mount: top_level_mount.clone(),
+                device_path: device.clone(),
+                validated_filesystem: rw_target.filesystem.clone(),
+            },
+            plan,
+        )?;
+        let final_state = engine.drive()?;
+        Ok::<(Engine, TransactionState), RecoveryError>((engine, final_state))
+    })();
 
-    let final_state = engine.drive()?;
-    Ok((engine.record().clone(), final_state))
+    // attach_cleanup MUST run while the rw mount session is still
+    // alive: the transaction record lives on the btrfs top-level,
+    // reachable only through the session mount. We persist a
+    // placeholder "all_clean" summary before tearing down, then
+    // re-stamp the in-memory record (which the renderer will emit
+    // via the Phase3Outcome) with the REAL cleanup summary computed
+    // after teardown. The on-disk record carries the placeholder;
+    // the process output carries the truth. This split is forced
+    // by the physical constraint that the record is unreachable
+    // after umount.
+    let (mut engine, final_state) = match drive_outcome {
+        Ok(pair) => pair,
+        Err(mut error) => {
+            let cleanup_summary = mount_session.cleanup();
+            engine_attach_cleanup_into_error(&mut error, cleanup_summary);
+            return Err(error);
+        }
+    };
+    let placeholder = CleanupSummary {
+        unmounted: Vec::new(),
+        residual: Vec::new(),
+        all_clean: true,
+    };
+    engine.attach_cleanup(placeholder)?;
+    let real_cleanup = mount_session.cleanup();
+    engine.record_mut().last_cleanup = Some(real_cleanup.clone());
+    Ok((engine.record().clone(), final_state, real_cleanup))
+}
+
+fn engine_attach_cleanup_into_error(error: &mut RecoveryError, cleanup: CleanupSummary) {
+    if !cleanup.all_clean {
+        let suffix = format!(
+            " (recovery rw session cleanup was incomplete: residual={:?})",
+            cleanup.residual
+        );
+        let mut combined = error.message.to_string();
+        combined.push_str(&suffix);
+        error.message = combined.into_boxed_str();
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -494,10 +549,15 @@ fn revert_confirmation_is_safe(state: TransactionState) -> bool {
 // resume
 // ---------------------------------------------------------------------------
 
-fn run_resume(args: &RecoveryArgs) -> Result<(TransactionRecord, TransactionState), RecoveryError> {
+fn run_resume(
+    args: &RecoveryArgs,
+) -> Result<(TransactionRecord, TransactionState, CleanupSummary), RecoveryError> {
+    // CLI-contract check FIRST: --esp-device must be rejected before
+    // require_root() so a wrapper learns the rejection without paying
+    // for a privilege check.
+    let selection = args.require_target_selection()?;
     require_root()?;
     let transaction_id = require_transaction_id(args.transaction.as_deref(), "resume")?;
-    let selection = args.require_target_selection()?;
     let probe = probe_existing_transaction_readonly(
         &selection.root_device,
         selection.root_subvolume.as_deref(),
@@ -505,31 +565,64 @@ fn run_resume(args: &RecoveryArgs) -> Result<(TransactionRecord, TransactionStat
         true,
     )?;
     let device = probe.canonical_device;
-    let mount_session = mount_btrfs_toplevel_rw(&device)?;
-    let target = validate_mounted_filesystem(&mount_session.top_level_mount, &device)?;
+    let mut mount_session = RecoveryRwSession::mount(&device)?;
+    let top_level_mount = mount_session.top_level_mount().to_path_buf();
+    let target = validate_mounted_filesystem(&top_level_mount, &device)?;
     if target.filesystem != probe.filesystem {
-        return Err(RecoveryError::new(
+        let cleanup = mount_session.cleanup();
+        let mut error = RecoveryError::new(
             RecoveryErrorKind::TargetChanged,
             "target filesystem identity changed between read-only preflight and write mount",
-        ));
+        );
+        engine_attach_cleanup_into_error(&mut error, cleanup);
+        return Err(error);
     }
-    let mut engine = Engine::load_for_write(
-        EngineOptions {
-            top_level_mount: mount_session.top_level_mount.clone(),
-            device_path: device.clone(),
-            validated_filesystem: target.filesystem,
-        },
-        transaction_id,
-    )?;
-    let final_state = engine.drive()?;
-    Ok((engine.record().clone(), final_state))
+    let drive_outcome = (|| {
+        let mut engine = Engine::load_for_write(
+            EngineOptions {
+                top_level_mount: top_level_mount.clone(),
+                device_path: device.clone(),
+                validated_filesystem: target.filesystem.clone(),
+            },
+            transaction_id,
+        )?;
+        let final_state = engine.drive()?;
+        Ok::<(Engine, TransactionState), RecoveryError>((engine, final_state))
+    })();
+
+    // attach_cleanup persists a placeholder; the real cleanup
+    // summary is restamped onto the in-memory record after
+    // teardown. See run_apply for the rationale.
+    let (mut engine, final_state) = match drive_outcome {
+        Ok(pair) => pair,
+        Err(mut error) => {
+            let cleanup_summary = mount_session.cleanup();
+            engine_attach_cleanup_into_error(&mut error, cleanup_summary);
+            return Err(error);
+        }
+    };
+    let placeholder = CleanupSummary {
+        unmounted: Vec::new(),
+        residual: Vec::new(),
+        all_clean: true,
+    };
+    engine.attach_cleanup(placeholder)?;
+    let real_cleanup = mount_session.cleanup();
+    engine.record_mut().last_cleanup = Some(real_cleanup.clone());
+    Ok((engine.record().clone(), final_state, real_cleanup))
 }
 
 // ---------------------------------------------------------------------------
 // revert
 // ---------------------------------------------------------------------------
 
-fn run_revert(args: &RecoveryArgs) -> Result<(TransactionRecord, TransactionState), RecoveryError> {
+fn run_revert(
+    args: &RecoveryArgs,
+) -> Result<(TransactionRecord, TransactionState, CleanupSummary), RecoveryError> {
+    // CLI-contract check FIRST: --esp-device must be rejected before
+    // require_root() so a wrapper learns the rejection without paying
+    // for a privilege check.
+    let selection = args.require_target_selection()?;
     require_root()?;
     let transaction_id = require_transaction_id(args.transaction.as_deref(), "revert")?;
     let confirm = args.confirm.as_deref().ok_or_else(|| {
@@ -538,7 +631,6 @@ fn run_revert(args: &RecoveryArgs) -> Result<(TransactionRecord, TransactionStat
             "revert requires --confirm <token>",
         )
     })?;
-    let selection = args.require_target_selection()?;
     let probe = probe_existing_transaction_readonly(
         &selection.root_device,
         selection.root_subvolume.as_deref(),
@@ -546,25 +638,52 @@ fn run_revert(args: &RecoveryArgs) -> Result<(TransactionRecord, TransactionStat
         true,
     )?;
     let device = probe.canonical_device;
-    let mount_session = mount_btrfs_toplevel_rw(&device)?;
-    let target = validate_mounted_filesystem(&mount_session.top_level_mount, &device)?;
+    let mut mount_session = RecoveryRwSession::mount(&device)?;
+    let top_level_mount = mount_session.top_level_mount().to_path_buf();
+    let target = validate_mounted_filesystem(&top_level_mount, &device)?;
     if target.filesystem != probe.filesystem {
-        return Err(RecoveryError::new(
+        let cleanup = mount_session.cleanup();
+        let mut error = RecoveryError::new(
             RecoveryErrorKind::TargetChanged,
             "target filesystem identity changed between read-only preflight and write mount",
-        ));
+        );
+        engine_attach_cleanup_into_error(&mut error, cleanup);
+        return Err(error);
     }
-    let mut engine = Engine::load_for_revert(
-        EngineOptions {
-            top_level_mount: mount_session.top_level_mount.clone(),
-            device_path: device.clone(),
-            validated_filesystem: target.filesystem,
-        },
-        transaction_id,
-        confirm,
-    )?;
-    let final_state = engine.revert()?;
-    Ok((engine.record().clone(), final_state))
+    let revert_outcome = (|| {
+        let mut engine = Engine::load_for_revert(
+            EngineOptions {
+                top_level_mount: top_level_mount.clone(),
+                device_path: device.clone(),
+                validated_filesystem: target.filesystem.clone(),
+            },
+            transaction_id,
+            confirm,
+        )?;
+        let final_state = engine.revert()?;
+        Ok::<(Engine, TransactionState), RecoveryError>((engine, final_state))
+    })();
+
+    // attach_cleanup persists a placeholder; the real cleanup
+    // summary is restamped onto the in-memory record after
+    // teardown. See run_apply for the rationale.
+    let (mut engine, final_state) = match revert_outcome {
+        Ok(pair) => pair,
+        Err(mut error) => {
+            let cleanup_summary = mount_session.cleanup();
+            engine_attach_cleanup_into_error(&mut error, cleanup_summary);
+            return Err(error);
+        }
+    };
+    let placeholder = CleanupSummary {
+        unmounted: Vec::new(),
+        residual: Vec::new(),
+        all_clean: true,
+    };
+    engine.attach_cleanup(placeholder)?;
+    let real_cleanup = mount_session.cleanup();
+    engine.record_mut().last_cleanup = Some(real_cleanup.clone());
+    Ok((engine.record().clone(), final_state, real_cleanup))
 }
 
 // ---------------------------------------------------------------------------
@@ -572,100 +691,243 @@ fn run_revert(args: &RecoveryArgs) -> Result<(TransactionRecord, TransactionStat
 // ---------------------------------------------------------------------------
 
 /// A private mount namespace with the btrfs top-level mounted
-/// read-write at a fixed path. Drop cleans up the namespace.
-struct RecoveryMountSession {
+/// read-write at a session directory created under
+/// `/run/catos-system/sessions/`. The session directory is created
+/// with the shared [`crate::mount::secure_dir`] primitives so that
+/// phase 2 and phase 3 apply identical security semantics.
+///
+/// Lifecycle contract:
+///
+/// * every successful construction is paired with an explicit
+///   [`RecoveryRwSession::cleanup`] call by the orchestrator on
+///   BOTH the success and error paths of `apply`, `resume`, and
+///   `revert`;
+/// * `cleanup` is idempotent: a second call is a no-op;
+/// * the explicit `cleanup` result is the authoritative cleanup
+///   report — it is what gets persisted into the transaction
+///   record's `last_cleanup`;
+/// * `Drop` is the last-resort safety net. If `cleanup` was NOT
+///   called (e.g. the process panicked between mount and the
+///   explicit cleanup call), `Drop` runs the same teardown but
+///   cannot surface the result to the caller. A panic-style
+///   cleanup is logged to stderr so an operator scanning logs can
+///   still see what happened.
+pub struct RecoveryRwSession {
     top_level_mount: PathBuf,
-    // Held to keep the path alive; we explicitly do NOT unmount here
-    // because the engine performs writes that must outlive the
-    // syscall (e.g. fsync). The namespace teardown on process exit
-    // is the authoritative cleanup.
-    _marker: std::marker::PhantomData<*const u8>,
+    session_dir: PathBuf,
+    cleanup_state: RecoveryRwSessionCleanupState,
 }
 
-fn mount_btrfs_toplevel_rw(device: &Path) -> Result<RecoveryMountSession, RecoveryError> {
-    // Enter a private namespace so the rw mount does not propagate
-    // to the host.
-    namespace::establish_private_namespace().map_err(|e| RecoveryError {
-        kind: RecoveryErrorKind::SyscallFailed,
-        message: format!("cannot establish private namespace: {e}").into(),
-        transaction_id: None,
-        current_state: None,
-        failed_step: Some("namespace".into()),
-        errno: Some(e.errno),
-        external_exit_code: None,
-        completed_steps: Box::default(),
-        disk_facts: None,
-        resume_possible: false,
-        revert_possible: false,
-        manual_intervention_required: true,
-        record_persistence_error: None,
-    })?;
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RecoveryRwSessionCleanupState {
+    Mounted,
+    Cleaned,
+}
 
-    let mount_point =
-        PathBuf::from(SESSION_ROOT_PARENT).join(format!("recovery-rw-{}", std::process::id()));
-    std::fs::create_dir_all(&mount_point).map_err(|e| RecoveryError {
-        kind: RecoveryErrorKind::SyscallFailed,
-        message: format!("cannot create {}: {e}", mount_point.display()).into(),
-        transaction_id: None,
-        current_state: None,
-        failed_step: Some("mkdir".into()),
-        errno: None,
-        external_exit_code: None,
-        completed_steps: Box::default(),
-        disk_facts: None,
-        resume_possible: false,
-        revert_possible: false,
-        manual_intervention_required: true,
-        record_persistence_error: None,
-    })?;
+impl RecoveryRwSession {
+    /// Mount the btrfs top-level (subvolid=5) read-write inside a
+    /// private mount namespace at a freshly-created, secure
+    /// session directory.
+    pub fn mount(device: &Path) -> Result<Self, RecoveryError> {
+        namespace::establish_private_namespace().map_err(|e| RecoveryError {
+            kind: RecoveryErrorKind::SyscallFailed,
+            message: format!("cannot establish private namespace: {e}").into(),
+            transaction_id: None,
+            current_state: None,
+            failed_step: Some("namespace".into()),
+            errno: Some(e.errno),
+            external_exit_code: None,
+            completed_steps: Box::default(),
+            disk_facts: None,
+            resume_possible: false,
+            revert_possible: false,
+            manual_intervention_required: true,
+            record_persistence_error: None,
+        })?;
 
-    // Mount the btrfs top-level read-write. We use subvolid=5 to be
-    // explicit; the rw mode is required because the recovery engine
-    // performs snapshot operations and renameat2.
-    let data = "subvolid=5";
-    let source = device.to_str().ok_or_else(|| RecoveryError {
-        kind: RecoveryErrorKind::SyscallFailed,
-        message: format!("device path {} is not valid UTF-8", device.display()).into(),
-        transaction_id: None,
-        current_state: None,
-        failed_step: Some("mount".into()),
-        errno: None,
-        external_exit_code: None,
-        completed_steps: Box::default(),
-        disk_facts: None,
-        resume_possible: false,
-        revert_possible: false,
-        manual_intervention_required: false,
-        record_persistence_error: None,
-    })?;
+        let session_dir = create_session_dir(Path::new(SESSION_ROOT_PARENT), "recovery-rw")
+            .map_err(|err| RecoveryError {
+                kind: err.kind,
+                message: err.message,
+                transaction_id: None,
+                current_state: None,
+                failed_step: Some("session-dir".into()),
+                errno: None,
+                external_exit_code: None,
+                completed_steps: Box::default(),
+                disk_facts: None,
+                resume_possible: false,
+                revert_possible: false,
+                manual_intervention_required: true,
+                record_persistence_error: None,
+            })?;
 
-    syscall::mount(
-        Some(source),
-        &mount_point,
-        Some("btrfs"),
-        ms_flags::MS_NOSUID | ms_flags::MS_NODEV,
-        Some(data),
-    )
-    .map_err(|e| RecoveryError {
-        kind: RecoveryErrorKind::SyscallFailed,
-        message: format!("cannot mount btrfs rw at {}: {e}", mount_point.display()).into(),
-        transaction_id: None,
-        current_state: None,
-        failed_step: Some("mount".into()),
-        errno: Some(e.errno),
-        external_exit_code: None,
-        completed_steps: Box::default(),
-        disk_facts: None,
-        resume_possible: false,
-        revert_possible: false,
-        manual_intervention_required: false,
-        record_persistence_error: None,
-    })?;
+        let data = "subvolid=5";
+        let source = device.to_str().ok_or_else(|| RecoveryError {
+            kind: RecoveryErrorKind::SyscallFailed,
+            message: format!("device path {} is not valid UTF-8", device.display()).into(),
+            transaction_id: None,
+            current_state: None,
+            failed_step: Some("mount".into()),
+            errno: None,
+            external_exit_code: None,
+            completed_steps: Box::default(),
+            disk_facts: None,
+            resume_possible: false,
+            revert_possible: false,
+            manual_intervention_required: false,
+            record_persistence_error: None,
+        })?;
 
-    Ok(RecoveryMountSession {
-        top_level_mount: mount_point,
-        _marker: std::marker::PhantomData,
-    })
+        syscall::mount(
+            Some(source),
+            &session_dir,
+            Some("btrfs"),
+            ms_flags::MS_NOSUID | ms_flags::MS_NODEV,
+            Some(data),
+        )
+        .map_err(|e| RecoveryError {
+            kind: RecoveryErrorKind::SyscallFailed,
+            message: format!("cannot mount btrfs rw at {}: {e}", session_dir.display()).into(),
+            transaction_id: None,
+            current_state: None,
+            failed_step: Some("mount".into()),
+            errno: Some(e.errno),
+            external_exit_code: None,
+            completed_steps: Box::default(),
+            disk_facts: None,
+            resume_possible: false,
+            revert_possible: false,
+            manual_intervention_required: false,
+            record_persistence_error: None,
+        })?;
+
+        Ok(RecoveryRwSession {
+            top_level_mount: session_dir.clone(),
+            session_dir,
+            cleanup_state: RecoveryRwSessionCleanupState::Mounted,
+        })
+    }
+
+    pub fn top_level_mount(&self) -> &Path {
+        &self.top_level_mount
+    }
+
+    /// Explicitly tear down the read-write mount and remove the
+    /// session directory. Idempotent. The returned [`CleanupSummary`]
+    /// is the authoritative teardown report; the orchestrator MUST
+    /// persist it into the transaction record so operators can
+    /// diagnose a dirty recovery environment from outside the
+    /// process.
+    ///
+    /// Three distinct outcomes are observable from the returned
+    /// summary:
+    ///
+    /// * clean: `residual` is empty and `all_clean == true`;
+    /// * lazy-detached: `residual` carries the mount with a
+    ///   "detached lazily" reason — the umount2 failed but
+    ///   `MNT_DETACH` succeeded. The kernel still owns the mount;
+    ///   the operator MUST be told. `all_clean == false`;
+    /// * residual: `residual` carries the mount with both errno
+    ///   values; the mount is still live in the namespace.
+    ///   `all_clean == false`. The session directory is NOT
+    ///   removed in this case.
+    ///
+    /// A separate `directory_removed` flag would be redundant: the
+    /// `residual` summary already distinguishes "directory cleanup
+    /// failed" via a synthetic residual entry.
+    pub fn cleanup(&mut self) -> CleanupSummary {
+        if self.cleanup_state == RecoveryRwSessionCleanupState::Cleaned {
+            return CleanupSummary {
+                unmounted: Vec::new(),
+                residual: Vec::new(),
+                all_clean: true,
+            };
+        }
+        let mut summary = CleanupSummary {
+            unmounted: Vec::new(),
+            residual: Vec::new(),
+            all_clean: true,
+        };
+
+        match syscall::umount2(&self.session_dir, 0) {
+            Ok(()) => {
+                summary
+                    .unmounted
+                    .push(self.session_dir.display().to_string());
+            }
+            Err(plain_err) => match syscall::umount2(&self.session_dir, mnt_flags::MNT_DETACH) {
+                Ok(()) => {
+                    // Lazy-detach inside a private namespace is
+                    // operationally clean: the mount is removed from
+                    // this namespace immediately, and the namespace
+                    // itself dies with the process so the kernel
+                    // drops the last reference. The diagnostic is
+                    // preserved in `unmounted` (with the lazy-detach
+                    // note) rather than `residual` so dashboards
+                    // still see "the umount path was non-trivial",
+                    // but the recovery exit code can treat the
+                    // transaction as successful.
+                    summary.all_clean = true;
+                    summary.unmounted.push(format!(
+                        "{}: umount2 failed (errno {}); detached lazily inside private namespace",
+                        self.session_dir.display(),
+                        plain_err.errno
+                    ));
+                }
+                Err(detach_err) => {
+                    summary.all_clean = false;
+                    summary.residual.push(format!(
+                        "{}: umount2 errno {} and MNT_DETACH errno {}",
+                        self.session_dir.display(),
+                        plain_err.errno,
+                        detach_err.errno
+                    ));
+                }
+            },
+        }
+
+        if summary.all_clean {
+            if let Err(err) = remove_session_dir(Path::new(SESSION_ROOT_PARENT), &self.session_dir)
+            {
+                summary.all_clean = false;
+                summary.residual.push(format!(
+                    "session directory cleanup: {} ({})",
+                    err.message,
+                    err.kind.code()
+                ));
+            }
+        }
+
+        self.cleanup_state = RecoveryRwSessionCleanupState::Cleaned;
+        summary
+    }
+}
+
+impl Drop for RecoveryRwSession {
+    fn drop(&mut self) {
+        if self.cleanup_state == RecoveryRwSessionCleanupState::Mounted {
+            // Last-resort safety net. The orchestrator is supposed
+            // to call `cleanup()` explicitly; reaching Drop in
+            // Mounted state means a panic or early return bypassed
+            // the explicit path. Run the same teardown and emit a
+            // stderr line so a post-mortem log scan can see that
+            // the explicit cleanup was skipped.
+            let summary = self.cleanup();
+            if !summary.all_clean {
+                eprintln!(
+                    "catos-system: recovery rw session dropped without explicit cleanup; \
+                     residual: {:?}",
+                    summary.residual
+                );
+            } else {
+                eprintln!(
+                    "catos-system: recovery rw session dropped without explicit cleanup; \
+                     cleanup completed as Drop safety net"
+                );
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1238,10 +1500,22 @@ impl RecoveryArgs {
                 "this subcommand requires --root-device",
             )
         })?;
+        if let Some(esp_device) = self.target.esp_device.as_deref() {
+            return Err(RecoveryError::new(
+                RecoveryErrorKind::UnsupportedExplicitEsp,
+                format!(
+                    "phase 3 does not maintain or write to the ESP; \
+                     --esp-device {} is not supported. The recovery \
+                     root swap is bounded to the btrfs top-level and a \
+                     read-only boot-consistency report. Omit --esp-device \
+                     and arrange ESP reconciliation out-of-band.",
+                    esp_device.display()
+                ),
+            ));
+        }
         Ok(TargetSelectionResolved {
             root_device,
             root_subvolume: self.target.root_subvolume.clone(),
-            esp_device: self.target.esp_device.clone(),
         })
     }
 }
@@ -1249,7 +1523,6 @@ impl RecoveryArgs {
 struct TargetSelectionResolved {
     root_device: PathBuf,
     root_subvolume: Option<String>,
-    esp_device: Option<PathBuf>,
 }
 
 /// Convert a [`RecoveryError`] into a top-level [`Error`]. Used by
@@ -1257,6 +1530,24 @@ struct TargetSelectionResolved {
 /// `Phase3Outcome::Error`.
 pub fn recovery_error_to_phase3_exit_code(_error: &RecoveryError) -> i32 {
     exit_code::PROBE_FAILED
+}
+
+fn exit_code_for_recovery(
+    final_state: TransactionState,
+    cleanup: &CleanupSummary,
+    record: &TransactionRecord,
+    success_state: TransactionState,
+) -> i32 {
+    if final_state != success_state {
+        return exit_code::PROBE_FAILED;
+    }
+    if !cleanup.all_clean {
+        return exit_code::PROBE_FAILED;
+    }
+    match record.last_cleanup.as_ref().map(|c| c.all_clean) {
+        Some(false) => exit_code::PROBE_FAILED,
+        _ => exit_code::SUCCESS,
+    }
 }
 
 /// Convenience used by `entry.rs` to detect whether a phase-3 command
@@ -1280,20 +1571,21 @@ pub fn exit_code_for(outcome: &Phase3Outcome) -> i32 {
                 exit_code::SUCCESS
             }
         }
-        Phase3Outcome::Apply { final_state, .. } | Phase3Outcome::Resume { final_state, .. } => {
-            if *final_state == TransactionState::Completed {
-                exit_code::SUCCESS
-            } else {
-                exit_code::PROBE_FAILED
-            }
+        Phase3Outcome::Apply {
+            record,
+            final_state,
+            cleanup,
         }
-        Phase3Outcome::Revert { final_state, .. } => {
-            if *final_state == TransactionState::Reverted {
-                exit_code::SUCCESS
-            } else {
-                exit_code::PROBE_FAILED
-            }
-        }
+        | Phase3Outcome::Resume {
+            record,
+            final_state,
+            cleanup,
+        } => exit_code_for_recovery(*final_state, cleanup, record, TransactionState::Completed),
+        Phase3Outcome::Revert {
+            record,
+            final_state,
+            cleanup,
+        } => exit_code_for_recovery(*final_state, cleanup, record, TransactionState::Reverted),
         _ => exit_code::SUCCESS,
     }
 }

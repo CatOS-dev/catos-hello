@@ -228,9 +228,44 @@ impl Engine {
         Ok(engine)
     }
 
+    /// Persist the recovery rw session's [`CleanupSummary`] into the
+    /// transaction record's `last_cleanup` field. Atomic and fsynced
+    /// via the standard record-persist path.
+    ///
+    /// Persistence rules:
+    ///
+    /// * `last_error` is preserved. A cleanup failure MUST NOT erase
+    ///   the operation failure that preceded it; both are part of
+    ///   the durable record.
+    /// * If the persistence itself fails, the original operation
+    ///   error (if any) is preserved and the persistence failure is
+    ///   attached via `record_persistence_error`. The caller
+    ///   surfaces both.
+    /// * `last_updated_unix` advances so dashboards can see the
+    ///   cleanup actually happened.
+    pub fn attach_cleanup(
+        &mut self,
+        summary: crate::model::recovery::CleanupSummary,
+    ) -> Result<(), RecoveryError> {
+        self.record.last_cleanup = Some(summary);
+        self.record.last_updated_unix = now_unix();
+        self.persist_record("attach-cleanup")
+    }
+
     /// Read-only access to the current record.
     pub fn record(&self) -> &TransactionRecord {
         &self.record
+    }
+
+    /// Mutable access to the in-memory record. Used by phase3's
+    /// post-cleanup restamping: after the rw mount session is torn
+    /// down the on-disk record is unreachable, but the in-memory
+    /// record is still serialised into the process's JSON output.
+    /// Restamping the in-memory record with the real cleanup
+    /// summary lets the renderer emit the truth even though the
+    /// on-disk record carries the pre-teardown placeholder.
+    pub fn record_mut(&mut self) -> &mut TransactionRecord {
+        &mut self.record
     }
 
     /// Drive the transaction forward as far as it can go without

@@ -39,6 +39,7 @@ pub fn render_phase3_json(
         Phase3Outcome::Apply {
             record,
             final_state,
+            cleanup,
         } => {
             let mut payload = serde_json::Map::new();
             payload.insert(
@@ -49,6 +50,10 @@ pub fn render_phase3_json(
                 "final_state".into(),
                 serde_json::to_value(final_state)
                     .map_err(|e| Error::SerializeFailed(e.to_string()))?,
+            );
+            payload.insert(
+                "cleanup".into(),
+                serde_json::to_value(cleanup).map_err(|e| Error::SerializeFailed(e.to_string()))?,
             );
             json_envelope(
                 invocation,
@@ -66,6 +71,7 @@ pub fn render_phase3_json(
         Phase3Outcome::Resume {
             record,
             final_state,
+            cleanup,
         } => {
             let mut payload = serde_json::Map::new();
             payload.insert(
@@ -76,6 +82,10 @@ pub fn render_phase3_json(
                 "final_state".into(),
                 serde_json::to_value(final_state)
                     .map_err(|e| Error::SerializeFailed(e.to_string()))?,
+            );
+            payload.insert(
+                "cleanup".into(),
+                serde_json::to_value(cleanup).map_err(|e| Error::SerializeFailed(e.to_string()))?,
             );
             json_envelope(
                 invocation,
@@ -87,6 +97,7 @@ pub fn render_phase3_json(
         Phase3Outcome::Revert {
             record,
             final_state,
+            cleanup,
         } => {
             let mut payload = serde_json::Map::new();
             payload.insert(
@@ -97,6 +108,10 @@ pub fn render_phase3_json(
                 "final_state".into(),
                 serde_json::to_value(final_state)
                     .map_err(|e| Error::SerializeFailed(e.to_string()))?,
+            );
+            payload.insert(
+                "cleanup".into(),
+                serde_json::to_value(cleanup).map_err(|e| Error::SerializeFailed(e.to_string()))?,
             );
             json_envelope(
                 invocation,
@@ -127,17 +142,27 @@ pub fn render_phase3_human<W: Write>(outcome: &Phase3Outcome, out: &mut W) -> st
         Phase3Outcome::Apply {
             record,
             final_state,
+            cleanup,
         }
         | Phase3Outcome::Resume {
             record,
             final_state,
+            cleanup,
         }
         | Phase3Outcome::Revert {
             record,
             final_state,
+            cleanup,
         } => {
             render_record(out, record)?;
             writeln!(out, "  final state      : {:?}", final_state)?;
+            writeln!(out, "  cleanup          : clean={}", cleanup.all_clean)?;
+            for entry in &cleanup.unmounted {
+                writeln!(out, "    unmounted: {entry}")?;
+            }
+            for entry in &cleanup.residual {
+                writeln!(out, "    residual: {entry}")?;
+            }
             Ok(())
         }
         Phase3Outcome::Status(report) => render_status(out, report),
