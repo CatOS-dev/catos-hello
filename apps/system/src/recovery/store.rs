@@ -25,10 +25,6 @@
 //! [`RecoveryErrorKind::UnsupportedTransactionSchema`] so the operator
 //! knows to upgrade their tooling.
 
-use std::fs::{self, File, OpenOptions};
-use std::io::Write;
-use std::os::unix::fs::PermissionsExt;
-use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
@@ -37,6 +33,8 @@ use crate::model::recovery::{
     RecoveryError, RecoveryErrorKind, TransactionRecord, RECOVERY_PLAN_SCHEMA_VERSION,
     TX_RECORD_SCHEMA_VERSION,
 };
+use crate::recovery::confined;
+use crate::recovery::identity::{validate_plan_shape, validate_recovery_id};
 
 /// Minimal view used to peek at a record's `schema_version` field
 /// BEFORE attempting a typed deserialization. This keeps v1 records
@@ -52,21 +50,7 @@ struct SchemaVersionProbe {
 /// and surfaces a structured error for missing, corrupt, or
 /// future-version files.
 pub fn load_record(path: &Path) -> Result<TransactionRecord, RecoveryError> {
-    let body = match fs::read(path) {
-        Ok(bytes) => bytes,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Err(RecoveryError::new(
-                RecoveryErrorKind::TransactionNotFound,
-                format!("transaction record {} does not exist", path.display()),
-            ));
-        }
-        Err(error) => {
-            return Err(RecoveryError::new(
-                RecoveryErrorKind::StateRecordCorrupt,
-                format!("cannot read {}: {error}", path.display()),
-            ));
-        }
-    };
+    let body = confined::read_file(path)?;
     // Peek at schema_version BEFORE typed deserialization. A v1 record
     // whose embedded `TransactionState` enum lost a variant would
     // otherwise fail serde parsing and surface as `StateRecordCorrupt`,
@@ -101,21 +85,57 @@ pub fn load_record(path: &Path) -> Result<TransactionRecord, RecoveryError> {
             ));
         }
     };
+    validate_recovery_id(&record.transaction_id)?;
+    validate_plan_shape(&record.plan)?;
+    if record.transaction_id != record.plan.plan_id {
+        return Err(RecoveryError::new(
+            RecoveryErrorKind::StateRecordCorrupt,
+            "transaction id does not match embedded plan id",
+        ));
+    }
     Ok(record)
 }
 
 /// Atomically persist a transaction record. See module docs for the
 /// protocol. The parent directory is created with `0o700` if missing.
 pub fn persist_record(path: &Path, record: &TransactionRecord) -> Result<(), RecoveryError> {
-    let parent = path.parent().ok_or_else(|| {
-        RecoveryError::new(
+    if record.schema_version != TX_RECORD_SCHEMA_VERSION {
+        return Err(RecoveryError::new(
+            RecoveryErrorKind::UnsupportedTransactionSchema,
+            format!(
+                "cannot persist transaction schema {}; supported {}",
+                record.schema_version, TX_RECORD_SCHEMA_VERSION
+            ),
+        ));
+    }
+    validate_recovery_id(&record.transaction_id)?;
+    validate_plan_shape(&record.plan)?;
+    if record.transaction_id != record.plan.plan_id {
+        return Err(RecoveryError::new(
             RecoveryErrorKind::StateRecordCorrupt,
+            "transaction id does not match embedded plan id",
+        ));
+    }
+    let expected_suffix = PathBuf::from(".catos-recovery")
+        .join("transactions")
+        .join(&record.transaction_id)
+        .join("state.json");
+    if !path.ends_with(&expected_suffix) {
+        return Err(RecoveryError::new(
+            RecoveryErrorKind::UnsafeRecoveryPath,
+            format!(
+                "state path {} does not match canonical transaction path {}",
+                path.display(),
+                expected_suffix.display()
+            ),
+        ));
+    }
+    path.parent().ok_or_else(|| {
+        RecoveryError::new(
+            RecoveryErrorKind::UnsafeRecoveryPath,
             format!("record path {} has no parent directory", path.display()),
         )
     })?;
-
-    // Create the parent dir hierarchy with strict mode. Idempotent.
-    ensure_dir_with_mode(parent, 0o700)?;
 
     let json = serde_json::to_vec_pretty(record).map_err(|e| {
         RecoveryError::new(
@@ -124,63 +144,7 @@ pub fn persist_record(path: &Path, record: &TransactionRecord) -> Result<(), Rec
         )
     })?;
 
-    // Write to a temp file in the same directory so rename is atomic.
-    let temp_path = path.with_extension("json.tmp");
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .open(&temp_path)
-        .map_err(|e| {
-            RecoveryError::new(
-                RecoveryErrorKind::StateRecordCorrupt,
-                format!("cannot open temp file {}: {e}", temp_path.display()),
-            )
-        })?;
-    // Tighten permissions: temp file is owned by the creating EUID
-    // already, but be explicit.
-    fs::set_permissions(&temp_path, std::fs::Permissions::from_mode(0o600)).map_err(|e| {
-        RecoveryError::new(
-            RecoveryErrorKind::StateRecordCorrupt,
-            format!("cannot chmod temp file {}: {e}", temp_path.display()),
-        )
-    })?;
-
-    file.write_all(&json).map_err(|e| {
-        RecoveryError::new(
-            RecoveryErrorKind::StateRecordCorrupt,
-            format!("cannot write temp file {}: {e}", temp_path.display()),
-        )
-    })?;
-    file.flush().map_err(|e| {
-        RecoveryError::new(
-            RecoveryErrorKind::StateRecordCorrupt,
-            format!("cannot flush temp file {}: {e}", temp_path.display()),
-        )
-    })?;
-
-    fsync_file(&file, &temp_path)?;
-
-    // Drop the file handle BEFORE the rename so we do not race with
-    // the kernel's deferred fsync. On btrfs / ext4 this is harmless;
-    // on xfs this avoids a known interaction where a renaming file
-    // handle could bypass the fsync.
-    drop(file);
-
-    fs::rename(&temp_path, path).map_err(|e| {
-        RecoveryError::new(
-            RecoveryErrorKind::StateRecordCorrupt,
-            format!(
-                "cannot rename {} to {}: {e}",
-                temp_path.display(),
-                path.display()
-            ),
-        )
-    })?;
-
-    fsync_parent(parent)?;
-
-    Ok(())
+    confined::atomic_write(path, &json, 0o600)
 }
 
 /// Load every transaction record under `transactions_dir`. Skips
@@ -192,26 +156,27 @@ pub fn list_records(
 ) -> (Vec<(PathBuf, TransactionRecord)>, Vec<RecoveryError>) {
     let mut ok = Vec::new();
     let mut errs = Vec::new();
-    let entries = match fs::read_dir(transactions_dir) {
+    let entries = match confined::list_directory_names(transactions_dir) {
         Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return (ok, errs),
         Err(error) => {
-            errs.push(RecoveryError::new(
-                RecoveryErrorKind::StateRecordCorrupt,
-                format!(
-                    "cannot read transactions directory {}: {error}",
-                    transactions_dir.display()
-                ),
-            ));
+            errs.push(error);
             return (ok, errs);
         }
     };
-    for entry in entries.flatten() {
-        let entry_path = entry.path();
-        let state_file = entry_path.join("state.json");
-        if !state_file.is_file() {
+    for name in entries {
+        let Some(id) = name.to_str() else {
+            errs.push(RecoveryError::new(
+                RecoveryErrorKind::InvalidRecoveryId,
+                "transaction directory name is not valid UTF-8",
+            ));
+            continue;
+        };
+        if let Err(error) = validate_recovery_id(id) {
+            errs.push(error);
             continue;
         }
+        let entry_path = transactions_dir.join(&name);
+        let state_file = entry_path.join("state.json");
         match load_record(&state_file) {
             Ok(record) => ok.push((entry_path, record)),
             Err(error) => {
@@ -229,22 +194,7 @@ pub fn list_records(
 /// subvolumes — those are owned by btrfs-progs and managed by the
 /// engine.
 pub fn remove_record(path: &Path) -> Result<(), RecoveryError> {
-    match fs::remove_file(path) {
-        Ok(()) => {
-            // Best-effort parent fsync; ignore failures because the
-            // record is already gone and the operator can sync
-            // manually if they care.
-            if let Some(parent) = path.parent() {
-                let _ = fsync_parent(parent);
-            }
-            Ok(())
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(RecoveryError::new(
-            RecoveryErrorKind::StateRecordCorrupt,
-            format!("cannot remove {}: {error}", path.display()),
-        )),
-    }
+    confined::remove_file(path)
 }
 
 /// Persist a [`RecoveryPlan`] as a standalone file (used by `recovery
@@ -253,13 +203,17 @@ pub fn persist_plan(
     path: &Path,
     plan: &crate::model::recovery::RecoveryPlan,
 ) -> Result<(), RecoveryError> {
-    let parent = path.parent().ok_or_else(|| {
-        RecoveryError::new(
-            RecoveryErrorKind::StateRecordCorrupt,
-            format!("plan path {} has no parent", path.display()),
-        )
-    })?;
-    ensure_dir_with_mode(parent, 0o700)?;
+    validate_plan_shape(plan)?;
+    let expected_suffix = PathBuf::from(".catos-recovery")
+        .join("transactions")
+        .join(&plan.plan_id)
+        .join("plan.json");
+    if !path.ends_with(&expected_suffix) {
+        return Err(RecoveryError::new(
+            RecoveryErrorKind::UnsafeRecoveryPath,
+            "plan path does not match canonical transaction layout",
+        ));
+    }
 
     let json = serde_json::to_vec_pretty(plan).map_err(|e| {
         RecoveryError::new(
@@ -268,61 +222,14 @@ pub fn persist_plan(
         )
     })?;
 
-    let temp_path = path.with_extension("json.tmp");
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .open(&temp_path)
-        .map_err(|e| {
-            RecoveryError::new(
-                RecoveryErrorKind::StateRecordCorrupt,
-                format!("cannot open plan temp {}: {e}", temp_path.display()),
-            )
-        })?;
-    fs::set_permissions(&temp_path, std::fs::Permissions::from_mode(0o600)).map_err(|e| {
-        RecoveryError::new(
-            RecoveryErrorKind::StateRecordCorrupt,
-            format!("cannot chmod plan temp {}: {e}", temp_path.display()),
-        )
-    })?;
-    file.write_all(&json).map_err(|e| {
-        RecoveryError::new(
-            RecoveryErrorKind::StateRecordCorrupt,
-            format!("cannot write plan temp {}: {e}", temp_path.display()),
-        )
-    })?;
-    fsync_file(&file, &temp_path)?;
-    drop(file);
-    fs::rename(&temp_path, path).map_err(|e| {
-        RecoveryError::new(
-            RecoveryErrorKind::StateRecordCorrupt,
-            format!(
-                "cannot rename {} to {}: {e}",
-                temp_path.display(),
-                path.display()
-            ),
-        )
-    })?;
-    fsync_parent(parent)?;
-    Ok(())
+    confined::atomic_write(path, &json, 0o600)
 }
 
 pub fn load_plan(path: &Path) -> Result<crate::model::recovery::RecoveryPlan, RecoveryError> {
-    let body = match fs::read(path) {
-        Ok(bytes) => bytes,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Err(RecoveryError::new(
-                RecoveryErrorKind::TransactionNotFound,
-                format!("plan file {} does not exist", path.display()),
-            ));
-        }
-        Err(error) => {
-            return Err(RecoveryError::new(
-                RecoveryErrorKind::StateRecordCorrupt,
-                format!("cannot read plan {}: {error}", path.display()),
-            ));
-        }
+    let body = if confined::is_confined_recovery_path(path) {
+        confined::read_file(path)?
+    } else {
+        confined::read_external_file(path)?
     };
     // Operators produce a plan file by running `recovery plan --json`
     // and redirecting stdout to a file. That output is the standard
@@ -342,10 +249,10 @@ pub fn load_plan(path: &Path) -> Result<crate::model::recovery::RecoveryPlan, Re
         Some(payload) => payload,
         None => &value,
     };
-    // Peek at schema_version BEFORE typed deserialization. A v1 plan
-    // whose `BootLayout` lost `bootloadu_detected` would otherwise be
-    // silently accepted (serde ignores unknown fields) and surface no
-    // diagnostic. Reject it explicitly here.
+    // Peek at schema_version BEFORE typed deserialization. Older plans
+    // omit execution-critical fields introduced by later schemas, and
+    // serde defaults/unknown-field handling must not silently upgrade
+    // them into an apparently valid current plan.
     let probe: SchemaVersionProbe = match serde_json::from_value(plan_value.clone()) {
         Ok(probe) => probe,
         Err(error) => {
@@ -380,114 +287,8 @@ pub fn load_plan(path: &Path) -> Result<crate::model::recovery::RecoveryPlan, Re
                 ));
             }
         };
+    validate_plan_shape(&plan)?;
     Ok(plan)
-}
-
-// ---------------------------------------------------------------------------
-// Internal helpers
-// ---------------------------------------------------------------------------
-
-fn ensure_dir_with_mode(path: &Path, mode: u32) -> Result<(), RecoveryError> {
-    use std::os::unix::fs::PermissionsExt;
-
-    if path.as_os_str().is_empty() {
-        return Err(RecoveryError::new(
-            RecoveryErrorKind::StateRecordCorrupt,
-            "directory path is empty",
-        ));
-    }
-
-    // Walk the path and create missing components. Each component is
-    // tightened to `mode` only when we just created it. Pre-existing
-    // components are left alone: they may legitimately be owned by
-    // root with a different mode (e.g. /.catos-recovery itself).
-    let mut current = PathBuf::new();
-    let created_something = {
-        let mut created = false;
-        for component in path.components() {
-            use std::path::Component;
-            match component {
-                Component::RootDir => {
-                    current = PathBuf::from("/");
-                }
-                Component::Normal(part) => {
-                    current.push(part);
-                    if !current.exists() {
-                        fs::create_dir(&current).map_err(|e| {
-                            RecoveryError::new(
-                                RecoveryErrorKind::StateRecordCorrupt,
-                                format!("cannot create {}: {e}", current.display()),
-                            )
-                        })?;
-                        fs::set_permissions(&current, std::fs::Permissions::from_mode(mode))
-                            .map_err(|e| {
-                                RecoveryError::new(
-                                    RecoveryErrorKind::StateRecordCorrupt,
-                                    format!("cannot chmod {}: {e}", current.display()),
-                                )
-                            })?;
-                        created = true;
-                    }
-                }
-                Component::CurDir => {}
-                Component::ParentDir | Component::Prefix(_) => {
-                    return Err(RecoveryError::new(
-                        RecoveryErrorKind::StateRecordCorrupt,
-                        format!(
-                            "refusing to create a path with escaping component: {}",
-                            path.display()
-                        ),
-                    ));
-                }
-            }
-        }
-        created
-    };
-    if created_something {
-        // Best-effort: fsync the deepest created directory so a crash
-        // immediately after persist does not lose the parent. Failures
-        // are tolerated; the next persist will recreate if needed.
-        let _ = fsync_dir(path);
-    }
-    Ok(())
-}
-
-fn fsync_file(file: &File, label: &Path) -> Result<(), RecoveryError> {
-    // SAFETY: fsync(2) takes a file descriptor and has no memory
-    // safety implications. The raw fd is valid because `file` owns it.
-    let rc = libc_fsync(file.as_raw_fd());
-    if rc != 0 {
-        let errno = std::io::Error::last_os_error().raw_os_error().unwrap_or(-1);
-        return Err(RecoveryError::new(
-            RecoveryErrorKind::StateRecordCorrupt,
-            format!("fsync({}) failed; errno={errno}", label.display()),
-        ));
-    }
-    Ok(())
-}
-
-fn fsync_dir(path: &Path) -> Result<(), RecoveryError> {
-    let file = File::open(path).map_err(|e| {
-        RecoveryError::new(
-            RecoveryErrorKind::StateRecordCorrupt,
-            format!("cannot open {} for fsync: {e}", path.display()),
-        )
-    })?;
-    fsync_file(&file, path)
-}
-
-fn fsync_parent(parent: &Path) -> Result<(), RecoveryError> {
-    fsync_dir(parent)
-}
-
-extern "C" {
-    fn fsync(fd: std::os::raw::c_int) -> std::os::raw::c_int;
-}
-
-/// Wrapper so call sites are explicit about the FFI.
-fn libc_fsync(fd: std::os::raw::c_int) -> std::os::raw::c_int {
-    // SAFETY: see comment in fsync_file.
-    unsafe { fsync(fd) }
 }
 
 // ---------------------------------------------------------------------------
@@ -501,12 +302,30 @@ mod tests {
         BootLayout, BtrfsFilesystemIdentity, BtrfsSubvolumeIdentity, CompletedStep, DiskFacts,
         FstabRootDefinition, RecoveryPlan, TransactionPaths, TransactionState,
     };
+    use crate::recovery::plan::{build_confirmation_token, effective_plan_digest};
+    use std::fs;
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    fn sample_plan() -> RecoveryPlan {
-        RecoveryPlan {
-            schema_version: crate::model::recovery::RECOVERY_PLAN_SCHEMA_VERSION,
-            plan_id: "p-1".into(),
+    const ID1: &str = "tx-00000000000000000000000000000001";
+    const ID2: &str = "tx-00000000000000000000000000000002";
+    const ID3: &str = "tx-00000000000000000000000000000003";
+    const ID4: &str = "tx-00000000000000000000000000000004";
+
+    fn scratch_root(label: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "catos-store-{label}-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ))
+    }
+
+    fn sample_plan_for(id: &str) -> RecoveryPlan {
+        let mut plan = RecoveryPlan {
+            schema_version: RECOVERY_PLAN_SCHEMA_VERSION,
+            plan_id: id.into(),
             generated_at_unix: 100,
             generated_on_host: None,
             filesystem: BtrfsFilesystemIdentity {
@@ -518,20 +337,27 @@ mod tests {
                 path: "/@".into(),
                 subvolume_id: 256,
                 generation: 100,
+                uuid: Some("old-root-uuid".into()),
+                parent_uuid: None,
                 read_only: false,
                 evidence: vec![],
             },
             source_snapshot: BtrfsSubvolumeIdentity {
-                path: "/@/.snapshots/1/snapshot".into(),
+                path: "/@snapshots/1".into(),
                 subvolume_id: 300,
                 generation: 80,
+                uuid: Some("source-snapshot-uuid".into()),
+                parent_uuid: Some("old-root-uuid".into()),
                 read_only: true,
                 evidence: vec![],
             },
             target_catos_identity: None,
             boot_layout: BootLayout::default(),
-            backup_root_path: "/.catos-recovery/backups/p-1/root-before".into(),
-            staging_root_path: "/.catos-recovery/staging/p-1/new-root".into(),
+            boot_consistency: crate::recovery::boot::evaluate_readonly_consistency(
+                &BootLayout::default(),
+            ),
+            backup_root_path: format!("/.catos-recovery/backups/{id}/root-before"),
+            staging_root_path: format!("/.catos-recovery/staging/{id}/new-root"),
             fstab_root_definition: FstabRootDefinition {
                 source: "/dev/nvme0n1p2".into(),
                 fstype: "btrfs".into(),
@@ -540,29 +366,24 @@ mod tests {
             predicted_steps: vec![],
             refusal_conditions: vec![],
             risks_and_warnings: vec![],
-            confirmation_token: "tok".into(),
+            nonce: "00".repeat(32),
+            plan_digest: String::new(),
+            confirmation_token: String::new(),
             evidence: vec![],
-        }
+        };
+        plan.plan_digest = effective_plan_digest(&plan).unwrap();
+        plan.confirmation_token =
+            build_confirmation_token(&plan.plan_id, &plan.plan_digest, &plan.nonce);
+        plan
     }
 
-    fn sample_record(path: &str) -> (PathBuf, TransactionRecord) {
-        let root = std::env::temp_dir().join(format!(
-            "catos-store-{}-{}",
-            std::process::id(),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        let _ = fs::remove_dir_all(&root);
-        let record_path = root.join(path);
-        let plan = sample_plan();
-        let record = TransactionRecord {
+    fn record_for(id: &str) -> TransactionRecord {
+        TransactionRecord {
             schema_version: TX_RECORD_SCHEMA_VERSION,
-            transaction_id: "p-1".into(),
+            transaction_id: id.into(),
             created_at_unix: 100,
             last_updated_unix: 100,
-            plan,
+            plan: sample_plan_for(id),
             state: TransactionState::Planned,
             completed_steps: vec![CompletedStep {
                 state: TransactionState::Planned,
@@ -571,238 +392,248 @@ mod tests {
             }],
             last_error: None,
             last_disk_facts: Some(DiskFacts {
-                backup_root_exists: false,
-                staging_root_exists: false,
-                active_root_exists: true,
-                active_root_generation: Some(10),
                 filesystem_fsid: "fsid".into(),
+                active_root_exists: true,
+                active_root: None,
+                staging_root_exists: false,
+                staging_root: None,
+                backup_root_exists: false,
+                backup: None,
+                source_snapshot_exists: false,
+                source_snapshot: None,
             }),
             last_cleanup: None,
-        };
-        (record_path, record)
+        }
+    }
+
+    fn state_path(root: &Path, id: &str) -> PathBuf {
+        root.join(".catos-recovery/transactions")
+            .join(id)
+            .join("state.json")
+    }
+
+    fn plan_path(root: &Path, id: &str) -> PathBuf {
+        root.join(".catos-recovery/transactions")
+            .join(id)
+            .join("plan.json")
     }
 
     #[test]
     fn persist_and_load_round_trips() {
-        let (path, record) = sample_record("tx/tx-1/state.json");
+        let root = scratch_root("roundtrip");
+        fs::create_dir_all(&root).unwrap();
+        let path = state_path(&root, ID1);
+        let record = record_for(ID1);
         persist_record(&path, &record).unwrap();
-        let loaded = load_record(&path).unwrap();
-        assert_eq!(loaded, record);
-        let _ = fs::remove_dir_all(path.parent().unwrap().parent().unwrap());
+        assert_eq!(load_record(&path).unwrap(), record);
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
     fn load_record_returns_not_found_for_missing_file() {
-        let path = std::env::temp_dir().join(format!("catos-missing-{}", std::process::id()));
-        let err = load_record(&path).unwrap_err();
-        assert_eq!(err.kind, RecoveryErrorKind::TransactionNotFound);
+        let root = scratch_root("missing");
+        fs::create_dir_all(&root).unwrap();
+        let error = load_record(&state_path(&root, ID1)).unwrap_err();
+        assert_eq!(error.kind, RecoveryErrorKind::TransactionNotFound);
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
     fn load_record_rejects_unsupported_schema_version() {
-        let (path, mut record) = sample_record("tx-2/state.json");
+        let root = scratch_root("schema");
+        fs::create_dir_all(&root).unwrap();
+        let path = state_path(&root, ID1);
+        let mut record = record_for(ID1);
         record.schema_version = 99;
-        persist_record(&path, &record).unwrap();
-        let err = load_record(&path).unwrap_err();
-        assert_eq!(err.kind, RecoveryErrorKind::UnsupportedTransactionSchema);
-        let _ = fs::remove_dir_all(path.parent().unwrap().parent().unwrap());
+        confined::atomic_write(&path, &serde_json::to_vec(&record).unwrap(), 0o600).unwrap();
+        let error = load_record(&path).unwrap_err();
+        assert_eq!(error.kind, RecoveryErrorKind::UnsupportedTransactionSchema);
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
     fn load_record_rejects_truncated_json() {
-        let (path, _record) = sample_record("tx-3/state.json");
-        // Create parent dir then write truncated bytes directly.
-        let parent = path.parent().unwrap();
-        fs::create_dir_all(parent).unwrap();
-        fs::write(&path, b"{\"schema_version\":2,\"transaction_id\":\"x\"").unwrap();
-        let err = load_record(&path).unwrap_err();
-        assert_eq!(err.kind, RecoveryErrorKind::StateRecordCorrupt);
-        let _ = fs::remove_dir_all(parent.parent().unwrap());
+        let root = scratch_root("truncated");
+        fs::create_dir_all(&root).unwrap();
+        let path = state_path(&root, ID1);
+        confined::atomic_write(&path, b"{\"schema_version\":3", 0o600).unwrap();
+        let error = load_record(&path).unwrap_err();
+        assert_eq!(error.kind, RecoveryErrorKind::StateRecordCorrupt);
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
-    fn persist_record_is_atomic_under_temp_rename() {
-        let (path, record) = sample_record("tx-4/state.json");
-        persist_record(&path, &record).unwrap();
-        // The temp file must NOT remain after persist.
-        let temp = path.with_extension("json.tmp");
-        assert!(!temp.exists(), "temp file {} leaked", temp.display());
-        // The real file MUST exist.
-        assert!(path.exists());
-        let _ = fs::remove_dir_all(path.parent().unwrap().parent().unwrap());
-    }
-
-    #[test]
-    fn persist_record_creates_missing_parent_directories() {
-        let (path, record) = sample_record("deep/nested/tx/state.json");
-        persist_record(&path, &record).unwrap();
-        assert!(path.exists());
-        let _ = fs::remove_dir_all(path.parent().unwrap().parent().unwrap().parent().unwrap());
+    fn persist_record_is_atomic_and_creates_parents() {
+        let root = scratch_root("atomic");
+        fs::create_dir_all(&root).unwrap();
+        let path = state_path(&root, ID1);
+        persist_record(&path, &record_for(ID1)).unwrap();
+        let names: Vec<_> = fs::read_dir(path.parent().unwrap())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert_eq!(names, vec![std::ffi::OsString::from("state.json")]);
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
     fn remove_record_is_idempotent() {
-        let (path, record) = sample_record("tx-5/state.json");
-        persist_record(&path, &record).unwrap();
+        let root = scratch_root("remove");
+        fs::create_dir_all(&root).unwrap();
+        let path = state_path(&root, ID1);
+        persist_record(&path, &record_for(ID1)).unwrap();
         remove_record(&path).unwrap();
-        // Second call must succeed (NotFound is silently treated as success).
         remove_record(&path).unwrap();
-        let _ = fs::remove_dir_all(path.parent().unwrap().parent().unwrap());
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
-    fn list_records_returns_empty_for_missing_dir() {
-        let missing = std::env::temp_dir().join(format!(
-            "catos-list-missing-{}-{}",
-            std::process::id(),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        let (records, errors) = list_records(&missing);
+    fn list_records_returns_empty_for_missing_directory() {
+        let root = scratch_root("list-missing");
+        fs::create_dir_all(&root).unwrap();
+        let dir = root.join(".catos-recovery/transactions");
+        let (records, errors) = list_records(&dir);
         assert!(records.is_empty());
-        assert!(errors.is_empty());
+        assert!(errors.is_empty(), "{errors:?}");
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
-    fn list_records_picks_up_multiple_transactions() {
-        let root = std::env::temp_dir().join(format!(
-            "catos-list-{}-{}",
-            std::process::id(),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        let _ = fs::remove_dir_all(&root);
-        for id in ["tx-a", "tx-b", "tx-c"] {
-            let (mut path, mut record) = sample_record(&format!("{id}/state.json"));
-            // Re-root under `root`.
-            path = root.join(id).join("state.json");
-            record.transaction_id = id.into();
-            persist_record(&path, &record).unwrap();
+    fn list_records_handles_multiple_and_corrupt_transactions() {
+        let root = scratch_root("list");
+        fs::create_dir_all(&root).unwrap();
+        for id in [ID1, ID2, ID3] {
+            persist_record(&state_path(&root, id), &record_for(id)).unwrap();
         }
-        let (records, errors) = list_records(&root);
+        confined::atomic_write(&state_path(&root, ID4), b"not json", 0o600).unwrap();
+        let dir = root.join(".catos-recovery/transactions");
+        let (records, errors) = list_records(&dir);
         assert_eq!(records.len(), 3);
-        assert!(errors.is_empty(), "{:?}", errors);
-        let _ = fs::remove_dir_all(&root);
-    }
-
-    #[test]
-    fn list_records_skips_corrupt_files_with_error() {
-        let root = std::env::temp_dir().join(format!(
-            "catos-list-corrupt-{}-{}",
-            std::process::id(),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        let _ = fs::remove_dir_all(&root);
-        let (good_path, good_record) = sample_record("good/state.json");
-        let good_path = root.join("good/state.json");
-        persist_record(&good_path, &good_record).unwrap();
-        let bad_path = root.join("bad/state.json");
-        fs::create_dir_all(bad_path.parent().unwrap()).unwrap();
-        fs::write(&bad_path, b"definitely not json").unwrap();
-        let (records, errors) = list_records(&root);
-        assert_eq!(records.len(), 1);
         assert_eq!(errors.len(), 1);
         assert_eq!(errors[0].kind, RecoveryErrorKind::StateRecordCorrupt);
-        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(root);
     }
 
-    /// `TransactionPaths::state_file_path()` is the canonical path
-    /// used by the engine. It MUST live under
-    /// `/.catos-recovery/transactions/...` regardless of input.
     #[test]
     fn transaction_paths_layout_is_stable() {
         let paths = TransactionPaths {
-            transaction_id: "abc".into(),
+            transaction_id: ID1.into(),
         };
-        let path = paths.state_file_path();
-        assert!(path.starts_with("/.catos-recovery/transactions"));
-        assert!(path.ends_with("abc/state.json"));
-    }
-
-    /// Reject paths that try to escape via `..` during directory
-    /// creation. Guards against a hostile record id.
-    #[test]
-    fn ensure_dir_rejects_escaping_paths() {
-        let tmp = std::env::temp_dir().join(format!("catos-escape-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&tmp);
-        fs::create_dir_all(&tmp).unwrap();
-        let hostile = tmp.join("../../etc/catos-hostile");
-        let err = ensure_dir_with_mode(&hostile, 0o700).unwrap_err();
-        assert_eq!(err.kind, RecoveryErrorKind::StateRecordCorrupt);
-        let _ = fs::remove_dir_all(&tmp);
+        assert_eq!(
+            paths.state_file_path(),
+            PathBuf::from(format!("/.catos-recovery/transactions/{ID1}/state.json"))
+        );
     }
 
     #[test]
-    fn load_plan_accepts_bare_recovery_plan() {
-        let dir = std::env::temp_dir().join(format!(
-            "catos-plan-bare-{}-{}",
-            std::process::id(),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        let _ = fs::remove_dir_all(&dir);
-        let path = dir.join("plan.json");
-        let plan = sample_plan();
+    fn confined_path_rejects_parent_escape() {
+        let root = scratch_root("escape");
+        let hostile = root.join(".catos-recovery/transactions/../outside/state.json");
+        let error = confined::ConfinedPath::parse(&hostile).unwrap_err();
+        assert_eq!(error.kind, RecoveryErrorKind::UnsafeRecoveryPath);
+    }
+
+    #[test]
+    fn persist_and_load_bare_recovery_plan() {
+        let root = scratch_root("plan-bare");
+        fs::create_dir_all(&root).unwrap();
+        let plan = sample_plan_for(ID1);
+        let path = plan_path(&root, ID1);
         persist_plan(&path, &plan).unwrap();
-        let loaded = load_plan(&path).unwrap();
-        assert_eq!(loaded, plan);
-        let _ = fs::remove_dir_all(&dir);
+        assert_eq!(load_plan(&path).unwrap(), plan);
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
-    fn load_plan_accepts_wrapped_envelope_from_recovery_plan_json() {
-        let dir = std::env::temp_dir().join(format!(
-            "catos-plan-envelope-{}-{}",
-            std::process::id(),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        let _ = fs::remove_dir_all(&dir);
+    fn load_plan_accepts_external_wrapped_envelope() {
+        let dir = scratch_root("plan-envelope");
         fs::create_dir_all(&dir).unwrap();
         let path = dir.join("plan.json");
-        let plan = sample_plan();
-        let payload = serde_json::to_value(&plan).unwrap();
+        let plan = sample_plan_for(ID1);
         let envelope = serde_json::json!({
             "invocation": "catos-system",
             "kind": "recovery_plan",
-            "payload": payload,
+            "payload": serde_json::to_value(&plan).unwrap(),
             "programVersion": "0.1.0",
             "schemaVersion": 2,
             "targetRoot": "/",
         });
         fs::write(&path, serde_json::to_vec_pretty(&envelope).unwrap()).unwrap();
-        let loaded = load_plan(&path).unwrap();
-        assert_eq!(loaded, plan);
-        let _ = fs::remove_dir_all(&dir);
+        assert_eq!(load_plan(&path).unwrap(), plan);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn load_plan_rejects_tampered_effective_field_with_old_token() {
+        let dir = scratch_root("plan-tamper");
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("plan.json");
+        let mut plan = sample_plan_for(ID1);
+        plan.filesystem.fsid = "tampered-fsid".into();
+        fs::write(&path, serde_json::to_vec_pretty(&plan).unwrap()).unwrap();
+        let error = load_plan(&path).unwrap_err();
+        assert_eq!(error.kind, RecoveryErrorKind::PlanDigestMismatch);
+        let _ = fs::remove_dir_all(dir);
     }
 
     #[test]
     fn load_plan_rejects_neither_bare_nor_envelope() {
-        let dir = std::env::temp_dir().join(format!(
-            "catos-plan-junk-{}-{}",
-            std::process::id(),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        let _ = fs::remove_dir_all(&dir);
+        let dir = scratch_root("plan-junk");
         fs::create_dir_all(&dir).unwrap();
         let path = dir.join("plan.json");
-        fs::write(&path, b"{\"unrelated\": \"json\"}").unwrap();
-        let err = load_plan(&path).unwrap_err();
-        assert_eq!(err.kind, RecoveryErrorKind::StateRecordCorrupt);
-        let _ = fs::remove_dir_all(&dir);
+        fs::write(&path, b"{\"unrelated\":\"json\"}").unwrap();
+        assert_eq!(
+            load_plan(&path).unwrap_err().kind,
+            RecoveryErrorKind::StateRecordCorrupt
+        );
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn persist_record_rejects_recovery_root_symlink() {
+        use std::os::unix::fs::symlink;
+        let top = scratch_root("root-symlink");
+        let outside = scratch_root("root-symlink-outside");
+        fs::create_dir_all(&top).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        symlink(&outside, top.join(".catos-recovery")).unwrap();
+        let error = persist_record(&state_path(&top, ID1), &record_for(ID1)).unwrap_err();
+        assert_eq!(error.kind, RecoveryErrorKind::UnsafeRecoveryPath);
+        assert!(!outside.join("transactions").exists());
+        let _ = fs::remove_dir_all(top);
+        let _ = fs::remove_dir_all(outside);
+    }
+
+    #[test]
+    fn persist_record_rejects_transaction_directory_symlink() {
+        use std::os::unix::fs::symlink;
+        let top = scratch_root("transaction-symlink");
+        let outside = scratch_root("transaction-symlink-outside");
+        fs::create_dir_all(top.join(".catos-recovery/transactions")).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        symlink(&outside, top.join(".catos-recovery/transactions").join(ID1)).unwrap();
+        let error = persist_record(&state_path(&top, ID1), &record_for(ID1)).unwrap_err();
+        assert_eq!(error.kind, RecoveryErrorKind::UnsafeRecoveryPath);
+        assert!(!outside.join("state.json").exists());
+        let _ = fs::remove_dir_all(top);
+        let _ = fs::remove_dir_all(outside);
+    }
+
+    #[test]
+    fn persist_record_rejects_state_file_symlink() {
+        use std::os::unix::fs::symlink;
+        let top = scratch_root("state-symlink");
+        let outside = scratch_root("state-symlink-outside");
+        let path = state_path(&top, ID1);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        let sentinel = outside.join("sentinel");
+        fs::write(&sentinel, b"unchanged").unwrap();
+        symlink(&sentinel, &path).unwrap();
+        let error = persist_record(&path, &record_for(ID1)).unwrap_err();
+        assert_eq!(error.kind, RecoveryErrorKind::UnsafeRecoveryPath);
+        assert_eq!(fs::read(&sentinel).unwrap(), b"unchanged");
+        let _ = fs::remove_dir_all(top);
+        let _ = fs::remove_dir_all(outside);
     }
 }

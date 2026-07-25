@@ -35,8 +35,9 @@ pub enum Command {
 }
 
 /// Phase-3 recovery subcommands.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum RecoverySubcommand {
+    #[default]
     List,
     Inspect,
     Plan,
@@ -44,12 +45,6 @@ pub enum RecoverySubcommand {
     Status,
     Resume,
     Revert,
-}
-
-impl Default for RecoverySubcommand {
-    fn default() -> Self {
-        RecoverySubcommand::List
-    }
 }
 
 impl RecoverySubcommand {
@@ -179,7 +174,7 @@ pub struct TargetSelection {
 /// Top-level options that bypass subcommand routing (help/version).
 #[derive(Debug, Clone)]
 pub enum ParseOutcome {
-    Run(CliArgs),
+    Run(Box<CliArgs>),
     /// Print this text to stdout and exit 0.
     Help(String),
     /// Print this text to stdout and exit 0.
@@ -451,13 +446,13 @@ pub fn parse(argv: &[String], default_root: SystemRoot) -> Result<ParseOutcome, 
         }
     };
 
-    Ok(ParseOutcome::Run(CliArgs {
+    Ok(ParseOutcome::Run(Box::new(CliArgs {
         command,
         root: root.unwrap_or(default_root),
         json,
         target,
         recovery,
-    }))
+    })))
 }
 
 fn parse_device_path(value: &str, option: &str) -> Result<PathBuf, Error> {

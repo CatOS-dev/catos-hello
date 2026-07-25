@@ -120,11 +120,11 @@ pub fn run(invocation: Invocation, argv: &[String]) -> i32 {
         }
         Ok(crate::cli::ParseOutcome::Run(args)) => {
             if args.command.is_phase1() {
-                run_phase1(invocation, args)
+                run_phase1(invocation, *args)
             } else if args.command.is_phase2() {
-                run_phase2(invocation, args)
+                run_phase2(invocation, *args)
             } else {
-                run_phase3(invocation, args)
+                run_phase3(invocation, *args)
             }
         }
         Err(e) => {

@@ -20,8 +20,10 @@
 
 use std::path::Path;
 
-use crate::model::fstab::{FstabEntry, FstabEntryKind, FstabSource};
-use crate::model::recovery::BootLayout;
+use crate::model::fstab::{FstabEntry, FstabSource};
+use crate::model::recovery::{
+    BootConsistencyReport, BootConsistencyStatus, BootLayout, RecoveryError, RecoveryErrorKind,
+};
 
 /// Detect the boot layout of a mounted snapshot / root candidate.
 ///
@@ -36,35 +38,32 @@ pub fn detect_layout(mounted_root: &Path, fstab: &[FstabEntry]) -> BootLayout {
     let mut esp_device: Option<String> = None;
 
     for entry in fstab {
-        match entry.kind {
-            FstabEntryKind::Boot => {
-                if entry.fstype == "btrfs" {
-                    let subvol = entry
-                        .options
-                        .iter()
-                        .any(|o| o.starts_with("subvol=") || o.starts_with("subvolid="));
-                    if subvol {
-                        boot_separate_subvolume = true;
-                    } else {
-                        boot_separate_filesystem = true;
-                    }
-                } else {
-                    boot_separate_filesystem = true;
-                }
-            }
-            _ => {
-                if matches!(entry.target.as_str(), "/boot/efi" | "/efi" | "/boot")
-                    && matches!(
-                        entry.fstype.as_str(),
-                        "vfat" | "fat" | "fat32" | "fat16" | "fat12"
-                    )
-                {
-                    esp_mount_point = Some(entry.target.clone());
-                    if let FstabSource::Path(p) = &entry.source {
-                        esp_device = Some(p.clone());
-                    }
-                }
-            }
+        let is_fat = matches!(
+            entry.fstype.as_str(),
+            "vfat" | "fat" | "fat32" | "fat16" | "fat12"
+        );
+        if matches!(entry.target.as_str(), "/boot/efi" | "/efi")
+            || (entry.target == "/boot" && is_fat)
+        {
+            esp_mount_point = Some(entry.target.clone());
+            esp_device = Some(fstab_source_string(&entry.source));
+        }
+
+        // An ESP below /boot does not mean the /boot directory itself
+        // is external. Only an entry mounted exactly at /boot changes
+        // whether the root exchange covers /boot.
+        if entry.target != "/boot" {
+            continue;
+        }
+        if entry.fstype == "btrfs"
+            && entry
+                .options
+                .iter()
+                .any(|option| option.starts_with("subvol=") || option.starts_with("subvolid="))
+        {
+            boot_separate_subvolume = true;
+        } else {
+            boot_separate_filesystem = true;
         }
     }
 
@@ -92,6 +91,98 @@ pub fn detect_layout(mounted_root: &Path, fstab: &[FstabEntry]) -> BootLayout {
         uki_paths,
         kernel_versions,
         has_initramfs,
+    }
+}
+
+/// Derive the phase-3 boot gate from metadata observed through a
+/// read-only target mount. The check is deliberately conservative: a
+/// root-only exchange is supported only when every observed boot
+/// resource lives inside the root subvolume.
+pub fn evaluate_readonly_consistency(layout: &BootLayout) -> BootConsistencyReport {
+    let external_boot = layout.boot_separate_filesystem || layout.boot_separate_subvolume;
+    let external_esp = layout.esp_mount_point.is_some() || layout.esp_device.is_some();
+    let mut reasons = Vec::new();
+
+    let (status, root_switch_covers_all_boot_resources) = if external_boot || external_esp {
+        if layout.boot_separate_filesystem {
+            reasons.push(
+                "/boot is a separate filesystem and is not covered by the root exchange".into(),
+            );
+        }
+        if layout.boot_separate_subvolume {
+            reasons.push(
+                "/boot is a separate btrfs subvolume and is not covered by the root exchange"
+                    .into(),
+            );
+        }
+        if external_esp {
+            reasons.push(
+                "the ESP is outside the root subvolume and phase 3 performs no ESP writes".into(),
+            );
+        }
+        (BootConsistencyStatus::Unsupported, false)
+    } else if layout.boot_inside_root {
+        reasons.push("all observed boot resources move with the root subvolume exchange".into());
+        (BootConsistencyStatus::Consistent, true)
+    } else {
+        reasons.push(
+            "no authoritative root-contained or external boot topology was established".into(),
+        );
+        (BootConsistencyStatus::Unknown, false)
+    };
+
+    BootConsistencyReport {
+        status,
+        checked_read_only: true,
+        root_switch_covers_all_boot_resources,
+        external_boot,
+        external_esp,
+        reasons,
+    }
+}
+
+/// Refuse the first persistent recovery write unless the read-only
+/// report proves that the root exchange covers all boot resources.
+pub fn require_boot_consistency(report: &BootConsistencyReport) -> Result<(), RecoveryError> {
+    match report.status {
+        BootConsistencyStatus::Consistent
+            if report.checked_read_only && report.root_switch_covers_all_boot_resources =>
+        {
+            Ok(())
+        }
+        BootConsistencyStatus::Inconsistent => Err(RecoveryError::new(
+            RecoveryErrorKind::BootConsistencyInconsistent,
+            format!(
+                "boot resources are inconsistent: {}",
+                report.reasons.join("; ")
+            ),
+        )),
+        BootConsistencyStatus::Unsupported => Err(RecoveryError::new(
+            RecoveryErrorKind::UnsupportedExternalBootLayout,
+            format!(
+                "external boot resources are not supported by root-only recovery: {}",
+                report.reasons.join("; ")
+            ),
+        )),
+        BootConsistencyStatus::Unknown | BootConsistencyStatus::Consistent => {
+            Err(RecoveryError::new(
+                RecoveryErrorKind::BootConsistencyUnknown,
+                format!(
+                    "boot consistency was not established safely: {}",
+                    report.reasons.join("; ")
+                ),
+            ))
+        }
+    }
+}
+
+fn fstab_source_string(source: &FstabSource) -> String {
+    match source {
+        FstabSource::Uuid(value) => format!("UUID={value}"),
+        FstabSource::PartUuid(value) => format!("PARTUUID={value}"),
+        FstabSource::Label(value) => format!("LABEL={value}"),
+        FstabSource::PartLabel(value) => format!("PARTLABEL={value}"),
+        FstabSource::Path(value) | FstabSource::Pseudo(value) => value.clone(),
     }
 }
 
@@ -262,7 +353,7 @@ mod tests {
             options: vec!["defaults".into()],
             dump: 0,
             pass: 2,
-            kind: FstabEntryKind::OtherLocal,
+            kind: FstabEntryKind::Boot,
             noauto: false,
             nofail: false,
             has_systemd_options: false,
@@ -270,6 +361,72 @@ mod tests {
         let layout = detect_layout(&root, &fstab);
         assert_eq!(layout.esp_mount_point.as_deref(), Some("/boot/efi"));
         assert_eq!(layout.esp_device.as_deref(), Some("/dev/nvme0n1p1"));
+        assert!(
+            !layout.boot_separate_filesystem,
+            "an ESP mounted below /boot must not imply that /boot itself is separate"
+        );
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn readonly_consistency_accepts_only_root_contained_boot_resources() {
+        let report = evaluate_readonly_consistency(&BootLayout {
+            boot_inside_root: true,
+            kernel_versions: vec!["6.12.1-catos".into()],
+            has_initramfs: true,
+            ..BootLayout::default()
+        });
+        assert_eq!(
+            report.status,
+            crate::model::recovery::BootConsistencyStatus::Consistent
+        );
+        assert!(report.checked_read_only);
+        assert!(report.root_switch_covers_all_boot_resources);
+        require_boot_consistency(&report).unwrap();
+    }
+
+    #[test]
+    fn readonly_consistency_refuses_external_boot_and_esp() {
+        for layout in [
+            BootLayout {
+                boot_separate_filesystem: true,
+                ..BootLayout::default()
+            },
+            BootLayout {
+                boot_separate_subvolume: true,
+                ..BootLayout::default()
+            },
+            BootLayout {
+                boot_inside_root: true,
+                esp_mount_point: Some("/boot/efi".into()),
+                esp_device: Some("/dev/nvme0n1p1".into()),
+                ..BootLayout::default()
+            },
+        ] {
+            let report = evaluate_readonly_consistency(&layout);
+            assert_eq!(
+                report.status,
+                crate::model::recovery::BootConsistencyStatus::Unsupported
+            );
+            let error = require_boot_consistency(&report).unwrap_err();
+            assert_eq!(
+                error.kind,
+                crate::model::recovery::RecoveryErrorKind::UnsupportedExternalBootLayout
+            );
+        }
+    }
+
+    #[test]
+    fn readonly_consistency_fails_closed_when_boot_topology_is_unknown() {
+        let report = evaluate_readonly_consistency(&BootLayout::default());
+        assert_eq!(
+            report.status,
+            crate::model::recovery::BootConsistencyStatus::Unknown
+        );
+        let error = require_boot_consistency(&report).unwrap_err();
+        assert_eq!(
+            error.kind,
+            crate::model::recovery::RecoveryErrorKind::BootConsistencyUnknown
+        );
     }
 }

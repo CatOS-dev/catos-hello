@@ -17,23 +17,40 @@ path = "src/lib.rs"
 name = "catos-system"
 path = "src/main.rs"
 
+# Test-only helper binary that the Group 1 lock-conflict tests spawn
+# as a real child process to hold the per-FSID flock. Built only when
+# the `test-helpers` feature is enabled; never shipped in release
+# artifacts. Mirrors the existing `recovery_fault_injection` pattern.
+[[bin]]
+name = "catos-recovery-lock-hold-helper"
+path = "src/bin/recovery_lock_hold_helper.rs"
+required-features = ["test-helpers"]
+
 [dependencies]
-# Only serde + serde_json. No async runtime, no TLS, no D-Bus, no libalpm,
-# no heavyweight CLI framework. CLI parsing is hand-rolled.
+# No async runtime, TLS, D-Bus, libalpm, or heavyweight CLI framework.
+# `sha2` binds the immutable effective plan; `getrandom` is the only
+# accepted nonce/id source and fails closed when the kernel RNG fails.
 serde = { version = "1", default-features = false, features = ["std", "derive"] }
 serde_json = { version = "1", default-features = false, features = ["std"] }
+sha2 = { version = "0.10", default-features = false }
+getrandom = { version = "0.2", default-features = false }
+libc = { version = "0.2", default-features = false }
 
 [dev-dependencies]
 # No extra dev-deps: tests use only std + serde_json + tempfile-free helpers
 # built on std::env::temp_dir.
 
 # Test-only fault injection for the recovery engine. Enables the
-# CATOS_RECOVERY_FAULT_AT hook so the QEMU crash-resume test can
-# simulate a SIGKILL after every persistent step. NEVER enable in
-# release builds.
+# before-operation, after-operation-before-persist, and
+# after-state-persist SIGKILL hooks used by the authoritative QEMU
+# crash/resume matrix. NEVER enable in release builds.
 [features]
 default = []
 recovery_fault_injection = []
+# Test-only helpers (subprocess lock holders, etc.). NEVER enable in
+# release builds; the feature gates test scaffolding that ships no
+# production value.
+test-helpers = []
 
 # Release profile tuned for size. Comparison recorded in apps/system/README.md:
 #   opt-level = "z" produced a smaller stripped static binary than "s" on this

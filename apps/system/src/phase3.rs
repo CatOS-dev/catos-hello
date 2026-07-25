@@ -21,22 +21,35 @@ use crate::cli::{RecoveryArgs, RecoverySubcommand};
 use crate::error::{exit_code, Error};
 use crate::model::inspection::Warning;
 use crate::model::recovery::{
-    BtrfsFilesystemIdentity, BtrfsSubvolumeIdentity, RecoveryError, RecoveryErrorKind,
-    RecoveryInspectReport, RecoveryListReport, RecoveryPlan, RecoveryStatusReport,
-    TransactionPaths, TransactionRecord, TransactionState, TransactionSummary,
+    BootConsistencyReport, BtrfsFilesystemIdentity, BtrfsSubvolumeIdentity, CleanupSummary,
+    DiskFacts, RecoveryError, RecoveryErrorKind, RecoveryInspectReport, RecoveryListReport,
+    RecoveryPlan, RecoveryStatusReport, TransactionPaths, TransactionRecord, TransactionState,
+    TransactionSummary,
 };
 use crate::mount::namespace;
 use crate::mount::plan::build_probe_plan;
 use crate::mount::session::{Session, SESSION_ROOT_PARENT};
 use crate::mount::syscall::{self, ms_flags};
+use crate::parse::fstab::{self, FstabEntry, FstabEntryKind, FstabSource};
+use crate::recovery::confined;
 use crate::recovery::engine::{Engine, EngineOptions};
 use crate::recovery::external as btrfs;
-use crate::recovery::identity::SubvolumePath;
-use crate::recovery::plan::{build_plan as build_recovery_plan, PlanInputs};
+use crate::recovery::identity::{
+    canonical_block_identity, ensure_supported_snapshot_layout, ensure_target_is_not_running_root,
+    validate_mounted_filesystem, validate_recovery_id, SubvolumePath,
+};
+use crate::recovery::plan::{
+    build_plan as build_recovery_plan, build_revert_confirmation_token, PlanInputs,
+};
 use crate::recovery::store;
 
 /// Outcome of a phase-3 subcommand. Each variant carries the model
 /// the matching output renderer consumes.
+//
+// `Error` boxes `RecoveryError` so the variant stays small relative
+// to the others. Boxing here keeps clippy's `large_enum_variant`
+// quiet (the alternatives — making every variant boxed or accepting
+// the warning globally — are worse). The renderer dereferences once.
 pub enum Phase3Outcome {
     List(RecoveryListReport),
     Inspect(RecoveryInspectReport),
@@ -45,7 +58,7 @@ pub enum Phase3Outcome {
         record: TransactionRecord,
         final_state: TransactionState,
     },
-    Status(RecoveryStatusReport),
+    Status(Box<RecoveryStatusReport>),
     Resume {
         record: TransactionRecord,
         final_state: TransactionState,
@@ -54,7 +67,7 @@ pub enum Phase3Outcome {
         record: TransactionRecord,
         final_state: TransactionState,
     },
-    Error(RecoveryError),
+    Error(Box<RecoveryError>),
 }
 
 /// Run a recovery subcommand. Called by `entry.rs` after the CLI has
@@ -63,40 +76,40 @@ pub fn run_recovery(args: RecoveryArgs) -> Phase3Outcome {
     match args.subcommand {
         RecoverySubcommand::List => match run_list(&args) {
             Ok(report) => Phase3Outcome::List(report),
-            Err(error) => Phase3Outcome::Error(error),
+            Err(error) => Phase3Outcome::Error(Box::new(error)),
         },
         RecoverySubcommand::Inspect => match run_inspect(&args) {
             Ok(report) => Phase3Outcome::Inspect(report),
-            Err(error) => Phase3Outcome::Error(error),
+            Err(error) => Phase3Outcome::Error(Box::new(error)),
         },
         RecoverySubcommand::Plan => match run_plan(&args) {
             Ok(plan) => Phase3Outcome::Plan(plan),
-            Err(error) => Phase3Outcome::Error(error),
+            Err(error) => Phase3Outcome::Error(Box::new(error)),
         },
         RecoverySubcommand::Apply => match run_apply(&args) {
             Ok((record, final_state)) => Phase3Outcome::Apply {
                 record,
                 final_state,
             },
-            Err(error) => Phase3Outcome::Error(error),
+            Err(error) => Phase3Outcome::Error(Box::new(error)),
         },
         RecoverySubcommand::Status => match run_status(&args) {
-            Ok(report) => Phase3Outcome::Status(report),
-            Err(error) => Phase3Outcome::Error(error),
+            Ok(report) => Phase3Outcome::Status(Box::new(report)),
+            Err(error) => Phase3Outcome::Error(Box::new(error)),
         },
         RecoverySubcommand::Resume => match run_resume(&args) {
             Ok((record, final_state)) => Phase3Outcome::Resume {
                 record,
                 final_state,
             },
-            Err(error) => Phase3Outcome::Error(error),
+            Err(error) => Phase3Outcome::Error(Box::new(error)),
         },
         RecoverySubcommand::Revert => match run_revert(&args) {
             Ok((record, final_state)) => Phase3Outcome::Revert {
                 record,
                 final_state,
             },
-            Err(error) => Phase3Outcome::Error(error),
+            Err(error) => Phase3Outcome::Error(Box::new(error)),
         },
     }
 }
@@ -106,14 +119,56 @@ pub fn run_recovery(args: RecoveryArgs) -> Phase3Outcome {
 // ---------------------------------------------------------------------------
 
 fn run_list(args: &RecoveryArgs) -> Result<RecoveryListReport, RecoveryError> {
-    let mut report = RecoveryListReport::default();
-    let _ = args; // List currently walks the configured target root only.
+    let selection = args.require_target_selection()?;
+    let (canonical_device, _) = canonical_block_identity(&selection.root_device)?;
+    let session_root =
+        PathBuf::from(SESSION_ROOT_PARENT).join(format!("recovery-list-{}", std::process::id()));
+    let source = canonical_device.to_str().ok_or_else(|| {
+        RecoveryError::new(
+            RecoveryErrorKind::SyscallFailed,
+            format!("device {} is not valid UTF-8", canonical_device.display()),
+        )
+    })?;
+    let mount_plan = build_probe_plan(session_root, source, "btrfs", Some("subvolid=5"))
+        .map_err(|error| RecoveryError::new(RecoveryErrorKind::SyscallFailed, error.to_string()))?;
+    let mut session = Session::new(format!("recovery-list-{}", std::process::id()), &mount_plan);
+    let mounted = session.run(&mount_plan).map_err(|error| {
+        RecoveryError::new(
+            RecoveryErrorKind::SyscallFailed,
+            format!("cannot mount recovery-list target read-only: {error}"),
+        )
+    })?;
 
-    // Probe / for transactions left by previous applies. This is the
-    // "no target mounted" path; if the operator has already mounted
-    // the target at /, we see its transactions directly.
-    let transactions_dir = Path::new(TransactionPaths::transactions_dir());
-    let (records, errs) = store::list_records(transactions_dir);
+    let result = (|| {
+        let target = validate_mounted_filesystem(&mounted.target_root, &canonical_device)?;
+        let readonly_snapshots = btrfs::list_readonly_subvolumes(&mounted.target_root)?;
+        let transactions_dir = mounted
+            .target_root
+            .join(TransactionPaths::transactions_dir().trim_start_matches('/'));
+        let (records, errs) = store::list_records(&transactions_dir);
+        Ok((target.filesystem, readonly_snapshots, records, errs))
+    })();
+
+    let cleanup = cleanup_summary(session.cleanup());
+    if !cleanup.all_clean {
+        return Err(RecoveryError::new(
+            RecoveryErrorKind::CleanupIncomplete,
+            format!(
+                "recovery list mount cleanup was incomplete: {:?}",
+                cleanup.residual
+            ),
+        ));
+    }
+    let (filesystem, readonly_snapshots, records, errs) = result?;
+    let mut report = RecoveryListReport {
+        source_device: Some(canonical_device.display().to_string()),
+        source_filesystem_fsid: Some(filesystem.fsid.clone()),
+        mount_cleanup: Some(cleanup),
+        filesystems: vec![filesystem],
+        readonly_snapshots,
+        transactions: Vec::new(),
+        warnings: Vec::new(),
+    };
     for (_, record) in &records {
         report.transactions.push(TransactionSummary {
             transaction_id: record.transaction_id.clone(),
@@ -140,7 +195,7 @@ fn run_list(args: &RecoveryArgs) -> Result<RecoveryListReport, RecoveryError> {
 fn run_inspect(args: &RecoveryArgs) -> Result<RecoveryInspectReport, RecoveryError> {
     let selection = args.require_target_selection()?;
     let device = selection.root_device;
-    let _ = selection.root_subvolume;
+    let root_subvolume = selection.root_subvolume;
     let snapshot = args.snapshot_subvolume.clone().ok_or_else(|| {
         RecoveryError::new(
             RecoveryErrorKind::TargetChanged,
@@ -150,11 +205,12 @@ fn run_inspect(args: &RecoveryArgs) -> Result<RecoveryInspectReport, RecoveryErr
 
     // Probe the device with a short-lived read-only mount and read
     // identities through it.
-    let probe = probe_target_readonly(&device, Some(&snapshot))?;
+    let probe = probe_target_readonly(&device, root_subvolume.as_deref(), Some(&snapshot))?;
     let filesystem = probe.filesystem;
     let current_root_identity = probe.current_root;
     let snapshot_identity = probe.snapshot;
     let boot_layout = probe.boot_layout;
+    let boot_consistency = probe.boot_consistency;
     let catos_identity = probe.catos_identity;
 
     Ok(RecoveryInspectReport {
@@ -162,6 +218,7 @@ fn run_inspect(args: &RecoveryArgs) -> Result<RecoveryInspectReport, RecoveryErr
         current_root: current_root_identity,
         source_snapshot: snapshot_identity,
         boot_layout,
+        boot_consistency,
         target_catos_identity: catos_identity,
         warnings: vec![],
     })
@@ -174,7 +231,7 @@ fn run_inspect(args: &RecoveryArgs) -> Result<RecoveryInspectReport, RecoveryErr
 fn run_plan(args: &RecoveryArgs) -> Result<RecoveryPlan, RecoveryError> {
     let selection = args.require_target_selection()?;
     let device = selection.root_device;
-    let _ = selection.root_subvolume;
+    let root_subvolume = selection.root_subvolume;
     let snapshot = args.snapshot_subvolume.clone().ok_or_else(|| {
         RecoveryError::new(
             RecoveryErrorKind::TargetChanged,
@@ -183,10 +240,10 @@ fn run_plan(args: &RecoveryArgs) -> Result<RecoveryPlan, RecoveryError> {
     })?;
     let _ = selection.esp_device;
 
-    let probe = probe_target_readonly(&device, Some(&snapshot))?;
+    let probe = probe_target_readonly(&device, root_subvolume.as_deref(), Some(&snapshot))?;
 
-    let plan_id = generate_plan_id();
-    let entropy = generate_entropy();
+    let plan_id = generate_plan_id()?;
+    let entropy = generate_entropy()?;
     let fstab_root_definition = probe.fstab_root_definition;
 
     let inputs = PlanInputs {
@@ -238,26 +295,58 @@ fn run_apply(args: &RecoveryArgs) -> Result<(TransactionRecord, TransactionState
     crate::recovery::identity::verify_confirmation_token(&plan, plan_id_arg, confirm)?;
 
     let selection = args.require_target_selection()?;
-    let device = selection.root_device;
+    ensure_cli_root_matches_plan(selection.root_subvolume.as_deref(), &plan.current_root.path)?;
+    ensure_supported_snapshot_layout(&plan.current_root.path, &plan.source_snapshot.path)?;
+
+    // Re-establish every execution-relevant identity through a
+    // read-only mount before the first persistent write. The supplied
+    // plan file may be stale even though its own digest is intact.
+    let fresh = probe_target_readonly(
+        &selection.root_device,
+        Some(&plan.current_root.path),
+        Some(&plan.source_snapshot.path),
+    )?;
+    if let Some(error) = crate::recovery::identity::drift_between(
+        &plan,
+        &fresh.filesystem,
+        &fresh.current_root,
+        &fresh.snapshot,
+    )
+    .into_error()
+    {
+        return Err(error);
+    }
+    if fresh.fstab_root_definition != plan.fstab_root_definition {
+        return Err(RecoveryError::new(
+            RecoveryErrorKind::TargetChanged,
+            "target fstab root definition changed after the plan was generated",
+        ));
+    }
+    if fresh.boot_layout != plan.boot_layout {
+        return Err(RecoveryError::new(
+            RecoveryErrorKind::TargetChanged,
+            "target boot layout changed after the plan was generated",
+        ));
+    }
+    if fresh.boot_consistency != plan.boot_consistency {
+        return Err(RecoveryError::new(
+            RecoveryErrorKind::TargetChanged,
+            "boot consistency report changed after the plan was generated",
+        ));
+    }
+    crate::recovery::boot::require_boot_consistency(&fresh.boot_consistency)?;
+    ensure_target_is_not_running_root(&fresh.filesystem, &fresh.current_root)?;
+    let device = fresh.canonical_device;
 
     let mount_session = mount_btrfs_toplevel_rw(&device)?;
     let top_level_mount = mount_session.top_level_mount.clone();
-
-    // Re-persist the plan record into the target's btrfs top-level
-    // so subsequent `status` / `resume` calls can find it. The plan
-    // came from the operator-supplied file (which may live on the
-    // recovery LiveCD's tmpfs); the transaction record must outlive
-    // the recovery process.
-    let target_plan_path = top_level_mount
-        .join(TransactionPaths::transactions_dir().trim_start_matches('/'))
-        .join(&plan.plan_id)
-        .join("plan.json");
-    store::persist_plan(&target_plan_path, &plan)?;
+    let rw_target = validate_mounted_filesystem(&top_level_mount, &device)?;
 
     let mut engine = Engine::begin(
         EngineOptions {
             top_level_mount,
             device_path: device,
+            validated_filesystem: rw_target.filesystem,
         },
         plan,
     )?;
@@ -270,36 +359,135 @@ fn run_apply(args: &RecoveryArgs) -> Result<(TransactionRecord, TransactionState
 // status
 // ---------------------------------------------------------------------------
 
-fn run_status(args: &RecoveryArgs) -> Result<RecoveryStatusReport, RecoveryError> {
-    let transaction_id = args.transaction.as_deref().ok_or_else(|| {
+struct ExistingTransactionProbe {
+    canonical_device: PathBuf,
+    filesystem: BtrfsFilesystemIdentity,
+    record: TransactionRecord,
+    disk_facts: DiskFacts,
+    cleanup: CleanupSummary,
+}
+
+fn probe_existing_transaction_readonly(
+    device: &Path,
+    explicit_root: Option<&str>,
+    transaction_id: &str,
+    protect_running_root: bool,
+) -> Result<ExistingTransactionProbe, RecoveryError> {
+    let (canonical_device, _) = canonical_block_identity(device)?;
+    let session_root = PathBuf::from(SESSION_ROOT_PARENT).join(format!(
+        "recovery-existing-{}-{}",
+        std::process::id(),
+        transaction_id
+    ));
+    let source = canonical_device.to_str().ok_or_else(|| {
         RecoveryError::new(
-            RecoveryErrorKind::TransactionNotFound,
-            "status requires --transaction <id>",
+            RecoveryErrorKind::SyscallFailed,
+            format!("device {} is not valid UTF-8", canonical_device.display()),
         )
     })?;
-    let selection = args.require_target_selection()?;
-    let device = selection.root_device;
+    let mount_plan = build_probe_plan(session_root, source, "btrfs", Some("subvolid=5"))
+        .map_err(|error| RecoveryError::new(RecoveryErrorKind::SyscallFailed, error.to_string()))?;
+    let mut session = Session::new(format!("recovery-existing-{transaction_id}"), &mount_plan);
+    let mounted = session.run(&mount_plan).map_err(|error| {
+        RecoveryError::new(
+            RecoveryErrorKind::SyscallFailed,
+            format!("cannot mount existing recovery transaction read-only: {error}"),
+        )
+    })?;
 
-    let mount_session = mount_btrfs_toplevel_rw(&device)?;
-    let mut engine = Engine::load(
-        EngineOptions {
-            top_level_mount: mount_session.top_level_mount.clone(),
-            device_path: device.clone(),
-        },
+    let result = (|| {
+        let target = validate_mounted_filesystem(&mounted.target_root, &canonical_device)?;
+        let mut engine = Engine::load(
+            EngineOptions {
+                top_level_mount: mounted.target_root.clone(),
+                device_path: canonical_device.clone(),
+                validated_filesystem: target.filesystem.clone(),
+            },
+            transaction_id,
+        )?;
+        ensure_cli_root_matches_plan(explicit_root, &engine.record().plan.current_root.path)?;
+        ensure_supported_snapshot_layout(
+            &engine.record().plan.current_root.path,
+            &engine.record().plan.source_snapshot.path,
+        )?;
+
+        if protect_running_root {
+            let root_path = engine.record().plan.current_root.path.clone();
+            let mut active_root = btrfs::show_subvolume(
+                &mounted.target_root.join(root_path.trim_start_matches('/')),
+            )?;
+            active_root.path = root_path;
+            ensure_target_is_not_running_root(&target.filesystem, &active_root)?;
+        }
+
+        let disk_facts = engine.reconcile_status();
+        let record = engine.record().clone();
+        Ok((target.filesystem, record, disk_facts))
+    })();
+
+    let cleanup = cleanup_summary(session.cleanup());
+    if !cleanup.all_clean {
+        let primary = result
+            .as_ref()
+            .err()
+            .map(|error: &RecoveryError| format!("; primary probe error: {error}"))
+            .unwrap_or_default();
+        return Err(RecoveryError::new(
+            RecoveryErrorKind::CleanupIncomplete,
+            format!(
+                "existing transaction probe left residual mounts: {:?}{primary}",
+                cleanup.residual
+            ),
+        ));
+    }
+    let (filesystem, record, disk_facts) = result?;
+    Ok(ExistingTransactionProbe {
+        canonical_device,
+        filesystem,
+        record,
+        disk_facts,
+        cleanup,
+    })
+}
+
+fn run_status(args: &RecoveryArgs) -> Result<RecoveryStatusReport, RecoveryError> {
+    let transaction_id = require_transaction_id(args.transaction.as_deref(), "status")?;
+    let selection = args.require_target_selection()?;
+    let probe = probe_existing_transaction_readonly(
+        &selection.root_device,
+        selection.root_subvolume.as_deref(),
         transaction_id,
+        false,
     )?;
-    let disk_facts = engine.reconcile_status();
-    let record = engine.record().clone();
+    let disk_facts = probe.disk_facts;
+    let record = probe.record;
     let reconciled_state = record.state;
     let recommendation = recommend(&record);
+    let revert_confirmation_token = if !revert_confirmation_is_safe(reconciled_state) {
+        None
+    } else {
+        Some(build_revert_confirmation_token(
+            &record.transaction_id,
+            &record.plan.plan_digest,
+            &disk_facts.filesystem_fsid,
+            reconciled_state.code(),
+            &record.plan.nonce,
+        ))
+    };
     Ok(RecoveryStatusReport {
         transaction_id: transaction_id.to_string(),
         reconciled_state,
         record,
         disk_facts,
         recommendation,
+        mount_cleanup: Some(probe.cleanup),
+        revert_confirmation_token,
         warnings: vec![],
     })
+}
+
+fn revert_confirmation_is_safe(state: TransactionState) -> bool {
+    state != TransactionState::FailedManualIntervention
 }
 
 // ---------------------------------------------------------------------------
@@ -308,19 +496,28 @@ fn run_status(args: &RecoveryArgs) -> Result<RecoveryStatusReport, RecoveryError
 
 fn run_resume(args: &RecoveryArgs) -> Result<(TransactionRecord, TransactionState), RecoveryError> {
     require_root()?;
-    let transaction_id = args.transaction.as_deref().ok_or_else(|| {
-        RecoveryError::new(
-            RecoveryErrorKind::TransactionNotFound,
-            "resume requires --transaction <id>",
-        )
-    })?;
+    let transaction_id = require_transaction_id(args.transaction.as_deref(), "resume")?;
     let selection = args.require_target_selection()?;
-    let device = selection.root_device;
+    let probe = probe_existing_transaction_readonly(
+        &selection.root_device,
+        selection.root_subvolume.as_deref(),
+        transaction_id,
+        true,
+    )?;
+    let device = probe.canonical_device;
     let mount_session = mount_btrfs_toplevel_rw(&device)?;
-    let mut engine = Engine::load(
+    let target = validate_mounted_filesystem(&mount_session.top_level_mount, &device)?;
+    if target.filesystem != probe.filesystem {
+        return Err(RecoveryError::new(
+            RecoveryErrorKind::TargetChanged,
+            "target filesystem identity changed between read-only preflight and write mount",
+        ));
+    }
+    let mut engine = Engine::load_for_write(
         EngineOptions {
             top_level_mount: mount_session.top_level_mount.clone(),
             device_path: device.clone(),
+            validated_filesystem: target.filesystem,
         },
         transaction_id,
     )?;
@@ -334,27 +531,37 @@ fn run_resume(args: &RecoveryArgs) -> Result<(TransactionRecord, TransactionStat
 
 fn run_revert(args: &RecoveryArgs) -> Result<(TransactionRecord, TransactionState), RecoveryError> {
     require_root()?;
-    let transaction_id = args.transaction.as_deref().ok_or_else(|| {
-        RecoveryError::new(
-            RecoveryErrorKind::TransactionNotFound,
-            "revert requires --transaction <id>",
-        )
-    })?;
-    let _ = args.confirm.as_deref().ok_or_else(|| {
+    let transaction_id = require_transaction_id(args.transaction.as_deref(), "revert")?;
+    let confirm = args.confirm.as_deref().ok_or_else(|| {
         RecoveryError::new(
             RecoveryErrorKind::ConfirmationTokenMismatch,
             "revert requires --confirm <token>",
         )
     })?;
     let selection = args.require_target_selection()?;
-    let device = selection.root_device;
+    let probe = probe_existing_transaction_readonly(
+        &selection.root_device,
+        selection.root_subvolume.as_deref(),
+        transaction_id,
+        true,
+    )?;
+    let device = probe.canonical_device;
     let mount_session = mount_btrfs_toplevel_rw(&device)?;
-    let mut engine = Engine::load(
+    let target = validate_mounted_filesystem(&mount_session.top_level_mount, &device)?;
+    if target.filesystem != probe.filesystem {
+        return Err(RecoveryError::new(
+            RecoveryErrorKind::TargetChanged,
+            "target filesystem identity changed between read-only preflight and write mount",
+        ));
+    }
+    let mut engine = Engine::load_for_revert(
         EngineOptions {
             top_level_mount: mount_session.top_level_mount.clone(),
             device_path: device.clone(),
+            validated_filesystem: target.filesystem,
         },
         transaction_id,
+        confirm,
     )?;
     let final_state = engine.revert()?;
     Ok((engine.record().clone(), final_state))
@@ -380,34 +587,36 @@ fn mount_btrfs_toplevel_rw(device: &Path) -> Result<RecoveryMountSession, Recove
     // to the host.
     namespace::establish_private_namespace().map_err(|e| RecoveryError {
         kind: RecoveryErrorKind::SyscallFailed,
-        message: format!("cannot establish private namespace: {e}"),
+        message: format!("cannot establish private namespace: {e}").into(),
         transaction_id: None,
         current_state: None,
         failed_step: Some("namespace".into()),
         errno: Some(e.errno),
         external_exit_code: None,
-        completed_steps: Vec::new(),
+        completed_steps: Box::default(),
         disk_facts: None,
         resume_possible: false,
         revert_possible: false,
         manual_intervention_required: true,
+        record_persistence_error: None,
     })?;
 
     let mount_point =
         PathBuf::from(SESSION_ROOT_PARENT).join(format!("recovery-rw-{}", std::process::id()));
     std::fs::create_dir_all(&mount_point).map_err(|e| RecoveryError {
         kind: RecoveryErrorKind::SyscallFailed,
-        message: format!("cannot create {}: {e}", mount_point.display()),
+        message: format!("cannot create {}: {e}", mount_point.display()).into(),
         transaction_id: None,
         current_state: None,
         failed_step: Some("mkdir".into()),
         errno: None,
         external_exit_code: None,
-        completed_steps: Vec::new(),
+        completed_steps: Box::default(),
         disk_facts: None,
         resume_possible: false,
         revert_possible: false,
         manual_intervention_required: true,
+        record_persistence_error: None,
     })?;
 
     // Mount the btrfs top-level read-write. We use subvolid=5 to be
@@ -416,17 +625,18 @@ fn mount_btrfs_toplevel_rw(device: &Path) -> Result<RecoveryMountSession, Recove
     let data = "subvolid=5";
     let source = device.to_str().ok_or_else(|| RecoveryError {
         kind: RecoveryErrorKind::SyscallFailed,
-        message: format!("device path {} is not valid UTF-8", device.display()),
+        message: format!("device path {} is not valid UTF-8", device.display()).into(),
         transaction_id: None,
         current_state: None,
         failed_step: Some("mount".into()),
         errno: None,
         external_exit_code: None,
-        completed_steps: Vec::new(),
+        completed_steps: Box::default(),
         disk_facts: None,
         resume_possible: false,
         revert_possible: false,
         manual_intervention_required: false,
+        record_persistence_error: None,
     })?;
 
     syscall::mount(
@@ -438,17 +648,18 @@ fn mount_btrfs_toplevel_rw(device: &Path) -> Result<RecoveryMountSession, Recove
     )
     .map_err(|e| RecoveryError {
         kind: RecoveryErrorKind::SyscallFailed,
-        message: format!("cannot mount btrfs rw at {}: {e}", mount_point.display()),
+        message: format!("cannot mount btrfs rw at {}: {e}", mount_point.display()).into(),
         transaction_id: None,
         current_state: None,
         failed_step: Some("mount".into()),
         errno: Some(e.errno),
         external_exit_code: None,
-        completed_steps: Vec::new(),
+        completed_steps: Box::default(),
         disk_facts: None,
         resume_possible: false,
         revert_possible: false,
         manual_intervention_required: false,
+        record_persistence_error: None,
     })?;
 
     Ok(RecoveryMountSession {
@@ -462,109 +673,258 @@ fn mount_btrfs_toplevel_rw(device: &Path) -> Result<RecoveryMountSession, Recove
 // ---------------------------------------------------------------------------
 
 struct TargetProbe {
+    canonical_device: PathBuf,
     filesystem: BtrfsFilesystemIdentity,
     current_root: BtrfsSubvolumeIdentity,
     snapshot: BtrfsSubvolumeIdentity,
     boot_layout: crate::model::recovery::BootLayout,
+    boot_consistency: BootConsistencyReport,
     catos_identity: Option<crate::model::recovery::CatosIdentity>,
     fstab_root_definition: crate::model::recovery::FstabRootDefinition,
 }
 
 fn probe_target_readonly(
     device: &Path,
+    root_subvolume: Option<&str>,
     snapshot_subvolume: Option<&str>,
 ) -> Result<TargetProbe, RecoveryError> {
-    // Resolve the snapshot path. The operator passes the btrfs-relative
-    // path (e.g. `/@/.snapshots/2/snapshot`) via `--snapshot-subvolume`.
-    // Default to the snapper-style `/@/.snapshots/1/snapshot` when
-    // absent so a bare `recovery plan` against a snapper-managed root
-    // still returns something useful.
     let snapshot_btrfs_path = snapshot_subvolume
-        .filter(|s| !s.is_empty())
-        .map(|s| s.to_string())
-        .unwrap_or_else(|| "/@/.snapshots/1/snapshot".to_string());
-    let snapshot_rel = snapshot_btrfs_path.trim_start_matches('/');
-    // Mount the device read-only at subvolid=5 in a private namespace
-    // via the phase-2 probe plan, then read identities.
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            RecoveryError::new(
+                RecoveryErrorKind::TargetChanged,
+                "--snapshot-subvolume is required; no snapshot path is inferred",
+            )
+        })?;
+    SubvolumePath::parse(snapshot_btrfs_path)?;
+    let (canonical_device, _) = canonical_block_identity(device)?;
+
     let session_root =
         PathBuf::from(SESSION_ROOT_PARENT).join(format!("recovery-ro-{}", std::process::id()));
-    let source = device.to_str().ok_or_else(|| RecoveryError {
-        kind: RecoveryErrorKind::SyscallFailed,
-        message: format!("device {} is not valid UTF-8", device.display()),
-        transaction_id: None,
-        current_state: None,
-        failed_step: None,
-        errno: None,
-        external_exit_code: None,
-        completed_steps: Vec::new(),
-        disk_facts: None,
-        resume_possible: false,
-        revert_possible: false,
-        manual_intervention_required: false,
+    let source = canonical_device.to_str().ok_or_else(|| {
+        RecoveryError::new(
+            RecoveryErrorKind::SyscallFailed,
+            format!("device {} is not valid UTF-8", canonical_device.display()),
+        )
     })?;
-    let plan = build_probe_plan(session_root, source, "btrfs", Some("subvolid=5"))
-        .map_err(|e| RecoveryError::new(RecoveryErrorKind::SyscallFailed, e.to_string()))?;
+    let mount_plan = build_probe_plan(session_root, source, "btrfs", Some("subvolid=5"))
+        .map_err(|error| RecoveryError::new(RecoveryErrorKind::SyscallFailed, error.to_string()))?;
     let id = format!("recovery-ro-{}", std::process::id());
-    let mut session = Session::new(id, &plan);
-    let snapshot = session.run(&plan).map_err(|e| RecoveryError {
-        kind: RecoveryErrorKind::SyscallFailed,
-        message: format!("cannot mount target read-only: {e}"),
-        transaction_id: None,
-        current_state: None,
-        failed_step: Some("probe-mount".into()),
-        errno: None,
-        external_exit_code: None,
-        completed_steps: Vec::new(),
-        disk_facts: None,
-        resume_possible: false,
-        revert_possible: false,
-        manual_intervention_required: false,
+    let mut session = Session::new(id, &mount_plan);
+    let mounted = session.run(&mount_plan).map_err(|error| {
+        let mut recovery_error = RecoveryError::new(
+            RecoveryErrorKind::SyscallFailed,
+            format!("cannot mount target read-only: {error}"),
+        );
+        recovery_error.failed_step = Some("probe-mount".into());
+        recovery_error
     })?;
 
-    let top_level = &snapshot.target_root;
-    let filesystem = btrfs::show_filesystem(top_level)?;
-    let mut current_root = btrfs::show_subvolume(&top_level.join("@"))?;
-    // The plan's path fields MUST be btrfs-relative (e.g. `/@`, not the
-    // host-mounted path). `show_subvolume` already returns the
-    // btrfs-relative path; we just defensively normalise here.
-    if !current_root.path.starts_with('/') {
-        current_root.path = format!("/{}", current_root.path);
+    let result = (|| {
+        let top_level = &mounted.target_root;
+        let target = validate_mounted_filesystem(top_level, &canonical_device)?;
+        let filesystem = target.filesystem;
+
+        let all_subvolumes = btrfs::list_subvolumes(top_level)?;
+        let default_subvolume = btrfs::default_subvolume_path(top_level)?;
+        let (root_candidates, self_describing_fstab) =
+            discover_root_candidates(top_level, &all_subvolumes)?;
+        let candidates_for_selection = if root_subvolume.is_some() {
+            all_subvolumes.as_slice()
+        } else {
+            root_candidates.as_slice()
+        };
+        let selected_root = select_root_subvolume(
+            root_subvolume,
+            self_describing_fstab.as_ref(),
+            default_subvolume.as_deref(),
+            candidates_for_selection,
+        )?;
+
+        let mut current_root =
+            btrfs::show_subvolume(&top_level.join(selected_root.trim_start_matches('/')))?;
+        current_root.path = selected_root.clone();
+        if current_root.read_only {
+            return Err(RecoveryError::new(
+                RecoveryErrorKind::TargetChanged,
+                format!("selected root subvolume {selected_root} is readonly"),
+            ));
+        }
+
+        let mut snapshot_identity =
+            btrfs::show_subvolume(&top_level.join(snapshot_btrfs_path.trim_start_matches('/')))?;
+        snapshot_identity.path = snapshot_btrfs_path.to_string();
+        let fstab_root_definition =
+            read_fstab_root(top_level, snapshot_btrfs_path)?.ok_or_else(|| {
+                RecoveryError::new(
+                    RecoveryErrorKind::AmbiguousTarget,
+                    format!(
+                        "source snapshot {snapshot_btrfs_path} has no parseable /etc/fstab root entry"
+                    ),
+                )
+            })?;
+
+        let snapshot_root = top_level.join(snapshot_btrfs_path.trim_start_matches('/'));
+        let snapshot_fstab =
+            read_fstab_entries(top_level, snapshot_btrfs_path)?.ok_or_else(|| {
+                RecoveryError::new(
+                    RecoveryErrorKind::BootConsistencyUnknown,
+                    format!("source snapshot {snapshot_btrfs_path} has no /etc/fstab"),
+                )
+            })?;
+        let boot_layout = crate::recovery::boot::detect_layout(&snapshot_root, &snapshot_fstab);
+        let boot_consistency = crate::recovery::boot::evaluate_readonly_consistency(&boot_layout);
+        let catos_identity = read_catos_identity(top_level, snapshot_btrfs_path);
+
+        Ok(TargetProbe {
+            canonical_device: canonical_device.clone(),
+            filesystem,
+            current_root,
+            snapshot: snapshot_identity,
+            boot_layout,
+            boot_consistency,
+            catos_identity,
+            fstab_root_definition,
+        })
+    })();
+
+    let cleanup = session.cleanup();
+    if !cleanup.all_clean {
+        return Err(RecoveryError::new(
+            RecoveryErrorKind::CleanupIncomplete,
+            format!(
+                "read-only target probe left residual mounts: {:?}; directory cleanup: {:?}",
+                cleanup.residual, cleanup.directory_cleanup_error
+            ),
+        ));
     }
-    if current_root.path != "/@" && !current_root.path.starts_with("/@") {
-        current_root.path = "/@".to_string();
-    }
-
-    let snapshot_mounted = top_level.join(snapshot_rel);
-    let snapshot_identity = btrfs::show_subvolume(&snapshot_mounted)?;
-    // Use the operator-supplied btrfs-relative path verbatim. The
-    // identity's id/generation/readonly fields come from btrfs-progs;
-    // the path the operator supplied is the canonical reference.
-    let mut snapshot_identity = snapshot_identity;
-    snapshot_identity.path = snapshot_btrfs_path.clone();
-
-    // detect_layout walks the *snapshot's* tree (not the btrfs
-    // toplevel) so /boot, /EFI, etc. are read from the recovery
-    // target rather than from the FS root.
-    let snapshot_root_for_detection = top_level.join(snapshot_rel);
-    let boot_layout = crate::recovery::boot::detect_layout(&snapshot_root_for_detection, &[]);
-    let catos_identity = read_catos_identity(&snapshot_root_for_detection);
-    let fstab_root_definition = read_fstab_root(&snapshot_root_for_detection);
-
-    let _ = session.cleanup();
-    Ok(TargetProbe {
-        filesystem,
-        current_root,
-        snapshot: snapshot_identity,
-        boot_layout,
-        catos_identity,
-        fstab_root_definition,
-    })
+    result
 }
 
-fn read_catos_identity(mounted_root: &Path) -> Option<crate::model::recovery::CatosIdentity> {
-    let body = std::fs::read_to_string(mounted_root.join("etc/os-release"))
-        .or_else(|_| std::fs::read_to_string(mounted_root.join("usr/lib/os-release")))
+fn cleanup_summary(report: crate::model::mount::CleanupReport) -> CleanupSummary {
+    let mut residual = report
+        .residual
+        .iter()
+        .map(|entry| {
+            format!(
+                "{}: {} ({})",
+                entry.resource.target.display(),
+                entry.reason,
+                entry.error_code
+            )
+        })
+        .collect::<Vec<_>>();
+    if let Some(error) = report.directory_cleanup_error {
+        residual.push(format!("session directory cleanup: {error}"));
+    }
+    CleanupSummary {
+        unmounted: report
+            .unmounted
+            .iter()
+            .map(|entry| entry.target.display().to_string())
+            .collect(),
+        residual,
+        all_clean: report.all_clean,
+    }
+}
+
+fn discover_root_candidates(
+    top_level: &Path,
+    subvolumes: &[BtrfsSubvolumeIdentity],
+) -> Result<
+    (
+        Vec<BtrfsSubvolumeIdentity>,
+        Option<crate::model::recovery::FstabRootDefinition>,
+    ),
+    RecoveryError,
+> {
+    let mut candidates = Vec::new();
+    let mut self_describing = Vec::new();
+    for candidate in subvolumes {
+        if candidate.path == "/.catos-recovery" || candidate.path.starts_with("/.catos-recovery/") {
+            continue;
+        }
+        let fstab = read_fstab_root(top_level, &candidate.path)?;
+        let has_os_release = rooted_file_exists(top_level, &candidate.path, "/etc/os-release")
+            || rooted_file_exists(top_level, &candidate.path, "/usr/lib/os-release");
+        if fstab.is_none() && !has_os_release {
+            continue;
+        }
+        let mut identity =
+            btrfs::show_subvolume(&top_level.join(candidate.path.trim_start_matches('/')))?;
+        identity.path = candidate.path.clone();
+        if identity.read_only {
+            continue;
+        }
+        if let Some(definition) = fstab {
+            if root_definition_matches_candidate(&definition, &identity) {
+                self_describing.push(definition);
+            }
+        }
+        candidates.push(identity);
+    }
+    let fstab = match self_describing.len() {
+        0 => None,
+        1 => self_describing.pop(),
+        count => {
+            return Err(RecoveryError::new(
+                RecoveryErrorKind::AmbiguousTarget,
+                format!("{count} writable subvolumes self-identify as the root in fstab"),
+            ));
+        }
+    };
+    Ok((candidates, fstab))
+}
+
+fn root_definition_matches_candidate(
+    definition: &crate::model::recovery::FstabRootDefinition,
+    candidate: &BtrfsSubvolumeIdentity,
+) -> bool {
+    let path = definition
+        .options
+        .iter()
+        .find_map(|option| option.strip_prefix("subvol="))
+        .map(|value| {
+            if value.starts_with('/') {
+                value.to_string()
+            } else {
+                format!("/{value}")
+            }
+        });
+    let id = definition
+        .options
+        .iter()
+        .find_map(|option| option.strip_prefix("subvolid="))
+        .and_then(|value| value.parse::<u64>().ok());
+    path.as_deref()
+        .map_or(true, |value| value == candidate.path)
+        && id.map_or(true, |value| value == candidate.subvolume_id)
+        && (path.is_some() || id.is_some())
+}
+
+fn rooted_file_exists(top_level: &Path, subvolume: &str, suffix: &str) -> bool {
+    let path = rooted_join(subvolume, suffix);
+    confined::read_rooted_file(top_level, &path).is_ok()
+}
+
+fn rooted_join(subvolume: &str, suffix: &str) -> String {
+    format!(
+        "{}/{}",
+        subvolume.trim_end_matches('/'),
+        suffix.trim_start_matches('/')
+    )
+}
+
+fn read_catos_identity(
+    top_level: &Path,
+    subvolume: &str,
+) -> Option<crate::model::recovery::CatosIdentity> {
+    let body = confined::read_rooted_file(top_level, &rooted_join(subvolume, "/etc/os-release"))
+        .or_else(|_| {
+            confined::read_rooted_file(top_level, &rooted_join(subvolume, "/usr/lib/os-release"))
+        })
         .ok()?;
+    let body = String::from_utf8(body).ok()?;
     let mut out = crate::model::recovery::CatosIdentity::default();
     for line in body.lines() {
         let Some((key, value)) = line.split_once('=') else {
@@ -582,76 +942,203 @@ fn read_catos_identity(mounted_root: &Path) -> Option<crate::model::recovery::Ca
     Some(out)
 }
 
-fn read_fstab_root(mounted_root: &Path) -> crate::model::recovery::FstabRootDefinition {
-    let body = match std::fs::read_to_string(mounted_root.join("etc/fstab")) {
-        Ok(b) => b,
-        Err(_) => {
-            return crate::model::recovery::FstabRootDefinition {
-                source: String::new(),
-                fstype: "btrfs".into(),
-                options: vec!["subvol=/@".into()],
+fn read_fstab_root(
+    top_level: &Path,
+    subvolume: &str,
+) -> Result<Option<crate::model::recovery::FstabRootDefinition>, RecoveryError> {
+    let path = rooted_join(subvolume, "/etc/fstab");
+    let Some(entries) = read_fstab_entries(top_level, subvolume)? else {
+        return Ok(None);
+    };
+    let roots: Vec<_> = entries
+        .into_iter()
+        .filter(|entry| entry.kind == FstabEntryKind::Root)
+        .collect();
+    match roots.len() {
+        0 => Ok(None),
+        1 => {
+            let root = &roots[0];
+            Ok(Some(crate::model::recovery::FstabRootDefinition {
+                source: fstab_source_string(&root.source),
+                fstype: root.fstype.clone(),
+                options: root.options.clone(),
+            }))
+        }
+        count => Err(RecoveryError::new(
+            RecoveryErrorKind::AmbiguousTarget,
+            format!("{path} contains {count} root entries"),
+        )),
+    }
+}
+
+fn read_fstab_entries(
+    top_level: &Path,
+    subvolume: &str,
+) -> Result<Option<Vec<FstabEntry>>, RecoveryError> {
+    let path = rooted_join(subvolume, "/etc/fstab");
+    let bytes = match confined::read_rooted_file(top_level, &path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind == RecoveryErrorKind::TransactionNotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    let body = String::from_utf8(bytes).map_err(|error| {
+        RecoveryError::new(
+            RecoveryErrorKind::AmbiguousTarget,
+            format!("{path} is not valid UTF-8: {error}"),
+        )
+    })?;
+    let (entries, diagnostics) = fstab::parse_all_with_diagnostics(&body);
+    if !diagnostics.is_empty() {
+        return Err(RecoveryError::new(
+            RecoveryErrorKind::AmbiguousTarget,
+            format!("{path} contains malformed fstab lines: {diagnostics:?}"),
+        ));
+    }
+    Ok(Some(entries))
+}
+
+fn fstab_source_string(source: &FstabSource) -> String {
+    match source {
+        FstabSource::Uuid(value) => format!("UUID={value}"),
+        FstabSource::PartUuid(value) => format!("PARTUUID={value}"),
+        FstabSource::Label(value) => format!("LABEL={value}"),
+        FstabSource::PartLabel(value) => format!("PARTLABEL={value}"),
+        FstabSource::Path(value) | FstabSource::Pseudo(value) => value.clone(),
+    }
+}
+
+fn select_root_subvolume(
+    explicit: Option<&str>,
+    fstab: Option<&crate::model::recovery::FstabRootDefinition>,
+    default_subvolume: Option<&str>,
+    high_confidence_candidates: &[BtrfsSubvolumeIdentity],
+) -> Result<String, RecoveryError> {
+    let normalise = |raw: &str| -> Result<String, RecoveryError> {
+        let path = if raw.starts_with('/') {
+            raw.to_string()
+        } else {
+            format!("/{raw}")
+        };
+        SubvolumePath::parse(&path)?;
+        Ok(path)
+    };
+    let candidate_by_path = |path: &str| {
+        high_confidence_candidates
+            .iter()
+            .find(|candidate| candidate.path == path)
+    };
+
+    if let Some(explicit) = explicit.filter(|value| !value.is_empty()) {
+        let path = normalise(explicit)?;
+        if candidate_by_path(&path).is_none() {
+            return Err(RecoveryError::new(
+                RecoveryErrorKind::TargetChanged,
+                format!("explicit root subvolume {path} does not exist on the target"),
+            ));
+        }
+        return Ok(path);
+    }
+
+    if let Some(fstab) = fstab {
+        let by_path = fstab
+            .options
+            .iter()
+            .find_map(|option| option.strip_prefix("subvol="))
+            .map(normalise)
+            .transpose()?;
+        let by_id = fstab
+            .options
+            .iter()
+            .find_map(|option| option.strip_prefix("subvolid="))
+            .map(|value| {
+                value.parse::<u64>().map_err(|_| {
+                    RecoveryError::new(
+                        RecoveryErrorKind::AmbiguousTarget,
+                        format!("invalid root subvolid in fstab: {value:?}"),
+                    )
+                })
+            })
+            .transpose()?
+            .map(|id| {
+                high_confidence_candidates
+                    .iter()
+                    .find(|candidate| candidate.subvolume_id == id)
+                    .map(|candidate| candidate.path.clone())
+                    .ok_or_else(|| {
+                        RecoveryError::new(
+                            RecoveryErrorKind::TargetChanged,
+                            format!("fstab root subvolid={id} does not exist on the target"),
+                        )
+                    })
+            })
+            .transpose()?;
+
+        if let (Some(path), Some(id_path)) = (&by_path, &by_id) {
+            if path != id_path {
+                return Err(RecoveryError::new(
+                    RecoveryErrorKind::AmbiguousTarget,
+                    format!("fstab root subvol={path} conflicts with subvolid path {id_path}"),
+                ));
             }
         }
-    };
-    for line in body.lines() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() || trimmed.starts_with('#') {
-            continue;
-        }
-        let mut parts = trimmed.split_whitespace();
-        let source = parts.next().unwrap_or("");
-        let target = parts.next().unwrap_or("");
-        let fstype = parts.next().unwrap_or("btrfs");
-        let options: Vec<String> = parts
-            .next()
-            .unwrap_or("defaults")
-            .split(',')
-            .map(str::to_string)
-            .collect();
-        if target == "/" {
-            return crate::model::recovery::FstabRootDefinition {
-                source: source.into(),
-                fstype: fstype.into(),
-                options,
-            };
+        if let Some(path) = by_path.or(by_id) {
+            if candidate_by_path(&path).is_none() {
+                return Err(RecoveryError::new(
+                    RecoveryErrorKind::TargetChanged,
+                    format!("fstab root subvolume {path} does not exist on the target"),
+                ));
+            }
+            return Ok(path);
         }
     }
-    crate::model::recovery::FstabRootDefinition {
-        source: String::new(),
-        fstype: "btrfs".into(),
-        options: vec!["subvol=/@".into()],
+
+    if let Some(default_subvolume) = default_subvolume.filter(|value| *value != "/") {
+        let path = normalise(default_subvolume)?;
+        if candidate_by_path(&path).is_some() {
+            return Ok(path);
+        }
     }
+
+    if high_confidence_candidates.len() == 1 {
+        return Ok(high_confidence_candidates[0].path.clone());
+    }
+    Err(RecoveryError::new(
+        RecoveryErrorKind::AmbiguousTarget,
+        format!(
+            "could not select a unique root subvolume ({} high-confidence candidates)",
+            high_confidence_candidates.len()
+        ),
+    ))
 }
 
 // ---------------------------------------------------------------------------
 // Misc helpers
 // ---------------------------------------------------------------------------
 
-fn generate_plan_id() -> String {
-    // Plan ids need to be unique within the btrfs filesystem's
-    // lifetime. We mix time + pid + a kernel random read. The plan
-    // id is part of the confirmation token so a collision would be
-    // detectable on apply.
-    let t = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    let pid = std::process::id();
-    let mut buf = [0u8; 16];
-    let _ = read_urandom(&mut buf);
-    format!("tx-{t:032x}-{pid:08x}-{}", hex(&buf))
+fn generate_plan_id() -> Result<String, RecoveryError> {
+    let bytes = kernel_random_bytes::<16>()?;
+    Ok(format!("tx-{}", hex(&bytes)))
 }
 
-fn generate_entropy() -> Vec<u8> {
-    let mut buf = [0u8; 32];
-    let _ = read_urandom(&mut buf);
-    buf.to_vec()
+fn generate_entropy() -> Result<Vec<u8>, RecoveryError> {
+    Ok(kernel_random_bytes::<32>()?.to_vec())
 }
 
-fn read_urandom(buf: &mut [u8]) -> std::io::Result<()> {
-    use std::io::Read;
-    let mut f = std::fs::File::open("/dev/urandom")?;
-    f.read_exact(buf)
+fn kernel_random_bytes<const N: usize>() -> Result<[u8; N], RecoveryError> {
+    random_bytes_with(|buffer| getrandom::getrandom(buffer).map_err(|error| error.to_string()))
+}
+
+fn random_bytes_with<const N: usize>(
+    mut fill: impl FnMut(&mut [u8]) -> Result<(), String>,
+) -> Result<[u8; N], RecoveryError> {
+    let mut bytes = [0u8; N];
+    fill(&mut bytes).map_err(|error| {
+        RecoveryError::new(
+            RecoveryErrorKind::RandomSourceFailed,
+            format!("kernel random source failed: {error}"),
+        )
+    })?;
+    Ok(bytes)
 }
 
 fn hex(bytes: &[u8]) -> String {
@@ -668,6 +1155,44 @@ fn current_hostname() -> Option<String> {
             .ok()
             .map(|s| s.trim().to_string())
     })
+}
+
+fn require_transaction_id<'a>(
+    transaction_id: Option<&'a str>,
+    command: &str,
+) -> Result<&'a str, RecoveryError> {
+    let transaction_id = transaction_id.ok_or_else(|| {
+        RecoveryError::new(
+            RecoveryErrorKind::TransactionNotFound,
+            format!("{command} requires --transaction <id>"),
+        )
+    })?;
+    validate_recovery_id(transaction_id)?;
+    Ok(transaction_id)
+}
+
+fn ensure_cli_root_matches_plan(
+    explicit_root: Option<&str>,
+    sealed_root: &str,
+) -> Result<(), RecoveryError> {
+    let Some(explicit_root) = explicit_root.filter(|value| !value.is_empty()) else {
+        return Ok(());
+    };
+    let normalised = if explicit_root.starts_with('/') {
+        explicit_root.to_string()
+    } else {
+        format!("/{explicit_root}")
+    };
+    SubvolumePath::parse(&normalised)?;
+    if normalised != sealed_root {
+        return Err(RecoveryError::new(
+            RecoveryErrorKind::TargetChanged,
+            format!(
+                "CLI root subvolume {normalised} does not match sealed transaction root {sealed_root}"
+            ),
+        ));
+    }
+    Ok(())
 }
 
 fn require_root() -> Result<(), RecoveryError> {
@@ -762,3 +1287,133 @@ pub fn exit_code_for(outcome: &Phase3Outcome) -> i32 {
 /// Suppress unused-symbol warnings while the orchestrators wire up.
 #[allow(dead_code)]
 fn _force_use(_p: SubvolumePath, _e: Error) {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn random_source_failure_is_not_replaced_with_zero_bytes() {
+        let error = random_bytes_with::<32>(|_| Err("injected rng failure".into())).unwrap_err();
+        assert_eq!(error.kind, RecoveryErrorKind::RandomSourceFailed);
+        assert!(error.message.contains("injected rng failure"));
+    }
+
+    #[test]
+    fn generated_plan_id_uses_strict_recovery_id_grammar() {
+        let bytes = random_bytes_with::<16>(|buffer| {
+            for (index, byte) in buffer.iter_mut().enumerate() {
+                *byte = index as u8;
+            }
+            Ok(())
+        })
+        .unwrap();
+        let id = format!("tx-{}", hex(&bytes));
+        crate::recovery::identity::validate_recovery_id(&id).unwrap();
+        assert_eq!(id, "tx-000102030405060708090a0b0c0d0e0f");
+    }
+
+    #[test]
+    fn reconciled_reverted_state_still_offers_idempotent_revert_confirmation() {
+        assert!(revert_confirmation_is_safe(TransactionState::Reverted));
+        assert!(revert_confirmation_is_safe(TransactionState::Completed));
+        assert!(!revert_confirmation_is_safe(
+            TransactionState::FailedManualIntervention
+        ));
+    }
+
+    #[test]
+    fn explicit_root_subvolume_wins_over_fstab_and_default() {
+        let fstab = crate::model::recovery::FstabRootDefinition {
+            source: "UUID=root".into(),
+            fstype: "btrfs".into(),
+            options: vec!["subvol=/@".into()],
+        };
+        let candidates = vec![candidate("/@", 256), candidate("/@root", 300)];
+        assert_eq!(
+            select_root_subvolume(Some("/@root"), Some(&fstab), Some("/@"), &candidates,).unwrap(),
+            "/@root"
+        );
+    }
+
+    #[test]
+    fn fstab_subvol_and_subvolid_select_non_default_root() {
+        let candidates = vec![candidate("/@", 256), candidate("/@root", 300)];
+        let by_path = crate::model::recovery::FstabRootDefinition {
+            source: "UUID=root".into(),
+            fstype: "btrfs".into(),
+            options: vec!["rw".into(), "subvol=@root".into()],
+        };
+        assert_eq!(
+            select_root_subvolume(None, Some(&by_path), Some("/@"), &candidates).unwrap(),
+            "/@root"
+        );
+        let by_id = crate::model::recovery::FstabRootDefinition {
+            source: "UUID=root".into(),
+            fstype: "btrfs".into(),
+            options: vec!["subvolid=300".into()],
+        };
+        assert_eq!(
+            select_root_subvolume(None, Some(&by_id), Some("/@"), &candidates).unwrap(),
+            "/@root"
+        );
+    }
+
+    #[test]
+    fn missing_or_ambiguous_root_selection_never_invents_at() {
+        let error = select_root_subvolume(None, None, None, &[]).unwrap_err();
+        assert_eq!(error.kind.code(), "ambiguous_target");
+        let candidates = vec![candidate("/@", 256), candidate("/@root", 300)];
+        let error = select_root_subvolume(None, None, None, &candidates).unwrap_err();
+        assert_eq!(error.kind.code(), "ambiguous_target");
+    }
+
+    #[test]
+    fn nested_snapshot_layout_is_rejected_before_any_write() {
+        let error = ensure_supported_snapshot_layout("/@", "/@/.snapshots/1/snapshot").unwrap_err();
+        assert_eq!(
+            error.kind,
+            RecoveryErrorKind::UnsupportedNestedSnapshotLayout
+        );
+    }
+
+    #[test]
+    fn non_nested_snapshot_layout_is_supported() {
+        ensure_supported_snapshot_layout("/@", "/@snapshots/1").unwrap();
+        ensure_supported_snapshot_layout("/@root", "/snapshots/root-1").unwrap();
+    }
+
+    #[test]
+    fn transaction_cli_id_is_validated_before_path_construction() {
+        let valid = "tx-00000000000000000000000000000001";
+        assert_eq!(
+            require_transaction_id(Some(valid), "status").unwrap(),
+            valid
+        );
+        let error = require_transaction_id(Some("../../outside"), "status").unwrap_err();
+        assert_eq!(error.kind, RecoveryErrorKind::InvalidRecoveryId);
+        let missing = require_transaction_id(None, "status").unwrap_err();
+        assert_eq!(missing.kind, RecoveryErrorKind::TransactionNotFound);
+    }
+
+    #[test]
+    fn existing_transaction_requires_cli_root_to_match_sealed_root() {
+        ensure_cli_root_matches_plan(Some("@root"), "/@root").unwrap();
+        ensure_cli_root_matches_plan(Some("/@root"), "/@root").unwrap();
+        ensure_cli_root_matches_plan(None, "/@root").unwrap();
+        let error = ensure_cli_root_matches_plan(Some("/@"), "/@root").unwrap_err();
+        assert_eq!(error.kind, RecoveryErrorKind::TargetChanged);
+    }
+
+    fn candidate(path: &str, subvolume_id: u64) -> BtrfsSubvolumeIdentity {
+        BtrfsSubvolumeIdentity {
+            path: path.into(),
+            subvolume_id,
+            generation: 1,
+            uuid: Some(format!("uuid-{subvolume_id}")),
+            parent_uuid: None,
+            read_only: false,
+            evidence: vec![],
+        }
+    }
+}

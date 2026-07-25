@@ -22,23 +22,24 @@
 use catos_system::model::recovery::TransactionState as S;
 use catos_system::model::recovery::{
     BootLayout, BtrfsFilesystemIdentity, BtrfsSubvolumeIdentity, CatosIdentity, CompletedStep,
-    DiskFacts, FstabRootDefinition, RecoveryErrorKind, RecoveryPlan, TransactionPaths,
-    TransactionRecord, TransactionState, RECOVERY_PLAN_SCHEMA_VERSION, TX_RECORD_SCHEMA_VERSION,
+    DiskFacts, FstabRootDefinition, RecoveryErrorKind, RecoveryPlan, SubvolumeFacts,
+    TransactionPaths, TransactionRecord, TransactionState, RECOVERY_PLAN_SCHEMA_VERSION,
+    TX_RECORD_SCHEMA_VERSION,
 };
 use catos_system::recovery::identity::{
     drift_between, is_protected_recovery_path, safe_join, target_is_running_root,
     validate_plan_shape, verify_confirmation_token, RunningRoot, SubvolumePath,
 };
-use catos_system::recovery::plan::{build_confirmation_token, PlanInputs};
+use catos_system::recovery::plan::{build_confirmation_token, effective_plan_digest, PlanInputs};
 use catos_system::recovery::state::{reconcile_with_disk_facts, AdvanceAction, Intent};
-use catos_system::recovery::store;
+use catos_system::recovery::{confined, store};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 fn sample_plan() -> RecoveryPlan {
-    RecoveryPlan {
+    let mut plan = RecoveryPlan {
         schema_version: RECOVERY_PLAN_SCHEMA_VERSION,
-        plan_id: "p-001".into(),
+        plan_id: "tx-00000000000000000000000000000001".into(),
         generated_at_unix: 1,
         generated_on_host: None,
         filesystem: BtrfsFilesystemIdentity {
@@ -50,20 +51,29 @@ fn sample_plan() -> RecoveryPlan {
             path: "/@".into(),
             subvolume_id: 256,
             generation: 100,
+            uuid: None,
+            parent_uuid: None,
             read_only: false,
             evidence: vec![],
         },
         source_snapshot: BtrfsSubvolumeIdentity {
-            path: "/@/.snapshots/1/snapshot".into(),
+            path: "/@snapshots/1".into(),
             subvolume_id: 300,
             generation: 80,
+            uuid: None,
+            parent_uuid: None,
             read_only: true,
             evidence: vec![],
         },
         target_catos_identity: Some(CatosIdentity::default()),
         boot_layout: BootLayout::default(),
-        backup_root_path: "/.catos-recovery/backups/p-001/root-before".into(),
-        staging_root_path: "/.catos-recovery/staging/p-001/new-root".into(),
+        boot_consistency: catos_system::recovery::boot::evaluate_readonly_consistency(
+            &BootLayout::default(),
+        ),
+        backup_root_path:
+            "/.catos-recovery/backups/tx-00000000000000000000000000000001/root-before".into(),
+        staging_root_path: "/.catos-recovery/staging/tx-00000000000000000000000000000001/new-root"
+            .into(),
         fstab_root_definition: FstabRootDefinition {
             source: "/dev/nvme0n1p2".into(),
             fstype: "btrfs".into(),
@@ -72,15 +82,21 @@ fn sample_plan() -> RecoveryPlan {
         predicted_steps: vec![],
         refusal_conditions: vec![],
         risks_and_warnings: vec![],
-        confirmation_token: "v1:p-001:abc".into(),
+        nonce: "00".repeat(32),
+        plan_digest: String::new(),
+        confirmation_token: String::new(),
         evidence: vec![],
-    }
+    };
+    plan.plan_digest = effective_plan_digest(&plan).unwrap();
+    plan.confirmation_token =
+        build_confirmation_token(&plan.plan_id, &plan.plan_digest, &plan.nonce);
+    plan
 }
 
 fn sample_record() -> TransactionRecord {
     TransactionRecord {
         schema_version: TX_RECORD_SCHEMA_VERSION,
-        transaction_id: "p-001".into(),
+        transaction_id: "tx-00000000000000000000000000000001".into(),
         created_at_unix: 1,
         last_updated_unix: 1,
         plan: sample_plan(),
@@ -98,21 +114,14 @@ fn sample_record() -> TransactionRecord {
 
 #[test]
 fn confirmation_token_rejects_replay_against_other_plan() {
-    let mut plan = sample_plan();
-    let entropy = [9u8; 16];
-    plan.confirmation_token = build_confirmation_token(
-        &plan.plan_id,
-        &plan.filesystem.fsid,
-        plan.current_root.subvolume_id,
-        plan.source_snapshot.subvolume_id,
-        &entropy,
-    );
+    let plan = sample_plan();
     // Same plan_id + same token: accepted.
     assert!(verify_confirmation_token(&plan, &plan.plan_id, &plan.confirmation_token).is_ok());
     // Different plan_id: rejected even with the same token.
-    assert!(verify_confirmation_token(&plan, "other-plan", &plan.confirmation_token).is_err());
+    let other_plan_id = "tx-00000000000000000000000000000002";
+    assert!(verify_confirmation_token(&plan, other_plan_id, &plan.confirmation_token).is_err());
     // Same plan_id but a token from a different plan: rejected.
-    let other_token = build_confirmation_token("other-plan", "fsid-A", 256, 300, &entropy);
+    let other_token = build_confirmation_token(other_plan_id, &plan.plan_digest, &plan.nonce);
     assert!(verify_confirmation_token(&plan, &plan.plan_id, &other_token).is_err());
 }
 
@@ -195,12 +204,18 @@ fn scratch(name: &str) -> PathBuf {
     path
 }
 
+fn record_path(root: &Path) -> PathBuf {
+    root.join(".catos-recovery/transactions")
+        .join("tx-00000000000000000000000000000001")
+        .join("state.json")
+}
+
 #[test]
 fn load_record_rejects_truncated_json() {
     let dir = scratch("truncated");
-    let path = dir.join("tx/state.json");
-    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-    std::fs::write(&path, b"{\"schema_version\":2,\"transaction_").unwrap();
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = record_path(&dir);
+    confined::atomic_write(&path, b"{\"schema_version\":3,\"transaction_", 0o600).unwrap();
     let err = store::load_record(&path).unwrap_err();
     assert_eq!(err.kind, RecoveryErrorKind::StateRecordCorrupt);
     let _ = std::fs::remove_dir_all(&dir);
@@ -209,47 +224,65 @@ fn load_record_rejects_truncated_json() {
 #[test]
 fn load_record_rejects_future_schema_version() {
     let dir = scratch("future-schema");
-    let path = dir.join("tx/state.json");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = record_path(&dir);
     let mut record = sample_record();
     record.schema_version = 99;
-    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     let body = serde_json::to_vec(&record).unwrap();
-    std::fs::write(&path, body).unwrap();
+    confined::atomic_write(&path, &body, 0o600).unwrap();
     let err = store::load_record(&path).unwrap_err();
     assert_eq!(err.kind, RecoveryErrorKind::UnsupportedTransactionSchema);
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// A v1 transaction record (the on-disk shape BEFORE the v2 schema
-/// bump) MUST surface as `UnsupportedTransactionSchema`, NOT as
-/// `StateRecordCorrupt`. This is the load-bearing reason schema
-/// versions were bumped to 2: a v1 record may reference a state
-/// variant that no longer exists in v2, and serde would otherwise
-/// fail to deserialize it and report a misleading "corrupt" error.
+/// A v1 transaction record MUST surface as unsupported before typed
+/// deserialisation, even though it contains a removed state variant.
 #[test]
 fn load_record_rejects_v1_schema_as_unsupported_not_corrupt() {
     let dir = scratch("v1-schema");
-    let path = dir.join("tx/state.json");
-    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-    // Hand-written v1 record: schema_version=1 and a state value that
-    // only existed in v1 (`boot_finalization_pending`).
-    std::fs::write(
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = record_path(&dir);
+    confined::atomic_write(
         &path,
         b"{\"schema_version\":1,\"transaction_id\":\"x\",\"created_at_unix\":1,\
           \"last_updated_unix\":1,\"plan\":null,\"state\":\"boot_finalization_pending\",\
           \"completed_steps\":[]}",
+        0o600,
     )
     .unwrap();
     let err = store::load_record(&path).unwrap_err();
-    assert_eq!(
-        err.kind,
-        RecoveryErrorKind::UnsupportedTransactionSchema,
-        "v1 record must be rejected as unsupported, not corrupt; got message: {}",
-        err.message
-    );
+    assert_eq!(err.kind, RecoveryErrorKind::UnsupportedTransactionSchema);
     assert!(err.message.contains("found 1"), "message: {}", err.message);
     assert!(
-        err.message.contains("supported 2"),
+        err.message.contains("supported 3"),
+        "message: {}",
+        err.message
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A v2 transaction record MUST also surface as unsupported now that
+/// DiskFacts has a structured v3 shape.
+#[test]
+fn load_record_rejects_v2_schema_as_unsupported_not_corrupt() {
+    let dir = scratch("v2-schema");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = record_path(&dir);
+    confined::atomic_write(
+        &path,
+        b"{\"schema_version\":2,\"transaction_id\":\"x\",\"created_at_unix\":1,\
+          \"last_updated_unix\":1,\"plan\":null,\"state\":\"backup_created\",\
+          \"completed_steps\":[],\"last_disk_facts\":{\"backup_root_exists\":true,\
+          \"staging_root_exists\":false,\"active_root_exists\":true,\
+          \"active_root_generation\":10,\"filesystem_fsid\":\"fsid-A\"}}",
+        0o600,
+    )
+    .unwrap();
+    let err = store::load_record(&path).unwrap_err();
+    assert_eq!(err.kind, RecoveryErrorKind::UnsupportedTransactionSchema);
+    assert!(err.message.contains("found 2"), "message: {}", err.message);
+    assert!(
+        err.message.contains("supported 3"),
         "message: {}",
         err.message
     );
@@ -259,8 +292,8 @@ fn load_record_rejects_v1_schema_as_unsupported_not_corrupt() {
 #[test]
 fn load_record_rejects_missing_file() {
     let dir = scratch("missing");
-    let path = dir.join("never/state.json");
-    let err = store::load_record(&path).unwrap_err();
+    std::fs::create_dir_all(&dir).unwrap();
+    let err = store::load_record(&record_path(&dir)).unwrap_err();
     assert_eq!(err.kind, RecoveryErrorKind::TransactionNotFound);
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -268,7 +301,8 @@ fn load_record_rejects_missing_file() {
 #[test]
 fn persist_and_reload_round_trips_record() {
     let dir = scratch("round-trip");
-    let path = dir.join("tx/state.json");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = record_path(&dir);
     let record = sample_record();
     store::persist_record(&path, &record).unwrap();
     let loaded = store::load_record(&path).unwrap();
@@ -279,10 +313,14 @@ fn persist_and_reload_round_trips_record() {
 #[test]
 fn persist_record_leaves_no_temp_file() {
     let dir = scratch("no-temp");
-    let path = dir.join("tx/state.json");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = record_path(&dir);
     store::persist_record(&path, &sample_record()).unwrap();
-    let temp = path.with_extension("json.tmp");
-    assert!(!temp.exists(), "temp file leaked: {}", temp.display());
+    let entries: Vec<_> = std::fs::read_dir(path.parent().unwrap())
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect();
+    assert_eq!(entries, vec![std::ffi::OsString::from("state.json")]);
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -370,11 +408,23 @@ fn state_machine_completed_only_from_verifying() {
 
 #[test]
 fn state_machine_terminal_states_are_terminal() {
+    // Reverted and FailedManualIntervention reject every intent.
+    // Completed is the exception: it accepts Intent::Revert (explicit
+    // operator revert of a successful recovery). All three reject
+    // Advance and Complete regardless.
     for s in [S::Completed, S::Reverted, S::FailedManualIntervention] {
         assert!(s.transition(Intent::Advance).is_err());
-        assert!(s.transition(Intent::Revert).is_err());
         assert!(s.transition(Intent::Complete).is_err());
     }
+    // Reverted and FailedManualIntervention still reject Revert.
+    for s in [S::Reverted, S::FailedManualIntervention] {
+        assert!(s.transition(Intent::Revert).is_err());
+    }
+    // Completed + Revert is the only legal terminal transition.
+    assert_eq!(
+        S::Completed.transition(Intent::Revert).unwrap(),
+        S::Reverting
+    );
 }
 
 #[test]
@@ -417,65 +467,87 @@ fn state_machine_advance_action_matches_state() {
 // Reconciliation: disk facts override persisted state
 // ---------------------------------------------------------------------------
 
+fn facts_with(backup: bool, staging: bool) -> DiskFacts {
+    DiskFacts {
+        filesystem_fsid: "fsid-A".into(),
+        active_root_exists: true,
+        active_root: Some(SubvolumeFacts {
+            path: "/@".into(),
+            subvolume_id: Some(256),
+            generation: Some(10),
+            uuid: None,
+            parent_uuid: None,
+            read_only: Some(false),
+        }),
+        staging_root_exists: staging,
+        staging_root: if staging {
+            Some(SubvolumeFacts {
+                path: "/.catos-recovery/staging/p-001/new-root".into(),
+                subvolume_id: Some(999),
+                generation: Some(10),
+                uuid: None,
+                parent_uuid: None,
+                read_only: Some(false),
+            })
+        } else {
+            None
+        },
+        backup_root_exists: backup,
+        backup: if backup {
+            Some(SubvolumeFacts {
+                path: "/.catos-recovery/backups/p-001/root-before".into(),
+                subvolume_id: Some(400),
+                generation: Some(100),
+                uuid: None,
+                parent_uuid: None,
+                read_only: Some(true),
+            })
+        } else {
+            None
+        },
+        source_snapshot_exists: true,
+        source_snapshot: None,
+    }
+}
+
 #[test]
 fn reconcile_downgrades_backupcreated_when_backup_missing() {
-    let facts = DiskFacts {
-        backup_root_exists: false,
-        staging_root_exists: false,
-        active_root_exists: true,
-        active_root_generation: Some(10),
-        filesystem_fsid: "fsid-A".into(),
-    };
+    let facts = facts_with(false, false);
     assert_eq!(
-        reconcile_with_disk_facts(S::BackupCreated, &facts),
+        reconcile_with_disk_facts(S::BackupCreated, &sample_plan(), &facts),
         S::Locked
     );
 }
 
 #[test]
 fn reconcile_downgrades_replacementcreated_when_staging_missing() {
-    let facts = DiskFacts {
-        backup_root_exists: true,
-        staging_root_exists: false,
-        active_root_exists: true,
-        active_root_generation: Some(10),
-        filesystem_fsid: "fsid-A".into(),
-    };
+    let facts = facts_with(true, false);
     assert_eq!(
-        reconcile_with_disk_facts(S::ReplacementCreated, &facts),
+        reconcile_with_disk_facts(S::ReplacementCreated, &sample_plan(), &facts),
         S::BackupCreated
     );
 }
 
 #[test]
 fn reconcile_marks_manual_intervention_when_post_swap_artifacts_missing() {
-    let facts = DiskFacts {
-        backup_root_exists: true,
-        staging_root_exists: false,
-        active_root_exists: true,
-        active_root_generation: Some(10),
-        filesystem_fsid: "fsid-A".into(),
-    };
+    let facts = facts_with(true, false);
     assert_eq!(
-        reconcile_with_disk_facts(S::OldRootMoved, &facts),
+        reconcile_with_disk_facts(S::OldRootMoved, &sample_plan(), &facts),
         S::FailedManualIntervention
     );
 }
 
 #[test]
 fn reconcile_keeps_terminal_state_unchanged() {
-    let facts = DiskFacts {
-        backup_root_exists: true,
-        staging_root_exists: true,
-        active_root_exists: true,
-        active_root_generation: Some(10),
-        filesystem_fsid: "fsid-A".into(),
-    };
+    let facts = facts_with(true, true);
     assert_eq!(
-        reconcile_with_disk_facts(S::Completed, &facts),
+        reconcile_with_disk_facts(S::Completed, &sample_plan(), &facts),
         S::Completed
     );
-    assert_eq!(reconcile_with_disk_facts(S::Reverted, &facts), S::Reverted);
+    assert_eq!(
+        reconcile_with_disk_facts(S::Reverted, &sample_plan(), &facts),
+        S::Reverted
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -515,13 +587,17 @@ fn plan_builder_emits_no_boot_finalization_step() {
             path: "/@".into(),
             subvolume_id: 256,
             generation: 100,
+            uuid: None,
+            parent_uuid: None,
             read_only: false,
             evidence: vec![],
         },
         source_snapshot: BtrfsSubvolumeIdentity {
-            path: "/@/.snapshots/1/snapshot".into(),
+            path: "/@snapshots/1".into(),
             subvolume_id: 300,
             generation: 80,
+            uuid: None,
+            parent_uuid: None,
             read_only: true,
             evidence: vec![],
         },
@@ -541,7 +617,7 @@ fn plan_builder_emits_no_boot_finalization_step() {
             fstype: "btrfs".into(),
             options: vec!["subvol=/@".into()],
         },
-        plan_id: "p-plan-1".into(),
+        plan_id: "tx-00000000000000000000000000000003".into(),
         generated_on_host: None,
         confirmation_token_entropy: vec![1u8; 32],
     };

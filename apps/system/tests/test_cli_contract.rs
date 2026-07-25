@@ -210,8 +210,8 @@ fn help_does_not_claim_boot_finalization() {
         "--help still mentions finalize boot: {stdout}"
     );
     assert!(
-        !stdout.contains("bootloadu"),
-        "--help still mentions bootloadu: {stdout}"
+        !stdout.contains("update the bootloader") && !stdout.contains("write the ESP"),
+        "--help claims recovery mutates external boot resources: {stdout}"
     );
 }
 

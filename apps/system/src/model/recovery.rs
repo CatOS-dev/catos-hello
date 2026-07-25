@@ -15,7 +15,7 @@
 //!   `/.catos-recovery/staging/<id>/new-root`.
 //! * Identity is anchored on the btrfs FSID + major:minor + subvolume ID
 //!   + subvolume generation. A `/dev/nvme...` name is NEVER the only
-//!   identifier.
+//!     identifier.
 //! * Every state file has a schema version; unknown future versions are
 //!   rejected, not re-interpreted.
 
@@ -33,21 +33,43 @@ use crate::model::inspection::Warning;
 /// Recovery transaction record schema version. Bumped only on
 /// backward-incompatible changes to [`TransactionRecord`].
 ///
-/// v2 drops the `BootFinalizationPending` variant from
+/// ## v3 (current)
+///
+/// v3 expands [`DiskFacts`] from a flat set of booleans + a single
+/// `active_root_generation` to a structured per-subvolume view that
+/// records path / subvolid / generation / UUID / parent UUID /
+/// readonly for the active root, the staging root, the backup, and
+/// the source snapshot. The richer facts are required by the
+/// recovery reconciliation logic to decide — unambiguously — whether
+/// a renameat2 swap has happened (the previous shape had to infer
+/// swap direction from path existence + generation alone, which is
+/// unsafe: a swap is its own inverse).
+///
+/// ## v2
+///
+/// v2 dropped the `BootFinalizationPending` variant from
 /// [`TransactionState`] (recovery no longer finalizes boot) and the
-/// `finalization` field from the embedded [`RecoveryPlan`]. A v1
-/// record is rejected as `UnsupportedTransactionSchema` rather than
-/// re-interpreted.
-pub const TX_RECORD_SCHEMA_VERSION: u32 = 2;
+/// `finalization` field from the embedded [`RecoveryPlan`].
+///
+/// ## v1
+///
+/// v1 is the original phase-3-pre-release shape. Both v1 and v2
+/// records are rejected as `UnsupportedTransactionSchema` rather than
+/// re-interpreted: their [`DiskFacts`] shape is too thin to drive
+/// the v3 reconciliation logic safely.
+pub const TX_RECORD_SCHEMA_VERSION: u32 = 3;
 
 /// Recovery plan schema version. Bumped only on backward-incompatible
 /// changes to [`RecoveryPlan`].
 ///
-/// v2 drops the `finalization` field and the `bootloadu_detected`
-/// flag from [`BootLayout`]. A v1 plan is rejected as
+/// v3 adds a kernel-generated nonce and SHA-256 digest of the
+/// canonical effective plan. Older plans are rejected rather than
+/// treated as if their limited confirmation token covered every
+/// execution field. v2 dropped the erroneous boot finalization
+/// coupling. A v1/v2 plan is rejected as
 /// `UnsupportedPlanSchema` rather than silently loading with
 /// removed fields ignored.
-pub const RECOVERY_PLAN_SCHEMA_VERSION: u32 = 2;
+pub const RECOVERY_PLAN_SCHEMA_VERSION: u32 = 4;
 
 // ---------------------------------------------------------------------------
 // Identity of a btrfs subvolume / filesystem at a point in time
@@ -85,6 +107,15 @@ pub struct BtrfsSubvolumeIdentity {
     pub subvolume_id: u64,
     /// btrfs generation (transid) at observation time.
     pub generation: u64,
+    /// Stable btrfs subvolume UUID. Required for deciding whether a
+    /// root exchange has already happened after a pre-persist crash.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub uuid: Option<String>,
+    /// UUID of the subvolume this subvolume was snapshotted from, when
+    /// btrfs reports one. For a replacement root this must identify the
+    /// selected source snapshot.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_uuid: Option<String>,
     /// Whether the subvolume was readonly at observation time.
     pub read_only: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -129,6 +160,42 @@ pub struct BootLayout {
     pub has_initramfs: bool,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum BootConsistencyStatus {
+    /// Every boot resource relevant to this recovery is contained in
+    /// the root subvolume and moves with the atomic exchange.
+    Consistent,
+    /// A concrete mismatch was observed. Reserved for checks that can
+    /// compare two authoritative resource sets.
+    Inconsistent,
+    /// The topology could not be established safely.
+    #[default]
+    Unknown,
+    /// The topology is understood but phase 3 deliberately does not
+    /// support it because boot resources live outside the root swap.
+    Unsupported,
+}
+
+/// Read-only result describing whether a root-only exchange preserves
+/// boot consistency. This report never authorizes or performs writes to
+/// `/boot`, the ESP, UKIs, initramfs images, or bootloader state.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct BootConsistencyReport {
+    pub status: BootConsistencyStatus,
+    /// True only when the report was derived from a read-only target
+    /// mount and parsed target metadata.
+    pub checked_read_only: bool,
+    /// Whether the root exchange covers all observed boot resources.
+    pub root_switch_covers_all_boot_resources: bool,
+    /// `/boot` is outside the root subvolume.
+    pub external_boot: bool,
+    /// An ESP is mounted outside the root subvolume.
+    pub external_esp: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reasons: Vec<String>,
+}
+
 // ---------------------------------------------------------------------------
 // Recovery plan
 // ---------------------------------------------------------------------------
@@ -160,6 +227,8 @@ pub struct RecoveryPlan {
 
     /// Boot layout of the source snapshot.
     pub boot_layout: BootLayout,
+    /// Read-only boot consistency decision sealed into the plan.
+    pub boot_consistency: BootConsistencyReport,
 
     /// Where the pre-recovery backup of the current root will live.
     /// Always under the btrfs top-level.
@@ -181,6 +250,14 @@ pub struct RecoveryPlan {
     /// Risks and warnings the operator should be aware of before
     /// confirming.
     pub risks_and_warnings: Vec<String>,
+
+    /// 256-bit kernel-generated nonce encoded as lowercase hex.
+    /// Generation fails closed if the kernel random source fails.
+    pub nonce: String,
+    /// SHA-256 digest of the canonical effective plan. This excludes
+    /// presentation-only fields and the confirmation token itself,
+    /// but covers every field that can change execution or refusal.
+    pub plan_digest: String,
 
     /// Operator-facing confirmation token. The plan is invalid without
     /// a matching token at apply time; the token is bound to `plan_id`
@@ -409,19 +486,73 @@ pub struct TransactionRecord {
 /// Disk facts the engine records after each persistent transition.
 /// `status` re-observes these and uses them to override a stale
 /// `state` field when reality disagrees.
+///
+/// Every subvolume slot is `Option<SubvolumeFacts>`: `None` means
+/// the engine could not observe that subvolume at all (e.g. it does
+/// not exist, or `btrfs subvolume show` failed); `Some` carries the
+/// identity fields the reconciliation logic uses to decide whether a
+/// persistent action has already happened.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct DiskFacts {
-    /// Does `/.catos-recovery/backups/<id>/root-before` exist?
-    pub backup_root_exists: bool,
-    /// Does `/.catos-recovery/staging/<id>/new-root` exist?
-    pub staging_root_exists: bool,
-    /// Does the btrfs top-level `/@` subvolume exist?
-    pub active_root_exists: bool,
-    /// Generation of the active `/@` subvolume, if observable.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub active_root_generation: Option<u64>,
-    /// FSID observed at this transition.
+    /// FSID observed at this transition. Reconciled against the plan
+    /// by [`crate::recovery::state`] to detect that the recovery is
+    /// now talking to a different btrfs filesystem than it started
+    /// against.
     pub filesystem_fsid: String,
+    /// Does the btrfs top-level `/@` subvolume exist? Kept as a
+    /// separate boolean because the engine uses it as a fast
+    /// pre-check before paying for a `btrfs subvolume show`.
+    pub active_root_exists: bool,
+    /// Identity of the active `/@` subvolume, if observable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_root: Option<SubvolumeFacts>,
+    /// Does the staging path `/.catos-recovery/staging/<id>/new-root`
+    /// exist? After the swap, the staging path holds the OLD `/@`,
+    /// so this stays true across the swap.
+    pub staging_root_exists: bool,
+    /// Identity of whatever currently lives at the staging path.
+    /// After the swap this is the pre-recovery root; before the swap
+    /// this is the freshly-created writable snapshot of the source.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub staging_root: Option<SubvolumeFacts>,
+    /// Does the backup path `/.catos-recovery/backups/<id>/root-before`
+    /// exist?
+    pub backup_root_exists: bool,
+    /// Identity of the backup subvolume, if observable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backup: Option<SubvolumeFacts>,
+    /// Does the source snapshot path still exist? Recovery MUST NOT
+    /// modify the source; a missing source is a drift signal.
+    #[serde(default)]
+    pub source_snapshot_exists: bool,
+    /// Identity of the source snapshot, if observable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_snapshot: Option<SubvolumeFacts>,
+}
+
+/// Identity of a single subvolume as observed by the engine at a
+/// given moment. Mirrors [`BtrfsSubvolumeIdentity`] but every field
+/// is optional because `btrfs subvolume show` may legitimately fail
+/// to populate some of them (e.g. an old btrfs-progs that omits
+/// `Parent UUID:`).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct SubvolumeFacts {
+    /// Absolute path relative to the btrfs top-level (leading `/`).
+    pub path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subvolume_id: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generation: Option<u64>,
+    /// btrfs subvolume UUID (`btrfs subvolume show` `UUID:` line).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub uuid: Option<String>,
+    /// btrfs subvolume Parent UUID. Used to detect that a subvolume
+    /// is a snapshot of a specific parent (e.g. the backup is a
+    /// snapshot of the original `/@`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_uuid: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub read_only: Option<bool>,
 }
 
 /// Result of mount cleanup during a transition or revert.
@@ -445,7 +576,7 @@ pub struct CleanupSummary {
 pub struct RecoveryError {
     pub kind: RecoveryErrorKind,
     /// User-readable message; no ANSI escapes.
-    pub message: String,
+    pub message: Box<str>,
     /// Transaction id, when the error happened inside a transaction.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub transaction_id: Option<String>,
@@ -463,16 +594,25 @@ pub struct RecoveryError {
     pub external_exit_code: Option<i32>,
     /// Steps already completed before this failure.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub completed_steps: Vec<String>,
+    pub completed_steps: Box<Vec<String>>,
     /// Disk facts at the time of failure, if known.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub disk_facts: Option<DiskFacts>,
+    pub disk_facts: Option<Box<DiskFacts>>,
     /// Whether the engine believes automatic resume is safe.
     pub resume_possible: bool,
     /// Whether `revert` is a safe action from this failure.
     pub revert_possible: bool,
     /// Whether human intervention is required.
     pub manual_intervention_required: bool,
+    /// When the engine detected an operation failure AND then failed
+    /// to persist the failure-state record to disk, this field
+    /// carries the persistence-failure message. The operator MUST see
+    /// both the original operation error and the persistence failure
+    /// so they can recover the on-disk record manually. `None` when
+    /// the failure-state record was persisted successfully (or when
+    /// no operation failure occurred).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub record_persistence_error: Option<Box<str>>,
 }
 
 impl RecoveryError {
@@ -480,17 +620,18 @@ impl RecoveryError {
     pub fn new(kind: RecoveryErrorKind, message: impl Into<String>) -> Self {
         RecoveryError {
             kind,
-            message: message.into(),
+            message: message.into().into_boxed_str(),
             transaction_id: None,
             current_state: None,
             failed_step: None,
             errno: None,
             external_exit_code: None,
-            completed_steps: Vec::new(),
+            completed_steps: Box::default(),
             disk_facts: None,
             resume_possible: false,
             revert_possible: false,
             manual_intervention_required: false,
+            record_persistence_error: None,
         }
     }
 }
@@ -512,6 +653,15 @@ pub enum RecoveryErrorKind {
     /// The target device/subvolume has changed in a way that the plan
     /// did not anticipate (different fstype, missing subvolume, ...).
     TargetChanged,
+    /// The target root subvolume cannot be selected uniquely from the
+    /// explicit argument, fstab, default subvolume, or candidates.
+    AmbiguousTarget,
+    /// This recovery phase does not yet support a multi-device btrfs
+    /// filesystem because a single major:minor cannot identify it.
+    UnsupportedMultiDeviceBtrfs,
+    /// The running-root identity could not be established reliably,
+    /// so a destructive operation is conservatively refused.
+    RunningRootProtectionIndeterminate,
     /// The recovery would operate on the currently running root.
     CurrentRootRefused,
     /// The source snapshot is not readonly (or its readonly attribute
@@ -544,6 +694,28 @@ pub enum RecoveryErrorKind {
     UnsupportedPlanSchema,
     /// The confirmation token does not match the plan id.
     ConfirmationTokenMismatch,
+    /// A plan or transaction identifier does not match the strict
+    /// `tx-<32 lowercase hexadecimal digits>` grammar.
+    InvalidRecoveryId,
+    /// The effective plan no longer hashes to its persisted digest.
+    PlanDigestMismatch,
+    /// The kernel random source failed; plan generation must fail
+    /// rather than using predictable or all-zero bytes.
+    RandomSourceFailed,
+    /// A recovery storage path escaped its confined directory or
+    /// traversed a symlink/magic link.
+    UnsafeRecoveryPath,
+    /// The selected snapshot is nested below the active root, so a
+    /// root exchange would move its declared path.
+    UnsupportedNestedSnapshotLayout,
+    /// Boot resources outside the recovered root are inconsistent
+    /// with the selected snapshot.
+    BootConsistencyInconsistent,
+    /// Boot-resource consistency could not be established safely.
+    BootConsistencyUnknown,
+    /// The external boot-resource topology is not supported by this
+    /// recovery phase.
+    UnsupportedExternalBootLayout,
     /// A requested transaction id was not found on disk.
     TransactionNotFound,
     /// A step transitions from a state that does not allow it.
@@ -562,6 +734,11 @@ impl RecoveryErrorKind {
         match self {
             RecoveryErrorKind::StalePlan => "stale_plan",
             RecoveryErrorKind::TargetChanged => "target_changed",
+            RecoveryErrorKind::AmbiguousTarget => "ambiguous_target",
+            RecoveryErrorKind::UnsupportedMultiDeviceBtrfs => "unsupported_multi_device_btrfs",
+            RecoveryErrorKind::RunningRootProtectionIndeterminate => {
+                "running_root_protection_indeterminate"
+            }
             RecoveryErrorKind::CurrentRootRefused => "current_root_refused",
             RecoveryErrorKind::SnapshotNotReadonly => "snapshot_not_readonly",
             RecoveryErrorKind::SnapshotBelongsToAnotherFsid => "snapshot_belongs_to_another_fsid",
@@ -575,6 +752,16 @@ impl RecoveryErrorKind {
             RecoveryErrorKind::UnsupportedTransactionSchema => "unsupported_transaction_schema",
             RecoveryErrorKind::UnsupportedPlanSchema => "unsupported_plan_schema",
             RecoveryErrorKind::ConfirmationTokenMismatch => "confirmation_token_mismatch",
+            RecoveryErrorKind::InvalidRecoveryId => "invalid_recovery_id",
+            RecoveryErrorKind::PlanDigestMismatch => "plan_digest_mismatch",
+            RecoveryErrorKind::RandomSourceFailed => "random_source_failed",
+            RecoveryErrorKind::UnsafeRecoveryPath => "unsafe_recovery_path",
+            RecoveryErrorKind::UnsupportedNestedSnapshotLayout => {
+                "unsupported_nested_snapshot_layout"
+            }
+            RecoveryErrorKind::BootConsistencyInconsistent => "boot_consistency_inconsistent",
+            RecoveryErrorKind::BootConsistencyUnknown => "boot_consistency_unknown",
+            RecoveryErrorKind::UnsupportedExternalBootLayout => "unsupported_external_boot_layout",
             RecoveryErrorKind::TransactionNotFound => "transaction_not_found",
             RecoveryErrorKind::IllegalStateTransition => "illegal_state_transition",
             RecoveryErrorKind::BtrfsToolFailed => "btrfs_tool_failed",
@@ -592,6 +779,15 @@ impl RecoveryErrorKind {
 /// snapshots and transactions.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct RecoveryListReport {
+    /// Canonical block-device path that was mounted for this listing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_device: Option<String>,
+    /// FSID observed from the mounted target.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_filesystem_fsid: Option<String>,
+    /// Explicit cleanup result for the short-lived read-only mount.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mount_cleanup: Option<CleanupSummary>,
     /// Filesystem identities observed (one per probed btrfs).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub filesystems: Vec<BtrfsFilesystemIdentity>,
@@ -624,6 +820,7 @@ pub struct RecoveryInspectReport {
     pub current_root: BtrfsSubvolumeIdentity,
     pub source_snapshot: BtrfsSubvolumeIdentity,
     pub boot_layout: BootLayout,
+    pub boot_consistency: BootConsistencyReport,
     pub target_catos_identity: Option<CatosIdentity>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<Warning>,
@@ -641,6 +838,12 @@ pub struct RecoveryStatusReport {
     /// Operator-facing recommendation. Stable enum so the recovery UI
     /// can route without parsing free text.
     pub recommendation: RecoveryRecommendation,
+    /// Cleanup result for the short-lived read-only status mount.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mount_cleanup: Option<CleanupSummary>,
+    /// State-bound confirmation required by `recovery revert`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revert_confirmation_token: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<Warning>,
 }
@@ -877,13 +1080,17 @@ mod tests {
                 path: "/@".into(),
                 subvolume_id: 256,
                 generation: 100,
+                uuid: None,
+                parent_uuid: None,
                 read_only: false,
                 evidence: vec![],
             },
             source_snapshot: BtrfsSubvolumeIdentity {
-                path: "/@/.snapshots/1/snapshot".into(),
+                path: "/@snapshots/1".into(),
                 subvolume_id: 300,
                 generation: 80,
+                uuid: None,
+                parent_uuid: None,
                 read_only: true,
                 evidence: vec![],
             },
@@ -894,6 +1101,9 @@ mod tests {
                 pretty_name: None,
             }),
             boot_layout: BootLayout::default(),
+            boot_consistency: crate::recovery::boot::evaluate_readonly_consistency(
+                &BootLayout::default(),
+            ),
             backup_root_path: "/.catos-recovery/backups/tx/root-before".into(),
             staging_root_path: "/.catos-recovery/staging/tx/new-root".into(),
             fstab_root_definition: FstabRootDefinition {
@@ -904,6 +1114,8 @@ mod tests {
             predicted_steps: vec!["preflight".into()],
             refusal_conditions: vec!["fsid drift".into()],
             risks_and_warnings: vec![],
+            nonce: "00".repeat(32),
+            plan_digest: "00".repeat(32),
             confirmation_token: "tok".into(),
             evidence: vec![],
         };

@@ -147,6 +147,18 @@ pub fn render_phase3_human<W: Write>(outcome: &Phase3Outcome, out: &mut W) -> st
 
 fn render_list<W: Write>(out: &mut W, report: &RecoveryListReport) -> std::io::Result<()> {
     writeln!(out, "Recovery list")?;
+    if let Some(device) = &report.source_device {
+        writeln!(out, "  source device    : {device}")?;
+    }
+    if let Some(fsid) = &report.source_filesystem_fsid {
+        writeln!(out, "  source FSID      : {fsid}")?;
+    }
+    if let Some(cleanup) = &report.mount_cleanup {
+        writeln!(out, "  mount cleanup    : clean={}", cleanup.all_clean)?;
+        for residual in &cleanup.residual {
+            writeln!(out, "    residual: {residual}")?;
+        }
+    }
     writeln!(out, "  filesystems      : {}", report.filesystems.len())?;
     writeln!(
         out,
@@ -192,6 +204,7 @@ fn render_inspect<W: Write>(out: &mut W, report: &RecoveryInspectReport) -> std:
         "  boot inside root : {}",
         report.boot_layout.boot_inside_root
     )?;
+    render_boot_consistency(out, &report.boot_consistency)?;
     render_warnings(out, &report.warnings)
 }
 
@@ -215,6 +228,7 @@ fn render_plan<W: Write>(out: &mut W, plan: &RecoveryPlan) -> std::io::Result<()
     )?;
     writeln!(out, "  backup path      : {}", plan.backup_root_path)?;
     writeln!(out, "  staging path     : {}", plan.staging_root_path)?;
+    render_boot_consistency(out, &plan.boot_consistency)?;
     writeln!(out, "  predicted steps  :")?;
     for step in &plan.predicted_steps {
         writeln!(out, "    - {step}")?;
@@ -228,6 +242,25 @@ fn render_plan<W: Write>(out: &mut W, plan: &RecoveryPlan) -> std::io::Result<()
         writeln!(out, "    ! {risk}")?;
     }
     writeln!(out, "  confirmation     : {}", plan.confirmation_token)?;
+    Ok(())
+}
+
+fn render_boot_consistency<W: Write>(
+    out: &mut W,
+    report: &crate::model::recovery::BootConsistencyReport,
+) -> std::io::Result<()> {
+    writeln!(out, "  boot consistency : {:?}", report.status)?;
+    writeln!(
+        out,
+        "    read-only={} covers-all={} external-boot={} external-esp={}",
+        report.checked_read_only,
+        report.root_switch_covers_all_boot_resources,
+        report.external_boot,
+        report.external_esp
+    )?;
+    for reason in &report.reasons {
+        writeln!(out, "    - {reason}")?;
+    }
     Ok(())
 }
 
@@ -262,6 +295,15 @@ fn render_status<W: Write>(out: &mut W, report: &RecoveryStatusReport) -> std::i
     writeln!(out, "  transaction id   : {}", report.transaction_id)?;
     writeln!(out, "  reconciled state : {:?}", report.reconciled_state)?;
     writeln!(out, "  recommendation   : {:?}", report.recommendation)?;
+    if let Some(cleanup) = &report.mount_cleanup {
+        writeln!(out, "  mount cleanup    : clean={}", cleanup.all_clean)?;
+        for residual in &cleanup.residual {
+            writeln!(out, "    residual: {residual}")?;
+        }
+    }
+    if let Some(token) = &report.revert_confirmation_token {
+        writeln!(out, "  revert confirm   : {token}")?;
+    }
     writeln!(
         out,
         "  backup exists    : {}",
@@ -275,7 +317,11 @@ fn render_status<W: Write>(out: &mut W, report: &RecoveryStatusReport) -> std::i
     writeln!(
         out,
         "  active root gen  : {:?}",
-        report.disk_facts.active_root_generation
+        report
+            .disk_facts
+            .active_root
+            .as_ref()
+            .and_then(|f| f.generation)
     )?;
     render_warnings(out, &report.warnings)
 }
@@ -336,7 +382,7 @@ mod tests {
     use crate::model::recovery::{
         BootLayout, BtrfsFilesystemIdentity, BtrfsSubvolumeIdentity, CatosIdentity, CompletedStep,
         DiskFacts, FstabRootDefinition, RecoveryRecommendation, RecoveryStatusReport,
-        TransactionState, RECOVERY_PLAN_SCHEMA_VERSION, TX_RECORD_SCHEMA_VERSION,
+        SubvolumeFacts, TransactionState, RECOVERY_PLAN_SCHEMA_VERSION, TX_RECORD_SCHEMA_VERSION,
     };
     use std::path::PathBuf;
 
@@ -355,18 +401,25 @@ mod tests {
                 path: "/@".into(),
                 subvolume_id: 256,
                 generation: 100,
+                uuid: None,
+                parent_uuid: None,
                 read_only: false,
                 evidence: vec![],
             },
             source_snapshot: BtrfsSubvolumeIdentity {
-                path: "/@/.snapshots/1/snapshot".into(),
+                path: "/@snapshots/1".into(),
                 subvolume_id: 300,
                 generation: 80,
+                uuid: None,
+                parent_uuid: None,
                 read_only: true,
                 evidence: vec![],
             },
             target_catos_identity: Some(CatosIdentity::default()),
             boot_layout: BootLayout::default(),
+            boot_consistency: crate::recovery::boot::evaluate_readonly_consistency(
+                &BootLayout::default(),
+            ),
             backup_root_path: "/.catos-recovery/backups/tx-1/root-before".into(),
             staging_root_path: "/.catos-recovery/staging/tx-1/new-root".into(),
             fstab_root_definition: FstabRootDefinition {
@@ -377,6 +430,8 @@ mod tests {
             predicted_steps: vec!["preflight".into()],
             refusal_conditions: vec!["fsid drift".into()],
             risks_and_warnings: vec![],
+            nonce: "00".repeat(32),
+            plan_digest: "00".repeat(32),
             confirmation_token: "v1:tx-1:abc".into(),
             evidence: vec![],
         }
@@ -390,6 +445,8 @@ mod tests {
         assert_eq!(v["schemaVersion"], 2);
         assert_eq!(v["kind"], "recovery_plan");
         assert_eq!(v["payload"]["plan_id"], "tx-1");
+        assert_eq!(v["payload"]["schema_version"], 4);
+        assert_eq!(v["payload"]["boot_consistency"]["status"], "unknown");
         assert_eq!(v["payload"]["confirmation_token"], "v1:tx-1:abc");
     }
 
@@ -399,7 +456,7 @@ mod tests {
             crate::model::recovery::RecoveryErrorKind::StalePlan,
             "fsid drifted",
         );
-        let outcome = Phase3Outcome::Error(error);
+        let outcome = Phase3Outcome::Error(Box::new(error));
         let j = render_phase3_json(&outcome, "catos-system", std::path::Path::new("/")).unwrap();
         let v: serde_json::Value = serde_json::from_str(&j).unwrap();
         assert_eq!(v["kind"], "error");
@@ -416,6 +473,8 @@ mod tests {
         assert!(!s.contains('\u{001b}'));
         assert!(s.contains("Recovery plan"));
         assert!(s.contains("tx-1"));
+        assert!(s.contains("boot consistency"));
+        assert!(s.contains("Unknown"));
     }
 
     #[test]
@@ -435,11 +494,22 @@ mod tests {
             }],
             last_error: None,
             last_disk_facts: Some(DiskFacts {
-                backup_root_exists: true,
-                staging_root_exists: true,
-                active_root_exists: true,
-                active_root_generation: Some(100),
                 filesystem_fsid: "fsid-1".into(),
+                active_root_exists: true,
+                active_root: Some(SubvolumeFacts {
+                    path: "/@".into(),
+                    subvolume_id: Some(256),
+                    generation: Some(100),
+                    uuid: None,
+                    parent_uuid: None,
+                    read_only: Some(false),
+                }),
+                staging_root_exists: true,
+                staging_root: None,
+                backup_root_exists: true,
+                backup: None,
+                source_snapshot_exists: true,
+                source_snapshot: None,
             }),
             last_cleanup: None,
         };
@@ -448,20 +518,41 @@ mod tests {
             reconciled_state: TransactionState::Completed,
             record,
             disk_facts: DiskFacts {
-                backup_root_exists: true,
-                staging_root_exists: true,
-                active_root_exists: true,
-                active_root_generation: Some(100),
                 filesystem_fsid: "fsid-1".into(),
+                active_root_exists: true,
+                active_root: Some(SubvolumeFacts {
+                    path: "/@".into(),
+                    subvolume_id: Some(256),
+                    generation: Some(100),
+                    uuid: None,
+                    parent_uuid: None,
+                    read_only: Some(false),
+                }),
+                staging_root_exists: true,
+                staging_root: None,
+                backup_root_exists: true,
+                backup: None,
+                source_snapshot_exists: true,
+                source_snapshot: None,
             },
             recommendation: RecoveryRecommendation::None,
+            mount_cleanup: Some(crate::model::recovery::CleanupSummary {
+                unmounted: vec!["/run/catos-system/sessions/status/root".into()],
+                residual: vec![],
+                all_clean: true,
+            }),
+            revert_confirmation_token: Some("revert-v1:tx-1:abc".into()),
             warnings: vec![],
         };
-        let outcome = Phase3Outcome::Status(report);
+        let outcome = Phase3Outcome::Status(Box::new(report));
         let j = render_phase3_json(&outcome, "catos-system", std::path::Path::new("/")).unwrap();
         let v: serde_json::Value = serde_json::from_str(&j).unwrap();
         assert_eq!(v["kind"], "recovery_status");
         assert_eq!(v["payload"]["reconciled_state"], "completed");
+        assert_eq!(
+            v["payload"]["revert_confirmation_token"],
+            "revert-v1:tx-1:abc"
+        );
         let _ = PathBuf::new();
     }
 }
