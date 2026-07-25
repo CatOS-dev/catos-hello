@@ -13,24 +13,51 @@ All three symlinks point to the same inode. There is exactly one binary
 target. `argv[0]` is honoured only for the JSON `invocation` field and for
 help text; it never gates a permission.
 
-## Scope (phase 1 + phase 2)
+## Scope (phase 1 + phase 2 + phase 3)
 
-This is **phase 1 + phase 2**. Both phases are read-only with respect to
-the target system. Phase 2 adds storage discovery and safe read-only
-mounting of the target system inside a private mount namespace; it never
-writes to the target device (no journal replay, no superblock updates,
-no LUKS unlock, no LVM/mdraid changes, no fsck, no btrfs rollback).
+This is **phase 1 + phase 2 + phase 3**. Phases 1 and 2 are read-only
+with respect to the target system. Phase 2 adds storage discovery and
+safe read-only mounting of the target system inside a private mount
+namespace; it never writes to the target device (no journal replay, no
+superblock updates, no LUKS unlock, no LVM/mdraid changes, no fsck, no
+btrfs rollback).
 
-Neither phase performs:
+Phase 3 adds a durable, crash-resumable, explicitly-authorized Btrfs
+root-snapshot recovery transaction. It mounts the target's btrfs
+top-level (subvolid=5) read-write inside a private namespace, performs
+a single `renameat2(RENAME_EXCHANGE)` root swap between the current
+root subvolume and a fresh snapshot of the operator-selected source
+snapshot, and persists transaction state on the btrfs top-level at
+`/.catos-recovery/transactions/<id>/state.json` after every state
+transition. The transaction can be resumed at any time after a crash
+(SIGKILL, power loss) by running `recovery resume --transaction <id>`.
+
+Phase 3 will NEVER:
 
 - pacman updates
 - bootloader repair (GRUB / Limine / UKI)
 - LUKS unlock
 - LVM / mdraid manipulation
-- snapshot creation or rollback
 - fsck
-- writes to the target root in any form
-- long-lived daemon or TUI
+- delete the pre-recovery backup automatically (it lives at
+  `/.catos-recovery/backups/<id>/root-before` and stays until the
+  operator removes it or runs `recovery revert`)
+- write to the ESP (the recovery root swap does not touch the ESP; ESP
+  writes are deferred to the bootloadu interface)
+- run as a long-lived daemon or TUI
+- perform network operations
+
+Phase 3 guarantees:
+
+- Every persistent state transition is fsynced (file data + parent dir)
+  before the next action runs.
+- Crash injection is gated behind the `recovery_fault_injection` cargo
+  feature; the production binary cannot be made to inject faults.
+- A held `flock(LOCK_EX)` on `/.catos-recovery/locks/<fsid>.lock`
+  prevents two concurrent transactions on the same filesystem.
+- The pre-recovery root is preserved as a readonly subvolume at the
+  backup path; it is never deleted by `apply`, `resume`, or `Completed`
+  transitions.
 
 ## CLI
 
@@ -46,6 +73,27 @@ catos-system target plan                 [--root PATH] [--json]
     [--root-device /dev/...] [--root-subvolume PATH] [--esp-device /dev/...]
 catos-system target mount                [--root PATH] [--json]
     [--root-device /dev/...] [--root-subvolume PATH] [--esp-device /dev/...]
+
+# Phase 3 — durable, crash-resumable Btrfs root-snapshot recovery
+catos-system recovery list              [--json]
+    [--root-device /dev/...]
+catos-system recovery inspect           [--json]
+    [--root-device /dev/...] [--root-subvolume PATH]
+    [--snapshot-subvolume PATH]
+catos-system recovery plan              [--json]
+    [--root-device /dev/...] [--root-subvolume PATH]
+    [--snapshot-subvolume PATH]
+catos-system recovery apply             [--json]
+    --root-device /dev/... --root-subvolume PATH
+    --snapshot-subvolume PATH
+    --plan-id ID --confirm TOKEN --plan-file PATH
+catos-system recovery status            [--json]
+    --root-device /dev/... --transaction ID
+catos-system recovery resume            [--json]
+    --root-device /dev/... --root-subvolume PATH
+    --snapshot-subvolume PATH --transaction ID
+catos-system recovery revert            [--json]
+    --root-device /dev/... --transaction ID --confirm TOKEN
 
 catos-system --version
 catos-system --help
@@ -185,6 +233,7 @@ src/
   process.rs         fixed-path, bounded, timed external-tool runner
   system_root.rs     validated display/canonical target-root paths
   phase2.rs          phase-2 orchestrators: storage scan / target plan / target mount
+  phase3.rs          phase-3 orchestrators: recovery list/inspect/plan/apply/status/resume/revert
   model/             pure data + serde; no I/O
     evidence.rs        Evidence: code/source/message/value
     runtime.rs         Detection, DetectionStatus, RuntimeFacts, PrimaryRuntimeMode
@@ -192,6 +241,7 @@ src/
     inspection.rs      TargetInspection, OsRelease, ToolPath, Warning, InspectionReport
     storage.rs         phase 2: devices, mount observations, Btrfs subvolumes, candidates
     mount.rs           phase 2: MountError taxonomy, MountPlan, MountSession, CleanupReport
+    recovery.rs        phase 3: RecoveryPlan, TransactionState, RecoveryErrorKind, DiskFacts
     fstab.rs           re-exports of parse::fstab types
   parse/             pure parsers; no I/O
     fstab.rs           /etc/fstab parser + malformed-line diagnostics
@@ -210,10 +260,19 @@ src/
     plan.rs            per-fstype RO option table + MountPlan builder
     probe.rs           short-lived root/ESP probes + Btrfs subvolume discovery
     session.rs         private namespace + ordered mounts + reverse-order rollback
+  recovery/          phase-3 transaction layer; only place that writes to target btrfs
+    state.rs           pure state machine: transition(), happy_path_successor(), reconcile_with_disk_facts()
+    identity.rs        SubvolumePath validation, IdentityDrift, confirmation token verification
+    plan.rs            PlanInputs, build_plan(), FNV-1a confirmation token
+    store.rs           persist_record/load_record temp+fsync+atomic-rename+parent-fsync protocol
+    external.rs        Trusted btrfs-progs wrapper (subcommand allow-list, bounded execution)
+    boot.rs            detect_layout() / decide_finalization() / UKI/kernel/initramfs detection
+    engine.rs          Engine: begin/load/drive/revert, renameat2 root swap, flock, fault injection
   output/            renders model
     human.rs           plain ASCII human output (phase 1)
     json.rs            serde_json wrapper (phase 1, single source of JSON contract)
     phase2.rs          phase 2: human + JSON for StorageReport / MountPlan / MountSession
+    recovery.rs        phase 3: human + JSON for RecoveryPlan / TransactionRecord / RecoveryError
 ```
 
 Layering rules:
@@ -231,6 +290,14 @@ Layering rules:
   reverse-order cleanup.
 - `output/*` consumes models. It never probes.
 - `phase2.rs` orchestrates between `entry.rs` and the probe/mount layers.
+- `phase3.rs` orchestrates between `entry.rs` and the recovery layer.
+  It enters a private mount namespace, mounts the btrfs top-level
+  read-write, and hands control to `recovery::engine::Engine`. Every
+  persistent state transition is fsynced before the next action runs.
+- `recovery/*` is the ONLY place that writes to the target btrfs
+  filesystem. It uses `recovery::external` for trusted btrfs-progs
+  invocations (subcommand allow-list, fixed paths, bounded execution)
+  and a raw `renameat2(RENAME_EXCHANGE)` syscall for the root swap.
 - Every detection carries an `Evidence` trail (code, source, message,
   optional value).
 - Probes that cannot gather enough evidence MUST return `Unknown`, never
@@ -311,18 +378,22 @@ The following surfaces are wired into CTest when `-DBUILD_TESTS=ON`:
 
 | Test                              | What it guards against                                |
 |-----------------------------------|-------------------------------------------------------|
-| `catos-system-cargo-test`         | Rust unit + integration (227 tests at this revision). Includes runtime/capability fixtures, target-root confinement, mount policy, fstab diagnostics, candidate evidence, Btrfs parsing, structured errors, CLI and multicall contracts. |
+| `catos-system-cargo-test`         | Rust unit + integration (334 tests at this revision). Includes runtime/capability fixtures, target-root confinement, mount policy, fstab diagnostics, candidate evidence, Btrfs parsing, structured errors, CLI and multicall contracts, phase-3 recovery state machine, transaction record durability, identity drift detection, FNV-1a confirmation tokens, btrfs-progs wrappers, boot layout/finalization, and crash-resumable transaction flow. |
 | `catos-system-static-check`       | The musl binary silently regressing to dynamic linking (would break initramfs and recovery use). |
 | `catos-system-initramfs-smoke-bare` | The static binary refusing to start in a minimal Linux user space without systemd, dbus, network, or `/usr`. |
 | `catos-system-initramfs-smoke-with-marker` | Runtime detection failing to identify a mkinitcpio-style initramfs containing `/etc/initrd-release`. |
 | `catos-system-storage-qemu-smoke` | A real writable ext4 root, FAT ESP, and Btrfs `@`/snapshot image: discovery, explicit planning, mount-inspect-cleanup, snapshot exclusion, session cleanup, and byte-for-byte no-write verification. |
+| `catos-system-recovery-qemu-smoke` | Real Btrfs image with `@`, `@home`, two readonly snapshots, and an independent FAT ESP. Boots the fault-injection binary inside an initramfs and exercises the full phase-3 lifecycle: `recovery plan`, `recovery apply` with crash injection at every persistent state (`backup_created`, `replacement_created`, `old_root_moved`, `new_root_installed`, `boot_finalization_pending`) via `raise(SIGKILL)`, repeated `recovery resume` until `completed`, and final ESP byte-for-byte no-write verification. |
 
 The two minimal initramfs tests are opt-in through
 `-DCATOS_SYSTEM_INITRAMFS_SMOKE=ON`. The real storage test is enabled with
-`-DCATOS_SYSTEM_STORAGE_SMOKE=ON`. They require
-`qemu-system-x86_64`, a kernel image, and static `busybox`; they use KVM when
-available, otherwise TCG, and skip with exit code 77 when prerequisites are
-missing.
+`-DCATOS_SYSTEM_STORAGE_SMOKE=ON`. The phase-3 recovery crash/resume
+test is enabled with `-DCATOS_SYSTEM_RECOVERY_SMOKE=ON` and additionally
+requires `mkfs.btrfs`, `mkfs.vfat`, `mtools` (`mmd`, `mcopy`), `cpio`,
+`gzip`, `zstd`, and `modinfo`. All three smoke tests require
+`qemu-system-x86_64`, a kernel image, and static `busybox`; they use KVM
+when available, otherwise TCG, and skip with exit code 77 when
+prerequisites are missing.
 
 Run them:
 
@@ -337,7 +408,8 @@ To explicitly run all QEMU smoke tests:
 ```
 cmake -S . -B build -DBUILD_TESTS=ON \
   -DCATOS_SYSTEM_INITRAMFS_SMOKE=ON \
-  -DCATOS_SYSTEM_STORAGE_SMOKE=ON
+  -DCATOS_SYSTEM_STORAGE_SMOKE=ON \
+  -DCATOS_SYSTEM_RECOVERY_SMOKE=ON
 ( cd build && ctest -L qemu --output-on-failure )
 ```
 
@@ -358,7 +430,7 @@ On this host (rustc 1.96.1, x86_64-unknown-linux-musl):
 
 ```
 $ stat -c %s <binary>
-778912
+1036992
 $ file <binary>
 ... static-pie linked ... stripped
 $ readelf -l <binary> | grep INTERP     # (empty)
@@ -367,25 +439,31 @@ $ bash scripts/verify-static.sh <binary>
 ok: no PT_INTERP segment
 ok: no NEEDED entries
 ok: ELF magic bytes present
-info: binary size 778912 bytes (761 KiB)
+info: binary size 1036992 bytes (1012 KiB)
 RESULT: OK (binary is fully static)
 ```
 
-The completed phase-2 backend is 778912 bytes. The additional size covers
-confined target selection, bounded helper execution, temporary candidate
-probe mounts, Btrfs subvolume/snapshot discovery, structured mount errors,
-and truthful mount-inspect-cleanup reporting. It remains well below the
+The completed phase-3 backend is 1036992 bytes. The additional ~234 KiB
+over phase 2 covers the recovery transaction layer: pure state machine,
+identity drift detection, FNV-1a confirmation tokens, durable
+transaction record persistence (temp + fsync + atomic rename + parent
+fsync), trusted btrfs-progs wrappers, boot layout/finalization
+detection, the renameat2 root swap, the recovery state-machine engine,
+and JSON + human renderers for all phase-3 outcomes. It remains well
+below the
 4 MiB warning threshold enforced by `verify-static.sh`.
 
 ## What is NOT implemented (deferred to later phases)
 
 - LUKS unlock (`cryptsetup` integration)
-- snapshot creation or rollback (phase 2 only enumerates and classifies
-  Btrfs subvolumes/snapshots through a no-log-replay read-only probe)
 - pacman-driven update workflow
-- Bootloader repair (GRUB, Limine, UKI regeneration via `mkinitcpio`,
-  `bootloadu`)
-- A transaction state machine with rollback semantics
+- Bootloader repair beyond invoking the CatOS bootloadu interface
+  (`/usr/bin/catos-firmware-boot-update`) — phase 3 calls bootloadu
+  when present, but does not itself regenerate UKIs, GRUB configs, or
+  Limine entries
+- Automatic deletion of recovery backups (`/.catos-recovery/backups/`
+  content is preserved indefinitely until the operator runs
+  `recovery revert` or removes it manually)
 - A TUI / interactive UI
 - A long-running daemon
 - Network operations of any kind
