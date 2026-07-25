@@ -1,7 +1,7 @@
 # Maintainer: Aromatic <symwww@outlook.com>
 pkgname=catos-hello
 pkgver=0.1.0
-pkgrel=9
+pkgrel=10
 pkgdesc="CatOS Hello - welcome application + read-only system recovery backend"
 arch=('x86_64')
 url="https://github.com/Aromatic05/catOS-hello"
