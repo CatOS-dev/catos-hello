@@ -1,12 +1,12 @@
 # Maintainer: Aromatic <symwww@outlook.com>
 pkgname=catos-hello
 pkgver=0.1.0
-pkgrel=10
+pkgrel=11
 pkgdesc="CatOS Hello - welcome application + read-only system recovery backend"
 arch=('x86_64')
 url="https://github.com/Aromatic05/catOS-hello"
 license=('GPL')
-depends=('qt6-base' 'rate-mirrors' 'lshw' 'inxi' 'lsb-release')
+depends=('qt6-base' 'rate-mirrors' 'lshw' 'inxi' 'lsb-release' 'btrfs-progs')
 # Use the system 'rust' + 'rust-musl' packages rather than 'rustup'. The
 # rustup package only ships shims; in a clean build environment (empty
 # RUSTUP_HOME / CARGO_HOME) it cannot pick a default toolchain and the CMake
@@ -44,10 +44,14 @@ build() {
     cmake --build build
 }
 
-# Optional check(): run static-link verification on the produced musl binary.
-# Disabled by default; enable with `makepkg --check`.
 check() {
     export CARGO_HOME="$srcdir/cargo-home"
+    export CARGO_TARGET_DIR="$srcdir/cargo-target-check"
+
+    cd "$srcdir/$pkgname/apps/system"
+    cargo test --all-targets --all-features --locked --offline
+
+    cd "$srcdir"
     cmake --build build --target catos-system
     bash "$pkgname/apps/system/scripts/verify-static.sh" \
         "build/apps/system/cargo-target/x86_64-unknown-linux-musl/release/catos-system"
