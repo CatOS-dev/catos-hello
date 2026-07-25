@@ -716,6 +716,33 @@ pub enum RecoveryErrorKind {
     /// The external boot-resource topology is not supported by this
     /// recovery phase.
     UnsupportedExternalBootLayout,
+    /// The operator supplied `--esp-device` on a phase-3 recovery
+    /// subcommand. Phase 3 deliberately does not maintain or write to
+    /// the ESP: the root-snapshot swap is bounded to the btrfs
+    /// top-level and a read-only boot-consistency report. Explicit
+    /// ESP selection is therefore rejected BEFORE any mount or
+    /// persistent write rather than silently ignored, so a script
+    /// that expects ESP handling cannot proceed under a false
+    /// contract. A future phase that performs real ESP reconciliation
+    /// will replace this kind, not reinterpret it.
+    UnsupportedExplicitEsp,
+    /// The recovery runtime session directory under
+    /// `/run/catos-system/sessions/` could not be established as
+    /// attacker-controlled-safe: a component was a symlink, a regular
+    /// file, owned by the wrong user, world- or group-writable, or
+    /// otherwise not the exclusive directory this process created.
+    SessionDirectoryNotSecure,
+    /// An exclusive recovery session directory could not be created
+    /// because the chosen name already existed (collision with a
+    /// concurrent transaction, stale leftover, or attacker-prepared
+    /// honeypot). Phase 3 never reuses an existing directory.
+    SessionDirectoryConflict,
+    /// The recovery session directory could not be removed after the
+    /// transaction completed and all mounts were torn down. The
+    /// transaction itself may be in a clean state but the runtime
+    /// directory leaked; operators need a stable code to detect and
+    /// clean it up.
+    SessionDirectoryCleanupFailed,
     /// A requested transaction id was not found on disk.
     TransactionNotFound,
     /// A step transitions from a state that does not allow it.
@@ -762,6 +789,10 @@ impl RecoveryErrorKind {
             RecoveryErrorKind::BootConsistencyInconsistent => "boot_consistency_inconsistent",
             RecoveryErrorKind::BootConsistencyUnknown => "boot_consistency_unknown",
             RecoveryErrorKind::UnsupportedExternalBootLayout => "unsupported_external_boot_layout",
+            RecoveryErrorKind::UnsupportedExplicitEsp => "unsupported_explicit_esp",
+            RecoveryErrorKind::SessionDirectoryNotSecure => "session_directory_not_secure",
+            RecoveryErrorKind::SessionDirectoryConflict => "session_directory_conflict",
+            RecoveryErrorKind::SessionDirectoryCleanupFailed => "session_directory_cleanup_failed",
             RecoveryErrorKind::TransactionNotFound => "transaction_not_found",
             RecoveryErrorKind::IllegalStateTransition => "illegal_state_transition",
             RecoveryErrorKind::BtrfsToolFailed => "btrfs_tool_failed",
