@@ -121,8 +121,10 @@ pub fn run(invocation: Invocation, argv: &[String]) -> i32 {
         Ok(crate::cli::ParseOutcome::Run(args)) => {
             if args.command.is_phase1() {
                 run_phase1(invocation, args)
-            } else {
+            } else if args.command.is_phase2() {
                 run_phase2(invocation, args)
+            } else {
+                run_phase3(invocation, args)
             }
         }
         Err(e) => {
@@ -229,6 +231,39 @@ fn run_phase2(invocation: Invocation, args: crate::cli::CliArgs) -> i32 {
                 eprintln!("{invocation}: {e}");
                 exit
             }
+        }
+    }
+}
+
+/// Dispatch a phase-3 recovery command.
+fn run_phase3(invocation: Invocation, args: crate::cli::CliArgs) -> i32 {
+    use std::io::Write;
+
+    let recovery_args = match args.recovery.clone() {
+        Some(recovery_args) => recovery_args,
+        None => {
+            eprintln!("{invocation}: recovery subcommand selected but no recovery args parsed");
+            return crate::error::exit_code::ARG_ERROR;
+        }
+    };
+    let outcome = crate::phase3::run_recovery(recovery_args);
+    let result = if args.json {
+        crate::output::render_phase3_json(&outcome, invocation.as_str(), args.root.as_path())
+            .and_then(|s| {
+                write_json_stdout(&s)
+                    .map_err(|e| Error::SerializeFailed(format!("stdout write: {e}")))
+            })
+    } else {
+        let mut out = std::io::stdout();
+        crate::output::render_phase3_human(&outcome, &mut out)
+            .and_then(|_| out.flush())
+            .map_err(|e| Error::SerializeFailed(format!("stdout write: {e}")))
+    };
+    match result {
+        Ok(()) => crate::phase3::exit_code_for(&outcome),
+        Err(e) => {
+            eprintln!("{invocation}: {e}");
+            e.exit_code()
         }
     }
 }

@@ -22,8 +22,10 @@ pub mod mount;
 pub mod output;
 pub mod parse;
 pub mod phase2;
+pub mod phase3;
 pub mod probe;
 pub mod process;
+pub mod recovery;
 pub mod system_root;
 
 pub use error::{exit_code, Error, FsError};

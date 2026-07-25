@@ -7,7 +7,7 @@ use crate::error::{exit_code, Error};
 use crate::system_root::SystemRoot;
 use std::path::{Component, Path, PathBuf};
 
-/// One of the phase-1 or phase-2 commands.
+/// One of the phase-1, phase-2, or phase-3 commands.
 ///
 /// Phase 1 commands (`environment`, `capabilities`, `inspect`) share a
 /// rendering [`View`] over the same underlying inspection report.
@@ -20,6 +20,9 @@ use std::path::{Component, Path, PathBuf};
 ///   * `target mount` — same as `target plan` then executes the plan in a
 ///     private mount namespace, inspects the target, cleans up, and emits
 ///     the final session/cleanup report.
+///
+/// Phase 3 commands drive the btrfs snapshot recovery transaction.
+/// See [`crate::phase3`] for the orchestrators.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Command {
     Environment,
@@ -28,6 +31,40 @@ pub enum Command {
     StorageScan,
     TargetPlan,
     TargetMount,
+    Recovery(RecoverySubcommand),
+}
+
+/// Phase-3 recovery subcommands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecoverySubcommand {
+    List,
+    Inspect,
+    Plan,
+    Apply,
+    Status,
+    Resume,
+    Revert,
+}
+
+impl Default for RecoverySubcommand {
+    fn default() -> Self {
+        RecoverySubcommand::List
+    }
+}
+
+impl RecoverySubcommand {
+    pub fn parse_name(s: &str) -> Option<RecoverySubcommand> {
+        match s {
+            "list" => Some(RecoverySubcommand::List),
+            "inspect" => Some(RecoverySubcommand::Inspect),
+            "plan" => Some(RecoverySubcommand::Plan),
+            "apply" => Some(RecoverySubcommand::Apply),
+            "status" => Some(RecoverySubcommand::Status),
+            "resume" => Some(RecoverySubcommand::Resume),
+            "revert" => Some(RecoverySubcommand::Revert),
+            _ => None,
+        }
+    }
 }
 
 impl Command {
@@ -41,12 +78,26 @@ impl Command {
     }
 
     /// True iff this command emits a phase-1 InspectionReport (vs a
-    /// phase-2 StorageReport / MountPlan / MountSession).
+    /// phase-2 StorageReport / MountPlan / MountSession or a phase-3
+    /// recovery outcome).
     pub fn is_phase1(self) -> bool {
         matches!(
             self,
             Command::Environment | Command::Capabilities | Command::Inspect
         )
+    }
+
+    /// True iff this command is a phase-2 command.
+    pub fn is_phase2(self) -> bool {
+        matches!(
+            self,
+            Command::StorageScan | Command::TargetPlan | Command::TargetMount
+        )
+    }
+
+    /// True iff this command is a phase-3 recovery command.
+    pub fn is_phase3(self) -> bool {
+        matches!(self, Command::Recovery(_))
     }
 
     /// The rendering view this command selects. The probe layer always
@@ -92,6 +143,29 @@ pub struct CliArgs {
     pub root: SystemRoot,
     pub json: bool,
     pub target: TargetSelection,
+    /// Phase-3 recovery arguments. Only present when `command` is a
+    /// `Command::Recovery(_)` variant; `None` otherwise.
+    pub recovery: Option<RecoveryArgs>,
+}
+
+/// Phase-3 recovery arguments. Built by the parser when the user
+/// invokes `catos-system recovery <SUB>`.
+#[derive(Debug, Clone, Default)]
+pub struct RecoveryArgs {
+    pub subcommand: RecoverySubcommand,
+    pub target: TargetSelection,
+    pub snapshot_subvolume: Option<String>,
+    /// `--plan-id <id>` (apply): cross-checks the plan file's id.
+    pub plan_id: Option<String>,
+    /// `--plan-file <path>` (apply): path to a JSON plan emitted by
+    /// `recovery plan`. The plan is read from this file rather than
+    /// from a target-side directory, so `plan` is purely read-only
+    /// with respect to the target device.
+    pub plan_file: Option<PathBuf>,
+    /// `--confirm <token>` (apply, revert)
+    pub confirm: Option<String>,
+    /// `--transaction <id>` (status, resume, revert)
+    pub transaction: Option<String>,
 }
 
 /// Explicit storage choices for a target that is not already mounted.
@@ -154,9 +228,24 @@ fn parse_command(first: &str, argv: &[String], idx: &mut usize) -> Result<Comman
             *idx += 2;
             Ok(cmd)
         }
+        "recovery" => {
+            let sub = argv.get(*idx + 1).ok_or_else(|| Error::InvalidArgument {
+                message: "recovery requires a subcommand (list|inspect|plan|apply|status|resume|revert)"
+                    .to_string(),
+            })?;
+            let recovery_sub = RecoverySubcommand::parse_name(sub.as_str()).ok_or_else(|| {
+                Error::InvalidArgument {
+                    message: format!(
+                        "unknown recovery subcommand {sub:?}; expected list|inspect|plan|apply|status|resume|revert"
+                    ),
+                }
+            })?;
+            *idx += 2;
+            Ok(Command::Recovery(recovery_sub))
+        }
         other => Err(Error::InvalidArgument {
             message: format!(
-                "unknown subcommand {other:?}; expected environment|capabilities|inspect|storage scan|target plan|target mount"
+                "unknown subcommand {other:?}; expected environment|capabilities|inspect|storage scan|target plan|target mount|recovery <sub>"
             ),
         }),
     }
@@ -185,6 +274,7 @@ pub fn parse(argv: &[String], default_root: SystemRoot) -> Result<ParseOutcome, 
     let mut root: Option<SystemRoot> = None;
     let mut json = false;
     let mut target = TargetSelection::default();
+    let mut recovery_args = RecoveryArgs::default();
 
     let mut idx = 0;
     while idx < argv.len() {
@@ -250,6 +340,70 @@ pub fn parse(argv: &[String], default_root: SystemRoot) -> Result<ParseOutcome, 
                 )?);
                 idx += 1;
             }
+            "--snapshot-subvolume" => {
+                let value = argv.get(idx + 1).ok_or_else(|| Error::InvalidArgument {
+                    message: "--snapshot-subvolume requires a subvolume path".into(),
+                })?;
+                recovery_args.snapshot_subvolume = Some(parse_subvolume(value)?);
+                idx += 2;
+            }
+            a if a.starts_with("--snapshot-subvolume=") => {
+                recovery_args.snapshot_subvolume =
+                    Some(parse_subvolume(&a["--snapshot-subvolume=".len()..])?);
+                idx += 1;
+            }
+            "--plan-id" => {
+                let value = argv.get(idx + 1).ok_or_else(|| Error::InvalidArgument {
+                    message: "--plan-id requires a plan id".into(),
+                })?;
+                recovery_args.plan_id = Some(parse_opaque_id(value, "--plan-id")?);
+                idx += 2;
+            }
+            a if a.starts_with("--plan-id=") => {
+                recovery_args.plan_id =
+                    Some(parse_opaque_id(&a["--plan-id=".len()..], "--plan-id")?);
+                idx += 1;
+            }
+            "--plan-file" => {
+                let value = argv.get(idx + 1).ok_or_else(|| Error::InvalidArgument {
+                    message: "--plan-file requires a path".into(),
+                })?;
+                recovery_args.plan_file = Some(parse_plan_file_path(value, "--plan-file")?);
+                idx += 2;
+            }
+            a if a.starts_with("--plan-file=") => {
+                recovery_args.plan_file = Some(parse_plan_file_path(
+                    &a["--plan-file=".len()..],
+                    "--plan-file",
+                )?);
+                idx += 1;
+            }
+            "--confirm" => {
+                let value = argv.get(idx + 1).ok_or_else(|| Error::InvalidArgument {
+                    message: "--confirm requires a token".into(),
+                })?;
+                recovery_args.confirm = Some(parse_opaque_id(value, "--confirm")?);
+                idx += 2;
+            }
+            a if a.starts_with("--confirm=") => {
+                recovery_args.confirm =
+                    Some(parse_opaque_id(&a["--confirm=".len()..], "--confirm")?);
+                idx += 1;
+            }
+            "--transaction" => {
+                let value = argv.get(idx + 1).ok_or_else(|| Error::InvalidArgument {
+                    message: "--transaction requires a transaction id".into(),
+                })?;
+                recovery_args.transaction = Some(parse_opaque_id(value, "--transaction")?);
+                idx += 2;
+            }
+            a if a.starts_with("--transaction=") => {
+                recovery_args.transaction = Some(parse_opaque_id(
+                    &a["--transaction=".len()..],
+                    "--transaction",
+                )?);
+                idx += 1;
+            }
             // First positional (no leading dash) becomes the subcommand.
             positional if !positional.starts_with('-') && command.is_none() => {
                 command = Some(parse_command(positional, argv, &mut idx)?);
@@ -279,20 +433,30 @@ pub fn parse(argv: &[String], default_root: SystemRoot) -> Result<ParseOutcome, 
             message: "--root-subvolume requires --root-device".into(),
         });
     }
-    if target != TargetSelection::default()
-        && !matches!(command, Command::TargetPlan | Command::TargetMount)
-    {
-        return Err(Error::InvalidArgument {
-            message: "explicit device options are valid only for target plan or target mount"
-                .into(),
-        });
-    }
+    let recovery = match command {
+        Command::Recovery(sub) => {
+            recovery_args.subcommand = sub;
+            recovery_args.target = target.clone();
+            Some(recovery_args)
+        }
+        Command::TargetPlan | Command::TargetMount => None,
+        _ => {
+            if target != TargetSelection::default() {
+                return Err(Error::InvalidArgument {
+                    message: "explicit device options are valid only for target plan, target mount, or recovery subcommands"
+                        .into(),
+                });
+            }
+            None
+        }
+    };
 
     Ok(ParseOutcome::Run(CliArgs {
         command,
         root: root.unwrap_or(default_root),
         json,
         target,
+        recovery,
     }))
 }
 
@@ -340,10 +504,48 @@ fn parse_subvolume(value: &str) -> Result<String, Error> {
     Ok(normalized)
 }
 
+fn parse_opaque_id(value: &str, option: &str) -> Result<String, Error> {
+    if value.is_empty() || value.contains('\0') {
+        return Err(Error::InvalidArgument {
+            message: format!("{option} must be a non-empty string without NUL"),
+        });
+    }
+    let cleaned = value.trim_matches(|c: char| c.is_whitespace());
+    if cleaned.is_empty() {
+        return Err(Error::InvalidArgument {
+            message: format!("{option} must contain non-whitespace characters"),
+        });
+    }
+    Ok(cleaned.to_string())
+}
+
+fn parse_plan_file_path(value: &str, option: &str) -> Result<PathBuf, Error> {
+    let path = Path::new(value);
+    if value.is_empty() || value.contains('\0') {
+        return Err(Error::InvalidArgument {
+            message: format!("{option} must be a non-empty path"),
+        });
+    }
+    if !path.is_absolute() {
+        return Err(Error::InvalidArgument {
+            message: format!("{option} must be an absolute path"),
+        });
+    }
+    if path
+        .components()
+        .any(|component| matches!(component, Component::ParentDir | Component::Prefix(_)))
+    {
+        return Err(Error::InvalidArgument {
+            message: format!("{option} contains an unsafe path component"),
+        });
+    }
+    Ok(path.to_path_buf())
+}
+
 pub fn help_text() -> String {
     format!(
         "\
-catos-system {version} - CatOS read-only system backend (phase 1 + phase 2)
+catos-system {version} - CatOS system backend (phase 1 + phase 2 + phase 3)
 
 USAGE:
     catos-system <SUBCOMMAND> [OPTIONS]
@@ -361,6 +563,23 @@ PHASE-2 SUBCOMMANDS (read-only storage discovery + safe RO target mount):
     target mount  Same as 'target plan' then execute the plan in a private
                   mount namespace (read-only mounts only).
 
+PHASE-3 SUBCOMMANDS (btrfs root-snapshot recovery transaction):
+    recovery list     List existing transactions on the configured root.
+    recovery inspect  Read-only: show filesystem + current-root + snapshot
+                      identity and the boot-finalization decision.
+    recovery plan     Read-only: emit an immutable RecoveryPlan bound to a
+                      plan id and confirmation token. Does NOT write.
+    recovery apply    Execute the plan: mount the btrfs toplevel rw, run the
+                      state machine, swap roots via renameat2(RENAME_EXCHANGE),
+                      finalize boot if required. Requires --plan-id and
+                      --confirm. Must run as root.
+    recovery status   Read the transaction record, reconcile with disk facts,
+                      emit a RecoveryStatusReport.
+    recovery resume   Continue an in-flight transaction from its last
+                      persisted state. Idempotent. Must run as root.
+    recovery revert   Swap the roots back to the pre-recovery state.
+                      Requires --confirm. Must run as root.
+
 OPTIONS:
     --root PATH   Inspect a different target root (default: /).
                   PATH must be an absolute path to an existing directory.
@@ -370,6 +589,14 @@ OPTIONS:
                   Explicit Btrfs root subvolume (requires --root-device).
     --esp-device /dev/...
                   Override the EFI System Partition for the target plan.
+    --snapshot-subvolume PATH
+                  Explicit source readonly snapshot (phase 3 inspect/plan).
+    --plan-id <id>
+                  Plan id (phase 3 apply).
+    --confirm <token>
+                  Confirmation token bound to the plan (phase 3 apply, revert).
+    --transaction <id>
+                  Transaction id (phase 3 status, resume, revert).
     --json        Emit a stable JSON report on stdout instead of human text.
     -h, --help    Show this help message and exit.
     -V, --version Print program version and exit.
