@@ -20,7 +20,10 @@
 //! The engine consults this module before each transition and refuses
 //! to persist a state the table does not permit.
 
-use crate::model::recovery::{RecoveryError, RecoveryErrorKind, TransactionState};
+use crate::model::recovery::{
+    BtrfsSubvolumeIdentity, RecoveryError, RecoveryErrorKind, SubvolumeFacts, TransactionRecord,
+    TransactionState,
+};
 
 /// What the engine wants to do. One-to-one with the public subcommand
 /// verbs plus the internal "advance to the next logical state".
@@ -170,6 +173,34 @@ fn illegal(from: TransactionState, intent: Intent) -> RecoveryError {
     .with_state(from)
 }
 
+/// Return the last state from which an automatic resume is meaningful.
+///
+/// Failure persistence records the state that failed in
+/// `last_error.current_state` before replacing the top-level state with
+/// `FailedRecoverable`. The completed-step history is a conservative
+/// fallback for older records that lack that field.
+pub fn resume_checkpoint(record: &TransactionRecord) -> Option<TransactionState> {
+    if record.state != TransactionState::FailedRecoverable {
+        return Some(record.state);
+    }
+
+    record
+        .last_error
+        .as_ref()
+        .and_then(|error| error.current_state)
+        .filter(|state| *state != TransactionState::FailedRecoverable && state.resume_permitted())
+        .or_else(|| {
+            record
+                .completed_steps
+                .iter()
+                .rev()
+                .map(|step| step.state)
+                .find(|state| {
+                    *state != TransactionState::FailedRecoverable && state.resume_permitted()
+                })
+        })
+}
+
 impl RecoveryError {
     /// Builder-style helper for state-machine errors.
     pub fn with_state(mut self, state: TransactionState) -> Self {
@@ -226,90 +257,157 @@ pub fn reconcile_with_disk_facts(
 ) -> TransactionState {
     use crate::model::recovery::TransactionState as S;
 
-    // If the record claims a terminal state, trust it. Terminal states
-    // have observable side-effects (a `Completed` root switch is
-    // visible as `/@` being the new root; a `Reverted` root switch is
-    // visible as `/@` being the old root). The reconciliation of those
-    // is the responsibility of the higher-level status command, not
-    // this pure helper.
+    // Terminal records are checked for later drift by Engine::reconcile_status.
     if persisted.is_terminal() {
         return persisted;
     }
 
-    // A transaction record copied to another btrfs filesystem must
-    // never use that filesystem's path existence as evidence of
-    // forward progress. FSID mismatch makes every destructive action
-    // ambiguous, so force operator review before resume or revert.
     if facts.filesystem_fsid != plan.filesystem.fsid {
         return S::FailedManualIntervention;
     }
 
-    let backup_ok = facts.backup_root_exists;
-    let staging_ok = facts.staging_root_exists;
+    if !fact_shape_is_consistent(facts.active_root_exists, facts.active_root.as_ref())
+        || !fact_shape_is_consistent(facts.backup_root_exists, facts.backup.as_ref())
+        || !fact_shape_is_consistent(facts.staging_root_exists, facts.staging_root.as_ref())
+        || !fact_shape_is_consistent(facts.source_snapshot_exists, facts.source_snapshot.as_ref())
+    {
+        return S::FailedManualIntervention;
+    }
 
-    // Forward-progress probes: the swap may have happened even though
-    // the persisted state is earlier than OldRootMoved. We decide
-    // using UUIDs because existence is ambiguous across the swap.
+    // The source snapshot is immutable transaction input. A different
+    // subvolume at the same path must never become the replacement root.
+    if !exact_identity_matches(&plan.source_snapshot, facts.source_snapshot.as_ref()) {
+        return S::FailedManualIntervention;
+    }
+
+    let current_root_ok = exact_identity_matches(&plan.current_root, facts.active_root.as_ref());
+    let backup_ok = backup_matches_plan(plan, facts.backup.as_ref());
+    let staging_replacement_ok = staging_matches_source(plan, facts.staging_root.as_ref());
     let swap_done = swap_appears_done(plan, facts);
     let reverse_swap_done = reverse_swap_appears_done(plan, facts);
 
     match persisted {
-        // Anything before BackupCreated: if the backup subvolume is
-        // already on disk, the previous apply persisted `Locked` but
-        // crashed before persisting `BackupCreated`. Forward to
-        // BackupCreated so resume skips snapshot creation.
-        S::Planned | S::PreflightVerified | S::Locked if backup_ok => S::BackupCreated,
+        S::Planned | S::PreflightVerified | S::Locked if !current_root_ok => {
+            S::FailedManualIntervention
+        }
+        S::Planned | S::PreflightVerified | S::Locked
+            if facts.staging_root_exists && (!facts.backup_root_exists || !backup_ok) =>
+        {
+            S::FailedManualIntervention
+        }
+        S::Planned | S::PreflightVerified | S::Locked if facts.staging_root_exists => {
+            if staging_replacement_ok {
+                S::ReplacementCreated
+            } else {
+                S::FailedManualIntervention
+            }
+        }
+        S::Planned | S::PreflightVerified | S::Locked if facts.backup_root_exists => {
+            if backup_ok {
+                S::BackupCreated
+            } else {
+                S::FailedManualIntervention
+            }
+        }
         S::Planned | S::PreflightVerified | S::Locked => persisted,
 
-        // BackupCreated: the backup subvolume MUST exist. If it does
-        // not, the record is stale; downgrade to Locked so resume
-        // re-creates the backup.
-        S::BackupCreated if !backup_ok => S::Locked,
-        S::BackupCreated if staging_ok => S::ReplacementCreated,
+        S::BackupCreated if !current_root_ok => S::FailedManualIntervention,
+        S::BackupCreated if !facts.backup_root_exists => S::Locked,
+        S::BackupCreated if !backup_ok => S::FailedManualIntervention,
+        S::BackupCreated if facts.staging_root_exists && !staging_replacement_ok => {
+            S::FailedManualIntervention
+        }
+        S::BackupCreated if facts.staging_root_exists => S::ReplacementCreated,
         S::BackupCreated => S::BackupCreated,
 
-        // ReplacementCreated: BOTH backup and staging must exist.
-        // When they exist but the swap state is ambiguous (the
-        // active root's identity does not match either the planned
-        // current root or a plausible post-swap replacement), we
-        // surface `FailedManualIntervention` rather than guess.
-        S::ReplacementCreated if !backup_ok => S::Locked,
-        S::ReplacementCreated if !staging_ok => S::BackupCreated,
+        S::ReplacementCreated if !facts.backup_root_exists || !backup_ok => {
+            S::FailedManualIntervention
+        }
+        S::ReplacementCreated if !facts.staging_root_exists => S::BackupCreated,
         S::ReplacementCreated if swap_done => S::OldRootMoved,
-        S::ReplacementCreated if replacement_identity_is_ambiguous(plan, facts) => {
+        S::ReplacementCreated if !current_root_ok || !staging_replacement_ok => {
             S::FailedManualIntervention
         }
         S::ReplacementCreated => S::ReplacementCreated,
 
-        // From OldRootMoved onward, the swap has happened. If the
-        // active root UUID matches the pre-recovery current root
-        // again, the swap has been reversed out from under us.
-        S::OldRootMoved | S::NewRootInstalled | S::Verifying
-            if reverse_swap_appears_done(plan, facts) =>
-        {
-            S::Reverting
-        }
+        S::OldRootMoved | S::NewRootInstalled | S::Verifying if reverse_swap_done => S::Reverting,
         S::OldRootMoved | S::NewRootInstalled | S::Verifying => {
-            if !backup_ok || !staging_ok {
-                S::FailedManualIntervention
-            } else if post_swap_identity_is_ambiguous(plan, facts) {
-                // Both paths exist but the subvolume ids do not match
-                // any plausible post-swap arrangement. Refuse to
-                // guess; surface as manual.
+            if !facts.backup_root_exists || !backup_ok || !facts.staging_root_exists || !swap_done {
                 S::FailedManualIntervention
             } else {
                 persisted
             }
         }
 
-        // Reverting: if the swap has been reversed (active root is
-        // the pre-recovery root again), forward to Reverted.
         S::Reverting if reverse_swap_done => S::Reverted,
-        S::Reverting => S::Reverting,
+        S::Reverting if swap_done => S::Reverting,
+        S::Reverting => S::FailedManualIntervention,
 
-        // Failed* states are reconciled at the higher level.
+        // FailedRecoverable is converted to its safe checkpoint by the
+        // engine before this function is called. FailedManualIntervention
+        // was handled by the terminal-state branch above.
         other => other,
     }
+}
+
+fn fact_shape_is_consistent(exists: bool, facts: Option<&SubvolumeFacts>) -> bool {
+    exists == facts.is_some()
+}
+
+fn exact_identity_matches(
+    expected: &BtrfsSubvolumeIdentity,
+    observed: Option<&SubvolumeFacts>,
+) -> bool {
+    let Some(observed) = observed else {
+        return false;
+    };
+    observed.path == expected.path
+        && observed.subvolume_id == Some(expected.subvolume_id)
+        && observed.generation == Some(expected.generation)
+        && observed.uuid == expected.uuid
+        && observed.parent_uuid == expected.parent_uuid
+        && observed.read_only == Some(expected.read_only)
+}
+
+/// A backup is safe crash progress only when it is a readonly snapshot
+/// of the exact root sealed in the plan. Path existence alone is never
+/// sufficient because an unrelated subvolume can occupy the canonical
+/// transaction path after a crash.
+fn backup_matches_plan(
+    plan: &crate::model::recovery::RecoveryPlan,
+    backup: Option<&SubvolumeFacts>,
+) -> bool {
+    let (Some(backup), Some(root_uuid)) = (backup, plan.current_root.uuid.as_deref()) else {
+        return false;
+    };
+    backup.path == plan.backup_root_path
+        && backup
+            .subvolume_id
+            .is_some_and(|id| id != plan.current_root.subvolume_id)
+        && backup.uuid.as_deref().is_some_and(|uuid| uuid != root_uuid)
+        && backup.parent_uuid.as_deref() == Some(root_uuid)
+        && backup.read_only == Some(true)
+}
+
+/// A staging root is safe crash progress only when it is a writable
+/// snapshot of the exact source snapshot sealed in the plan.
+fn staging_matches_source(
+    plan: &crate::model::recovery::RecoveryPlan,
+    staging: Option<&SubvolumeFacts>,
+) -> bool {
+    let (Some(staging), Some(source_uuid)) = (staging, plan.source_snapshot.uuid.as_deref()) else {
+        return false;
+    };
+    staging.path == plan.staging_root_path
+        && staging.subvolume_id.is_some_and(|id| {
+            id != plan.source_snapshot.subvolume_id && id != plan.current_root.subvolume_id
+        })
+        && staging
+            .uuid
+            .as_deref()
+            .is_some_and(|uuid| uuid != source_uuid)
+        && staging.parent_uuid.as_deref() == Some(source_uuid)
+        && staging.read_only == Some(false)
 }
 
 /// Decide whether the renameat2(RENAME_EXCHANGE) swap appears to have
@@ -462,101 +560,6 @@ pub fn reverse_swap_appears_done(
     true
 }
 
-/// Decide whether the post-swap disk facts are consistent with ANY
-/// plausible post-swap arrangement. Returns `true` when the active
-/// root and staging subvolume ids together do not match either of:
-///   * the normal post-swap layout (active = pre-swap staging id;
-///     staging = pre-swap active id), OR
-///   * the reverse-swap layout (active = planned current_root id;
-///     staging = anything).
-///
-/// When ambiguous, the caller MUST refuse to advance and surface
-/// `FailedManualIntervention`: re-running renameat2 with an unknown
-/// starting arrangement could corrupt the layout further.
-fn post_swap_identity_is_ambiguous(
-    plan: &crate::model::recovery::RecoveryPlan,
-    facts: &crate::model::recovery::DiskFacts,
-) -> bool {
-    let Some(active) = &facts.active_root else {
-        return false;
-    };
-    let Some(active_id) = active.subvolume_id else {
-        return false;
-    };
-    let staging_id = facts.staging_root.as_ref().and_then(|s| s.subvolume_id);
-
-    // The reverse-swap layout: active is the planned current root.
-    // This is the only state from which re-running renameat2 would
-    // be safe (it would just swap back to the new root). Caller has
-    // already checked reverse_swap_appears_done; reaching ambiguity
-    // here means we are NOT in the reverse-swap layout.
-    if active_id == plan.current_root.subvolume_id {
-        return false;
-    }
-
-    // The normal post-swap layout: active is the new-root subvolume
-    // id (some unknown id assigned by btrfs at snapshot time), and
-    // staging holds the planned current root's id. We do NOT know
-    // the new-root id ahead of time (btrfs assigns it), so the only
-    // signal we have is staging == plan.current_root.subvolume_id.
-    if let Some(staging_id) = staging_id {
-        if staging_id == plan.current_root.subvolume_id {
-            // active is "something else", staging is the old root.
-            // That is the textbook post-swap layout.
-            return false;
-        }
-        // Both axes are non-current-root AND differ from each other:
-        // we cannot reconstruct what happened. Refuse.
-        if staging_id != active_id {
-            return true;
-        }
-    }
-
-    // active is non-current-root; staging has no observable id.
-    // Plausibly post-swap with an old btrfs-progs that omits
-    // subvolume id. Do not flag as ambiguous on absence of evidence
-    // alone — the existence check already covers missing paths.
-    false
-}
-
-/// Decide whether the disk facts observed while the persisted state
-/// is `ReplacementCreated` are ambiguous about whether the swap has
-/// happened. Used to refuse to advance when the engine cannot tell
-/// whether it should re-execute `swap_roots` or skip it.
-///
-/// Returns `true` when the active root's subvolume_id is neither the
-/// planned current root (pre-swap) nor the staging subvolume_id
-/// (post-swap), AND the staging subvolume_id does not match the
-/// planned current root (which would be the textbook post-swap
-/// layout). When the swap state is ambiguous, the engine MUST
-/// surface `FailedManualIntervention` rather than guess.
-fn replacement_identity_is_ambiguous(
-    plan: &crate::model::recovery::RecoveryPlan,
-    facts: &crate::model::recovery::DiskFacts,
-) -> bool {
-    let Some(active) = &facts.active_root else {
-        return false;
-    };
-    let Some(active_id) = active.subvolume_id else {
-        return false;
-    };
-    // Pre-swap layout: active root is the planned current root.
-    if active_id == plan.current_root.subvolume_id {
-        return false;
-    }
-    // Post-swap layout would have staging holding the planned current
-    // root's subvolume_id. If staging holds something else entirely,
-    // we cannot tell what happened.
-    if let Some(staging_id) = facts.staging_root.as_ref().and_then(|s| s.subvolume_id) {
-        if staging_id != plan.current_root.subvolume_id {
-            return true;
-        }
-    }
-    // active is "not the planned current root" and we cannot confirm
-    // post-swap layout from staging. Refuse.
-    true
-}
-
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -627,8 +630,8 @@ mod tests {
             active_root: Some(SubvolumeFacts {
                 path: "/@".into(),
                 subvolume_id: Some(256),
-                generation: Some(10),
-                uuid: None,
+                generation: Some(100),
+                uuid: Some("old-root-uuid".into()),
                 parent_uuid: None,
                 read_only: Some(false),
             }),
@@ -637,9 +640,9 @@ mod tests {
                 Some(SubvolumeFacts {
                     path: "/.catos-recovery/staging/p-test/new-root".into(),
                     subvolume_id: Some(999),
-                    generation: Some(10),
-                    uuid: None,
-                    parent_uuid: None,
+                    generation: Some(80),
+                    uuid: Some("replacement-uuid".into()),
+                    parent_uuid: Some("source-snapshot-uuid".into()),
                     read_only: Some(false),
                 })
             } else {
@@ -651,15 +654,22 @@ mod tests {
                     path: "/.catos-recovery/backups/p-test/root-before".into(),
                     subvolume_id: Some(400),
                     generation: Some(100),
-                    uuid: None,
-                    parent_uuid: None,
+                    uuid: Some("backup-uuid".into()),
+                    parent_uuid: Some("old-root-uuid".into()),
                     read_only: Some(true),
                 })
             } else {
                 None
             },
             source_snapshot_exists: true,
-            source_snapshot: None,
+            source_snapshot: Some(SubvolumeFacts {
+                path: "/@snapshots/1".into(),
+                subvolume_id: Some(300),
+                generation: Some(80),
+                uuid: Some("source-snapshot-uuid".into()),
+                parent_uuid: Some("older-root-uuid".into()),
+                read_only: Some(true),
+            }),
         }
     }
 

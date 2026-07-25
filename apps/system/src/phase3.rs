@@ -1280,6 +1280,20 @@ pub fn exit_code_for(outcome: &Phase3Outcome) -> i32 {
                 exit_code::SUCCESS
             }
         }
+        Phase3Outcome::Apply { final_state, .. } | Phase3Outcome::Resume { final_state, .. } => {
+            if *final_state == TransactionState::Completed {
+                exit_code::SUCCESS
+            } else {
+                exit_code::PROBE_FAILED
+            }
+        }
+        Phase3Outcome::Revert { final_state, .. } => {
+            if *final_state == TransactionState::Reverted {
+                exit_code::SUCCESS
+            } else {
+                exit_code::PROBE_FAILED
+            }
+        }
         _ => exit_code::SUCCESS,
     }
 }

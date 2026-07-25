@@ -51,7 +51,7 @@ fn sample_plan() -> RecoveryPlan {
             path: "/@".into(),
             subvolume_id: 256,
             generation: 100,
-            uuid: None,
+            uuid: Some("old-root-uuid".into()),
             parent_uuid: None,
             read_only: false,
             evidence: vec![],
@@ -60,8 +60,8 @@ fn sample_plan() -> RecoveryPlan {
             path: "/@snapshots/1".into(),
             subvolume_id: 300,
             generation: 80,
-            uuid: None,
-            parent_uuid: None,
+            uuid: Some("source-snapshot-uuid".into()),
+            parent_uuid: Some("older-root-uuid".into()),
             read_only: true,
             evidence: vec![],
         },
@@ -474,19 +474,20 @@ fn facts_with(backup: bool, staging: bool) -> DiskFacts {
         active_root: Some(SubvolumeFacts {
             path: "/@".into(),
             subvolume_id: Some(256),
-            generation: Some(10),
-            uuid: None,
+            generation: Some(100),
+            uuid: Some("old-root-uuid".into()),
             parent_uuid: None,
             read_only: Some(false),
         }),
         staging_root_exists: staging,
         staging_root: if staging {
             Some(SubvolumeFacts {
-                path: "/.catos-recovery/staging/p-001/new-root".into(),
+                path: "/.catos-recovery/staging/tx-00000000000000000000000000000001/new-root"
+                    .into(),
                 subvolume_id: Some(999),
-                generation: Some(10),
-                uuid: None,
-                parent_uuid: None,
+                generation: Some(80),
+                uuid: Some("replacement-uuid".into()),
+                parent_uuid: Some("source-snapshot-uuid".into()),
                 read_only: Some(false),
             })
         } else {
@@ -495,18 +496,26 @@ fn facts_with(backup: bool, staging: bool) -> DiskFacts {
         backup_root_exists: backup,
         backup: if backup {
             Some(SubvolumeFacts {
-                path: "/.catos-recovery/backups/p-001/root-before".into(),
+                path: "/.catos-recovery/backups/tx-00000000000000000000000000000001/root-before"
+                    .into(),
                 subvolume_id: Some(400),
                 generation: Some(100),
-                uuid: None,
-                parent_uuid: None,
+                uuid: Some("backup-uuid".into()),
+                parent_uuid: Some("old-root-uuid".into()),
                 read_only: Some(true),
             })
         } else {
             None
         },
         source_snapshot_exists: true,
-        source_snapshot: None,
+        source_snapshot: Some(SubvolumeFacts {
+            path: "/@snapshots/1".into(),
+            subvolume_id: Some(300),
+            generation: Some(80),
+            uuid: Some("source-snapshot-uuid".into()),
+            parent_uuid: Some("older-root-uuid".into()),
+            read_only: Some(true),
+        }),
     }
 }
 

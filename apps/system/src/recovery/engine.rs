@@ -44,7 +44,7 @@ use crate::recovery::identity::{
 };
 use crate::recovery::lock::{lock_file_path, TransactionLock};
 use crate::recovery::plan::verify_revert_confirmation_token;
-use crate::recovery::state::{reconcile_with_disk_facts, AdvanceAction, Intent};
+use crate::recovery::state::{reconcile_with_disk_facts, resume_checkpoint, AdvanceAction, Intent};
 use crate::recovery::store;
 
 /// Engine options. Built by the orchestrator (phase3.rs) before the
@@ -111,11 +111,7 @@ impl Engine {
         opts: EngineOptions,
         transaction_id: &str,
     ) -> Result<Self, RecoveryError> {
-        let state_path = top_level_state_path(&opts.top_level_mount, transaction_id);
-        let record = store::load_record(&state_path)?;
-        let fsid = opts.validated_filesystem.fsid.clone();
-        let lock = acquire_lock_guard(&opts.top_level_mount, &fsid).map_err(|e| *e)?;
-        ensure_target_matches_plan(&record.plan, &opts.validated_filesystem)?;
+        let (record, lock) = load_record_under_lock(&opts, transaction_id)?;
         let mut engine = Self {
             opts,
             record,
@@ -143,11 +139,7 @@ impl Engine {
         transaction_id: &str,
         presented_confirmation: &str,
     ) -> Result<Self, RecoveryError> {
-        let state_path = top_level_state_path(&opts.top_level_mount, transaction_id);
-        let record = store::load_record(&state_path)?;
-        let fsid = opts.validated_filesystem.fsid.clone();
-        let lock = acquire_lock_guard(&opts.top_level_mount, &fsid).map_err(|error| *error)?;
-        ensure_target_matches_plan(&record.plan, &opts.validated_filesystem)?;
+        let (record, lock) = load_record_under_lock(&opts, transaction_id)?;
         let mut engine = Self {
             opts,
             record,
@@ -183,7 +175,9 @@ impl Engine {
     /// `record.state` to pick their next action.
     fn reconcile_state_for_write(&mut self, reason: &str) -> Result<(), RecoveryError> {
         let facts = self.observe_disk_facts();
-        let reconciled = reconcile_with_disk_facts(self.record.state, &self.record.plan, &facts);
+        let checkpoint =
+            resume_checkpoint(&self.record).unwrap_or(TransactionState::FailedManualIntervention);
+        let reconciled = reconcile_with_disk_facts(checkpoint, &self.record.plan, &facts);
         if reconciled != self.record.state {
             self.record.state = reconciled;
             self.record.last_updated_unix = now_unix();
@@ -420,13 +414,16 @@ impl Engine {
     /// operator is forced to review before any further action.
     pub fn reconcile_status(&mut self) -> DiskFacts {
         let facts = self.observe_disk_facts();
-        let reconciled = reconcile_with_disk_facts(self.record.state, &self.record.plan, &facts);
+        let persisted_state = self.record.state;
+        let checkpoint =
+            resume_checkpoint(&self.record).unwrap_or(TransactionState::FailedManualIntervention);
+        let reconciled = reconcile_with_disk_facts(checkpoint, &self.record.plan, &facts);
 
         // Terminal drift detection: a Completed / Reverted record
         // whose disk facts have drifted since persist is NOT
         // trustworthy. Surface as FailedManualIntervention in the
         // in-memory view (NOT persisted).
-        let reconciled = if self.record.state.is_terminal()
+        let reconciled = if persisted_state.is_terminal()
             && reconciled.is_terminal()
             && self.terminal_drift_detected(&facts)
         {
@@ -1176,6 +1173,24 @@ fn acquire_lock_guard(
 ) -> Result<TransactionLock, Box<RecoveryError>> {
     let lock_path = lock_file_path(top_level_mount, fsid);
     TransactionLock::try_acquire(&lock_path, fsid).map_err(Box::new)
+}
+
+/// Acquire the per-FSID write lock before reading mutable transaction
+/// state. Reading first would leave a TOCTOU window where another writer
+/// could update the record and release the lock before this process
+/// acquired it, causing the stale record to be replayed under a valid
+/// lock.
+#[allow(clippy::result_large_err)]
+fn load_record_under_lock(
+    opts: &EngineOptions,
+    transaction_id: &str,
+) -> Result<(TransactionRecord, TransactionLock), RecoveryError> {
+    let fsid = opts.validated_filesystem.fsid.clone();
+    let lock = acquire_lock_guard(&opts.top_level_mount, &fsid).map_err(|error| *error)?;
+    let state_path = top_level_state_path(&opts.top_level_mount, transaction_id);
+    let record = store::load_record(&state_path)?;
+    ensure_target_matches_plan(&record.plan, &opts.validated_filesystem)?;
+    Ok((record, lock))
 }
 
 fn source_snapshot_fsid_via_path(snapshot_mounted: &Path, top_level_mount: &Path) -> String {

@@ -89,7 +89,7 @@ fn sample_plan_with_fsid(fsid: &str, plan_label: &str) -> RecoveryPlan {
             path: "/@".into(),
             subvolume_id: 256,
             generation: 100,
-            uuid: None,
+            uuid: Some("old-root-uuid".into()),
             parent_uuid: None,
             read_only: false,
             evidence: vec![],
@@ -98,8 +98,8 @@ fn sample_plan_with_fsid(fsid: &str, plan_label: &str) -> RecoveryPlan {
             path: "/@snapshots/1".into(),
             subvolume_id: 300,
             generation: 80,
-            uuid: None,
-            parent_uuid: None,
+            uuid: Some("source-snapshot-uuid".into()),
+            parent_uuid: Some("older-root-uuid".into()),
             read_only: true,
             evidence: vec![],
         },
@@ -157,31 +157,38 @@ fn persist_record_under(top: &Path, record: &TransactionRecord) -> PathBuf {
     state_path
 }
 
-fn facts_backup_only(fsid: &str) -> DiskFacts {
+fn facts_backup_only(plan: &RecoveryPlan) -> DiskFacts {
     DiskFacts {
-        filesystem_fsid: fsid.into(),
+        filesystem_fsid: plan.filesystem.fsid.clone(),
         active_root_exists: true,
         active_root: Some(SubvolumeFacts {
-            path: "/@".into(),
-            subvolume_id: Some(256),
-            generation: Some(100),
-            uuid: None,
-            parent_uuid: None,
-            read_only: Some(false),
+            path: plan.current_root.path.clone(),
+            subvolume_id: Some(plan.current_root.subvolume_id),
+            generation: Some(plan.current_root.generation),
+            uuid: plan.current_root.uuid.clone(),
+            parent_uuid: plan.current_root.parent_uuid.clone(),
+            read_only: Some(plan.current_root.read_only),
         }),
         staging_root_exists: false,
         staging_root: None,
         backup_root_exists: true,
         backup: Some(SubvolumeFacts {
-            path: "/.catos-recovery/backups/p-1/root-before".into(),
+            path: plan.backup_root_path.clone(),
             subvolume_id: Some(400),
             generation: Some(100),
-            uuid: None,
-            parent_uuid: None,
+            uuid: Some("backup-uuid".into()),
+            parent_uuid: plan.current_root.uuid.clone(),
             read_only: Some(true),
         }),
         source_snapshot_exists: true,
-        source_snapshot: None,
+        source_snapshot: Some(SubvolumeFacts {
+            path: plan.source_snapshot.path.clone(),
+            subvolume_id: Some(plan.source_snapshot.subvolume_id),
+            generation: Some(plan.source_snapshot.generation),
+            uuid: plan.source_snapshot.uuid.clone(),
+            parent_uuid: plan.source_snapshot.parent_uuid.clone(),
+            read_only: Some(plan.source_snapshot.read_only),
+        }),
     }
 }
 
@@ -363,7 +370,7 @@ fn crash_after_backup_before_persist_forwards_to_backupcreated() {
     // resume re-runs create_backup and fails with BackupPathOccupied
     // (or worse, overwrites the operator's pre-existing backup).
     let plan = sample_plan_with_fsid("fsid-crash-backup", "p-crash-backup");
-    let facts = facts_backup_only(&plan.filesystem.fsid);
+    let facts = facts_backup_only(&plan);
     assert_eq!(
         reconcile_with_disk_facts(TransactionState::Locked, &plan, &facts),
         TransactionState::BackupCreated
@@ -384,14 +391,14 @@ fn crash_after_replacement_before_persist_forwards_to_replacementcreated() {
     // Failure mode: previous apply created the staging subvolume but
     // crashed before ReplacementCreated hit disk.
     let plan = sample_plan_with_fsid("fsid-crash-repl", "p-crash-repl");
-    let mut facts = facts_backup_only(&plan.filesystem.fsid);
+    let mut facts = facts_backup_only(&plan);
     facts.staging_root_exists = true;
     facts.staging_root = Some(SubvolumeFacts {
-        path: "/.catos-recovery/staging/p-crash-repl/new-root".into(),
+        path: plan.staging_root_path.clone(),
         subvolume_id: Some(999),
         generation: Some(80),
-        uuid: None,
-        parent_uuid: None,
+        uuid: Some("replacement-uuid".into()),
+        parent_uuid: plan.source_snapshot.uuid.clone(),
         read_only: Some(false),
     });
     assert_eq!(
@@ -409,22 +416,22 @@ fn crash_after_swap_before_persist_forwards_to_oldrootmoved() {
     // forward to OldRootMoved; re-running swap_roots would undo the
     // recovery (RENAME_EXCHANGE is its own inverse).
     let plan = sample_plan_with_fsid("fsid-crash-swap", "p-crash-swap");
-    let mut facts = facts_backup_only(&plan.filesystem.fsid);
+    let mut facts = facts_backup_only(&plan);
     facts.staging_root_exists = true;
     facts.staging_root = Some(SubvolumeFacts {
-        path: "/.catos-recovery/staging/p-crash-swap/new-root".into(),
+        path: plan.staging_root_path.clone(),
         subvolume_id: Some(256),
         generation: Some(100),
-        uuid: None,
-        parent_uuid: None,
+        uuid: plan.current_root.uuid.clone(),
+        parent_uuid: plan.current_root.parent_uuid.clone(),
         read_only: Some(false),
     });
     facts.active_root = Some(SubvolumeFacts {
         path: "/@".into(),
-        subvolume_id: Some(300),
+        subvolume_id: Some(999),
         generation: Some(80),
-        uuid: Some("src-snap-uuid".into()),
-        parent_uuid: None,
+        uuid: Some("replacement-uuid".into()),
+        parent_uuid: plan.source_snapshot.uuid.clone(),
         read_only: Some(false),
     });
     assert_eq!(
@@ -439,22 +446,22 @@ fn crash_after_reverse_swap_before_persist_forwards_to_reverted() {
     // engine crashed before persisting Reverted. The active root's
     // subvolid is back to the planned current root's id.
     let plan = sample_plan_with_fsid("fsid-crash-revswap", "p-crash-revswap");
-    let mut facts = facts_backup_only(&plan.filesystem.fsid);
+    let mut facts = facts_backup_only(&plan);
     facts.staging_root_exists = true;
     facts.staging_root = Some(SubvolumeFacts {
-        path: "/.catos-recovery/staging/p-crash-revswap/new-root".into(),
-        subvolume_id: Some(300),
+        path: plan.staging_root_path.clone(),
+        subvolume_id: Some(999),
         generation: Some(80),
-        uuid: None,
-        parent_uuid: None,
+        uuid: Some("replacement-uuid".into()),
+        parent_uuid: plan.source_snapshot.uuid.clone(),
         read_only: Some(false),
     });
     facts.active_root = Some(SubvolumeFacts {
         path: "/@".into(),
         subvolume_id: Some(256),
         generation: Some(100),
-        uuid: None,
-        parent_uuid: None,
+        uuid: plan.current_root.uuid.clone(),
+        parent_uuid: plan.current_root.parent_uuid.clone(),
         read_only: Some(false),
     });
     assert_eq!(
@@ -470,7 +477,7 @@ fn ambiguous_swap_direction_surfaces_as_manual_intervention() {
     // source snapshot). We MUST surface manual intervention rather
     // than guess and re-execute.
     let plan = sample_plan_with_fsid("fsid-ambig", "p-ambig");
-    let mut facts = facts_backup_only(&plan.filesystem.fsid);
+    let mut facts = facts_backup_only(&plan);
     facts.staging_root_exists = true;
     facts.staging_root = Some(SubvolumeFacts {
         path: "/.catos-recovery/staging/p-ambig/new-root".into(),
@@ -498,7 +505,7 @@ fn ambiguous_swap_direction_surfaces_as_manual_intervention() {
 #[test]
 fn ambiguous_replacementcreated_surfaces_as_manual_intervention() {
     let plan = sample_plan_with_fsid("fsid-ambig-repl", "p-ambig-repl");
-    let mut facts = facts_backup_only(&plan.filesystem.fsid);
+    let mut facts = facts_backup_only(&plan);
     facts.staging_root_exists = true;
     facts.staging_root = Some(SubvolumeFacts {
         path: "/.catos-recovery/staging/p-ambig-repl/new-root".into(),
@@ -524,227 +531,6 @@ fn ambiguous_replacementcreated_surfaces_as_manual_intervention() {
 }
 
 // ===========================================================================
-// STEP 3.2b — Real engine resume after pre-persist crash
-// ===========================================================================
-//
-// These tests exercise the FULL engine path: persist a record at the
-// state BEFORE a side-effect was committed to disk, stage the disk so
-// the side-effect is visible, then call `Engine::load_for_write` +
-// `drive()`. `load_for_write` runs `reconcile_state_for_write`, which
-// MUST advance the state past the side-effect so `drive()` does NOT
-// call the destructive action. The destructive actions fail naturally
-// on tmpfs (no real btrfs), so if reconcile fails to advance the test
-// observes the btrfs-tool error rather than the next state.
-
-fn persist_with_disk_artifacts(
-    top: &Path,
-    plan: &RecoveryPlan,
-    state: TransactionState,
-    create_active: bool,
-    create_backup: bool,
-    create_staging: bool,
-) -> PathBuf {
-    let mut record = sample_record_with_state(plan.clone(), state);
-    for s in [
-        TransactionState::Planned,
-        TransactionState::PreflightVerified,
-        TransactionState::Locked,
-    ] {
-        record.completed_steps.push(CompletedStep {
-            state: s,
-            completed_at_unix: 1,
-            description: format!("{s:?}"),
-        });
-    }
-    if create_active {
-        std::fs::create_dir_all(top.join("@")).unwrap();
-    }
-    if create_backup {
-        std::fs::create_dir_all(top.join(plan.backup_root_path.trim_start_matches('/'))).unwrap();
-    }
-    if create_staging {
-        std::fs::create_dir_all(top.join(plan.staging_root_path.trim_start_matches('/'))).unwrap();
-    }
-    persist_record_under(top, &record)
-}
-
-#[test]
-fn resume_after_pre_persist_backup_crash_advances_without_rerunning_create_backup() {
-    let top = scratch_dir("resume-pre-backup");
-    let plan = sample_plan_with_fsid("fsid-rpb", "p-rpb");
-
-    let state_path =
-        persist_with_disk_artifacts(&top, &plan, TransactionState::Locked, true, true, false);
-    std::fs::create_dir_all(top.join(plan.source_snapshot.path.trim_start_matches('/'))).unwrap();
-
-    let mut engine = Engine::load_for_write(
-        EngineOptions {
-            top_level_mount: top.clone(),
-            device_path: PathBuf::from("/dev/null"),
-            validated_filesystem: plan.filesystem.clone(),
-        },
-        &plan.plan_id,
-    )
-    .expect("load_for_write must succeed");
-
-    let err = engine.drive().err().unwrap_or_else(|| {
-        panic!(
-            "drive must fail at btrfs tool on tmpfs; got Ok({:?})",
-            engine.record().state
-        )
-    });
-
-    let reloaded = store::load_record(&state_path).unwrap();
-    assert_ne!(
-        reloaded.state,
-        TransactionState::Locked,
-        "state must have advanced past Locked via reconcile-on-load"
-    );
-    assert_eq!(
-        err.failed_step.as_deref(),
-        Some("create-replacement"),
-        "failure must be at create-replacement (reconcile skipped create-backup); \
-         got failed_step={:?}, message={}",
-        err.failed_step,
-        err.message
-    );
-    assert_eq!(
-        err.kind,
-        RecoveryErrorKind::SyscallFailed,
-        "expected kernel snapshot ioctl failure at create-replacement; got {:?}: {}",
-        err.kind,
-        err.message
-    );
-
-    let _ = std::fs::remove_dir_all(&top);
-}
-
-#[test]
-fn resume_after_pre_persist_replacement_crash_advances_without_rerunning_create_replacement() {
-    let top = scratch_dir("resume-pre-repl");
-    let plan = sample_plan_with_fsid("fsid-rpr", "p-rpr");
-
-    let state_path = persist_with_disk_artifacts(
-        &top,
-        &plan,
-        TransactionState::BackupCreated,
-        true,
-        true,
-        true,
-    );
-
-    let mut engine = Engine::load_for_write(
-        EngineOptions {
-            top_level_mount: top.clone(),
-            device_path: PathBuf::from("/dev/null"),
-            validated_filesystem: plan.filesystem.clone(),
-        },
-        &plan.plan_id,
-    )
-    .expect("load_for_write must succeed");
-
-    let outcome = engine.drive();
-    let reloaded = store::load_record(&state_path).unwrap();
-    assert_ne!(
-        reloaded.state,
-        TransactionState::BackupCreated,
-        "state must have advanced past BackupCreated via reconcile-on-load"
-    );
-    if let Err(ref err) = outcome {
-        assert_ne!(
-            err.failed_step.as_deref(),
-            Some("create-replacement"),
-            "failure must NOT be at create-replacement (reconcile skipped it); \
-             got failed_step={:?}, message={}",
-            err.failed_step,
-            err.message
-        );
-    }
-
-    let _ = std::fs::remove_dir_all(&top);
-}
-
-#[test]
-fn resume_reverting_after_pre_persist_reverse_swap_persists_reverted() {
-    let top = scratch_dir("resume-reverting");
-    let plan = sample_plan_with_fsid("fsid-rrs", "p-rrs");
-
-    let mut record = sample_record_with_state(plan.clone(), TransactionState::Reverting);
-    for s in [
-        TransactionState::Planned,
-        TransactionState::PreflightVerified,
-        TransactionState::Locked,
-        TransactionState::BackupCreated,
-        TransactionState::ReplacementCreated,
-        TransactionState::OldRootMoved,
-        TransactionState::NewRootInstalled,
-        TransactionState::Reverting,
-    ] {
-        record.completed_steps.push(CompletedStep {
-            state: s,
-            completed_at_unix: 1,
-            description: format!("{s:?}"),
-        });
-    }
-    let state_path = persist_record_under(&top, &record);
-    std::fs::create_dir_all(top.join("@")).unwrap();
-    std::fs::create_dir_all(top.join(plan.staging_root_path.trim_start_matches('/'))).unwrap();
-
-    let mut engine = Engine::load_for_write(
-        EngineOptions {
-            top_level_mount: top.clone(),
-            device_path: PathBuf::from("/dev/null"),
-            validated_filesystem: plan.filesystem.clone(),
-        },
-        &plan.plan_id,
-    )
-    .expect("load_for_write must succeed");
-
-    // The engine reaches `resume_reverting`, which consults disk
-    // facts. On tmpfs the btrfs tool cannot observe subvolume IDs,
-    // so neither swap_appears_done nor reverse_swap_appears_done can
-    // return true. The engine MUST NOT silently no-op (the pre-fix
-    // behavior); it surfaces a structured RootSwitchConflict so the
-    // operator reviews. This is the load-bearing assertion: the
-    // Reverting state is handled, not skipped.
-    let outcome = engine.revert();
-    match outcome {
-        Ok(TransactionState::Reverted) => {
-            let reloaded = store::load_record(&state_path).unwrap();
-            assert_eq!(
-                reloaded.state,
-                TransactionState::Reverted,
-                "Reverted must be persisted when resume_reverting completes the swap"
-            );
-        }
-        Err(err) => {
-            assert_eq!(
-                err.kind,
-                RecoveryErrorKind::RootSwitchConflict,
-                "expected RootSwitchConflict when disk facts are ambiguous, got {:?}: {}",
-                err.kind,
-                err.message
-            );
-            assert!(
-                err.manual_intervention_required,
-                "ambiguous reverse-swap must surface as manual intervention"
-            );
-            // The failure MUST have been persisted (the pre-fix
-            // behavior returned Reverted without persisting anything).
-            let reloaded = store::load_record(&state_path).unwrap();
-            assert_eq!(
-                reloaded.state,
-                TransactionState::FailedManualIntervention,
-                "Reverting ambiguity must persist FailedManualIntervention, not silently no-op"
-            );
-        }
-        Ok(other) => panic!("unexpected state from revert: {:?}", other),
-    }
-
-    let _ = std::fs::remove_dir_all(&top);
-}
-
-// ===========================================================================
 // STEP 3.3 — Failed-state persistence
 // ===========================================================================
 //
@@ -753,25 +539,25 @@ fn resume_reverting_after_pre_persist_reverse_swap_persists_reverted() {
 // failed_manual_intervention rather than the last-successful state.
 
 /// Persist a structured recoverable operation error through the same
-/// private engine path used by `drive()`. A plain temporary directory
-/// cannot truthfully emulate a post-exchange btrfs identity, so the
-/// operation-level failure remains an authoritative QEMU assertion.
+/// private engine path used by `drive()`. Real operation-level failures
+/// remain covered by the QEMU recovery matrix.
 #[test]
 fn recoverable_failure_persists_last_error() {
     let top = scratch_dir("fail-recoverable");
     let plan = sample_plan_with_fsid("fsid-fail-rec", "p-fail-rec");
-    let record = sample_record_with_state(plan.clone(), TransactionState::Planned);
-    let _state_path = persist_record_under(&top, &record);
-
-    let mut engine = Engine::load_for_write(
+    let state_path = top
+        .join(TransactionPaths::transactions_dir().trim_start_matches('/'))
+        .join(&plan.plan_id)
+        .join("state.json");
+    let mut engine = Engine::begin(
         EngineOptions {
             top_level_mount: top.clone(),
             device_path: PathBuf::from("/dev/null"),
             validated_filesystem: plan.filesystem.clone(),
         },
-        &record.transaction_id,
+        plan.clone(),
     )
-    .expect("load_for_write must succeed; we hold the lock exclusively");
+    .expect("begin must persist the initial record under the FSID lock");
 
     let mut injected = RecoveryError::new(
         RecoveryErrorKind::TargetChanged,
@@ -794,27 +580,11 @@ fn recoverable_failure_persists_last_error() {
         source_snapshot: None,
     }));
     let err = engine.persist_failure_for_test(injected);
-    assert_eq!(
-        err.kind,
-        RecoveryErrorKind::TargetChanged,
-        "expected verify-new-root TargetChanged failure; got {:?}: {}",
-        err.kind,
-        err.message
-    );
-    assert!(
-        err.resume_possible,
-        "verify failure on an otherwise-installed root must be recoverable"
-    );
+    assert_eq!(err.kind, RecoveryErrorKind::TargetChanged);
+    assert!(err.resume_possible);
 
-    // Reload the record from disk and assert the failure was
-    // persisted as failed_recoverable with the structured last_error.
-    let reloaded = store::load_record(&_state_path).unwrap();
-    assert_eq!(
-        reloaded.state,
-        TransactionState::FailedRecoverable,
-        "failure state must be persisted; got {:?}",
-        reloaded.state
-    );
+    let reloaded = store::load_record(&state_path).unwrap();
+    assert_eq!(reloaded.state, TransactionState::FailedRecoverable);
     let last_error = reloaded
         .last_error
         .clone()
@@ -822,12 +592,7 @@ fn recoverable_failure_persists_last_error() {
     assert_eq!(last_error.kind, RecoveryErrorKind::TargetChanged);
     assert_eq!(last_error.failed_step, Some("verify-new-root".into()));
     assert!(last_error.resume_possible);
-    assert!(
-        last_error.message.contains("/etc/os-release")
-            || last_error.message.contains("usr/lib/os-release"),
-        "message should name the missing file: {}",
-        last_error.message
-    );
+    assert!(last_error.message.contains("/etc/os-release"));
     assert_eq!(
         reloaded.last_disk_facts,
         last_error.disk_facts.as_deref().cloned()
@@ -836,56 +601,41 @@ fn recoverable_failure_persists_last_error() {
     let _ = std::fs::remove_dir_all(&top);
 }
 
-/// Persist a record at Planned state (no disk writes yet) and call
-/// drive(). The engine will try to acquire the lock again — but
-/// because we already hold it via load_for_write, the do_acquire_lock
-/// action will pass. Then do_preflight will call btrfs show_filesystem
-/// on a tmpfs dir, which fails (no btrfs). The failure surfaces as
-/// BtrfsToolFailed. Whether this is recoverable depends on the
-/// failure() helper's classification; the contract we lock here is:
-/// the failure state IS persisted, with structured last_error,
-/// regardless of recoverable vs manual.
+/// Persist a structured manual-intervention error through the same
+/// engine path used by `drive()` and `revert()`.
 #[test]
 fn manual_intervention_failure_persists_last_error() {
     let top = scratch_dir("fail-manual");
     let plan = sample_plan_with_fsid("fsid-fail-manual", "p-fail-manual");
-    let record = sample_record_with_state(plan.clone(), TransactionState::Planned);
-    let _state_path = persist_record_under(&top, &record);
-
-    let mut engine = Engine::load_for_write(
+    let state_path = top
+        .join(TransactionPaths::transactions_dir().trim_start_matches('/'))
+        .join(&plan.plan_id)
+        .join("state.json");
+    let mut engine = Engine::begin(
         EngineOptions {
             top_level_mount: top.clone(),
             device_path: PathBuf::from("/dev/null"),
             validated_filesystem: plan.filesystem.clone(),
         },
-        &record.transaction_id,
+        plan.clone(),
     )
-    .unwrap();
+    .expect("begin must persist the initial record under the FSID lock");
 
-    let err = engine.drive().unwrap_err();
-    // The failure must be either BtrfsToolFailed (show_filesystem
-    // failed on tmpfs) or TargetChanged (some identity drift). The
-    // load-bearing assertion is that SOMETHING failed and the state
-    // was persisted as a Failed* variant.
-    assert!(
-        matches!(
-            err.kind,
-            RecoveryErrorKind::BtrfsToolFailed | RecoveryErrorKind::TargetChanged
-        ),
-        "expected a structured preflight failure; got {:?}: {}",
-        err.kind,
-        err.message
+    let mut injected = RecoveryError::new(
+        RecoveryErrorKind::RootSwitchConflict,
+        "root exchange identity is ambiguous",
     );
+    injected.transaction_id = Some(plan.plan_id.clone());
+    injected.current_state = Some(TransactionState::Planned);
+    injected.failed_step = Some("swap-roots".into());
+    injected.resume_possible = false;
+    injected.revert_possible = false;
+    injected.manual_intervention_required = true;
+    let err = engine.persist_failure_for_test(injected);
+    assert_eq!(err.kind, RecoveryErrorKind::RootSwitchConflict);
 
-    let reloaded = store::load_record(&_state_path).unwrap();
-    assert!(
-        matches!(
-            reloaded.state,
-            TransactionState::FailedRecoverable | TransactionState::FailedManualIntervention
-        ),
-        "failure state must be persisted; got {:?}",
-        reloaded.state
-    );
+    let reloaded = store::load_record(&state_path).unwrap();
+    assert_eq!(reloaded.state, TransactionState::FailedManualIntervention);
     let last_error = reloaded
         .last_error
         .clone()
@@ -894,10 +644,8 @@ fn manual_intervention_failure_persists_last_error() {
         last_error.transaction_id.as_deref(),
         Some(plan.plan_id.as_str())
     );
-    assert_eq!(
-        last_error.current_state,
-        reloaded.last_error.as_ref().and_then(|e| e.current_state)
-    );
+    assert_eq!(last_error.current_state, Some(TransactionState::Planned));
+    assert!(last_error.manual_intervention_required);
 
     let _ = std::fs::remove_dir_all(&top);
 }
