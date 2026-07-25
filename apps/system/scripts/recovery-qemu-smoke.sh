@@ -175,6 +175,7 @@ token=""
 post_fault=""
 pre_fault=""
 before_fault=""
+root_subvol="/@"
 for arg in $(cat /proc/cmdline); do
     case "$arg" in
         RECOVERY_SCENARIO=*) scenario=${arg#RECOVERY_SCENARIO=} ;;
@@ -183,13 +184,14 @@ for arg in $(cat /proc/cmdline); do
         RECOVERY_POST_FAULT_AT=*) post_fault=${arg#RECOVERY_POST_FAULT_AT=} ;;
         RECOVERY_PRE_FAULT_AT=*) pre_fault=${arg#RECOVERY_PRE_FAULT_AT=} ;;
         RECOVERY_BEFORE_FAULT_AT=*) before_fault=${arg#RECOVERY_BEFORE_FAULT_AT=} ;;
+        RECOVERY_ROOT_SUBVOL=*) root_subvol=${arg#RECOVERY_ROOT_SUBVOL=} ;;
     esac
 done
 [ -n "$post_fault" ] && export CATOS_RECOVERY_FAULT_AT="$post_fault"
 [ -n "$pre_fault" ] && export CATOS_RECOVERY_FAULT_PRE_AT="$pre_fault"
 [ -n "$before_fault" ] && export CATOS_RECOVERY_FAULT_BEFORE_AT="$before_fault"
 
-ROOT_ARGS="--root-device /dev/vda --root-subvolume /@"
+ROOT_ARGS="--root-device /dev/vda --root-subvolume $root_subvol"
 SNAPSHOT_ARGS="--snapshot-subvolume /@snapshots/2"
 BIN=/bin/catos-system
 case "$scenario" in
@@ -263,21 +265,22 @@ case "$scenario" in
         if ! echo "$snapshot_ro" | grep -q 'ro=true'; then
             echo "===VERIFY_FAIL=== source snapshot is not readonly: $snapshot_ro"; ok=0
         fi
+        active_root_dir="/mnt$root_subvol"
         case "$scenario" in
             verify_applied)
-                [ -f /mnt/@/var/lib/pacman/local/SNAPSHOT_2_MARKER ] \
+                [ -f "$active_root_dir/var/lib/pacman/local/SNAPSHOT_2_MARKER" ] \
                     || { echo "===VERIFY_FAIL=== active root lacks snapshot marker"; ok=0; }
                 [ -f "/mnt/.catos-recovery/backups/$plan_id/root-before/var/lib/pacman/local/CURRENT_MARKER" ] \
                     || { echo "===VERIFY_FAIL=== backup lacks original marker"; ok=0; }
                 ;;
             verify_reverted)
-                [ -f /mnt/@/var/lib/pacman/local/CURRENT_MARKER ] \
+                [ -f "$active_root_dir/var/lib/pacman/local/CURRENT_MARKER" ] \
                     || { echo "===VERIFY_FAIL=== active root was not restored"; ok=0; }
-                [ ! -f /mnt/@/var/lib/pacman/local/SNAPSHOT_2_MARKER ] \
+                [ ! -f "$active_root_dir/var/lib/pacman/local/SNAPSHOT_2_MARKER" ] \
                     || { echo "===VERIFY_FAIL=== reverted root still has snapshot marker"; ok=0; }
                 ;;
             verify_untouched)
-                [ -f /mnt/@/var/lib/pacman/local/CURRENT_MARKER ] \
+                [ -f "$active_root_dir/var/lib/pacman/local/CURRENT_MARKER" ] \
                     || { echo "===VERIFY_FAIL=== untouched root marker missing"; ok=0; }
                 [ ! -e /mnt/.catos-recovery/transactions ] \
                     || { echo "===VERIFY_FAIL=== refusal path wrote a transaction"; ok=0; }
@@ -310,6 +313,8 @@ write_root() {
     pretty=$2
     marker=$3
     external_esp=$4
+    subvol=$5
+    [ -n "$subvol" ] || subvol='/@'
     mkdir -p "$root"/{etc,usr/lib/modules,boot,var/lib/pacman/local}
     cat > "$root/etc/os-release" <<EOF
 NAME=CatOS
@@ -323,7 +328,7 @@ EOF
         echo snapshot-2-marker > "$root/var/lib/pacman/local/SNAPSHOT_2_MARKER"
     fi
     cat > "$root/etc/fstab" <<EOF
-UUID=22222222-3333-4444-5555-666666666666 / btrfs rw,subvol=/@ 0 0
+UUID=22222222-3333-4444-5555-666666666666 / btrfs rw,subvol=$subvol 0 0
 EOF
     if [ "$external_esp" -eq 1 ]; then
         mkdir -p "$root/boot/efi"
@@ -338,7 +343,13 @@ create_fixture() {
     echo home-data-must-not-change > "$TREE/@home/user-file"
     external=0
     [ "$layout" = external ] && external=1
-    write_root "$TREE/@" "CatOS Recovery Current Root" current "$external"
+    if [ "$layout" = nondefault_root ]; then
+        current_subvol='@root'
+        write_root "$TREE/@root" "CatOS Recovery Current Root" current "$external" '/@root'
+    else
+        current_subvol='@'
+        write_root "$TREE/@" "CatOS Recovery Current Root" current "$external" '/@'
+    fi
     if [ "$layout" = nested ]; then
         source_dir="$TREE/@/.snapshots/2/snapshot"
         source_subvol='@/.snapshots/2/snapshot'
@@ -346,11 +357,11 @@ create_fixture() {
         source_dir="$TREE/@snapshots/2"
         source_subvol='@snapshots/2'
     fi
-    write_root "$source_dir" "CatOS Recovery Snapshot 2" snapshot "$external"
+    write_root "$source_dir" "CatOS Recovery Snapshot 2" snapshot "$external" '/@'
 
     truncate -s 512M "$BTRFS_IMG"
     mkfs.btrfs -q -f -U 22222222-3333-4444-5555-666666666666 \
-        -r "$TREE" --subvol default:@ --subvol rw:@home --subvol "ro:$source_subvol" \
+        -r "$TREE" --subvol "default:$current_subvol" --subvol rw:@home --subvol "ro:$source_subvol" \
         "$BTRFS_IMG" || fail "mkfs.btrfs failed for $layout fixture"
 
     truncate -s 32M "$ESP_IMG"
@@ -376,9 +387,10 @@ run_guest() {
     plan_id=${3:-}
     token=${4:-}
     initramfs=${5:-$INITRAMFS_RUN}
+    root_subvol=${6:-/@}
     RUN_INDEX=$((RUN_INDEX + 1))
     LAST_LOG="$WORKDIR/serial-$(printf '%03d' "$RUN_INDEX")-$scenario.log"
-    append="console=ttyS0 panic=1 rdinit=/init RECOVERY_SCENARIO=$scenario"
+    append="console=ttyS0 panic=1 rdinit=/init RECOVERY_SCENARIO=$scenario RECOVERY_ROOT_SUBVOL=$root_subvol"
     case "$fault" in
         post:*) append="$append RECOVERY_POST_FAULT_AT=${fault#post:}" ;;
         pre:*) append="$append RECOVERY_PRE_FAULT_AT=${fault#pre:}" ;;
@@ -480,12 +492,28 @@ assert_esp_unchanged() {
 
 emit_plan() {
     expected_boot=$1
-    run_guest plan "" "" "" "$INITRAMFS_PLAN"
+    run_guest plan "" "" "" "$INITRAMFS_PLAN" "/@"
     assert_rc PLAN 0
     capture_json PLAN "$PLAN_FILE"
     assert_json_value "$PLAN_FILE" kind recovery_plan
     assert_json_value "$PLAN_FILE" payload.schema_version 4
     assert_json_value "$PLAN_FILE" payload.boot_consistency.status "$expected_boot"
+    PLAN_ID=$(json_value "$PLAN_FILE" payload.plan_id)
+    APPLY_TOKEN=$(json_value "$PLAN_FILE" payload.confirmation_token)
+    [ -n "$PLAN_ID" ] && [ -n "$APPLY_TOKEN" ] || fail "plan lacks id/token"
+    build_initramfs "$PLAN_FILE" "$INITRAMFS_RUN"
+}
+
+emit_plan_with_root_subvol() {
+    expected_boot=$1
+    root_subvol=$2
+    run_guest plan "" "" "" "$INITRAMFS_PLAN" "$root_subvol"
+    assert_rc PLAN 0
+    capture_json PLAN "$PLAN_FILE"
+    assert_json_value "$PLAN_FILE" kind recovery_plan
+    assert_json_value "$PLAN_FILE" payload.schema_version 4
+    assert_json_value "$PLAN_FILE" payload.boot_consistency.status "$expected_boot"
+    assert_json_value "$PLAN_FILE" payload.current_root.path "$root_subvol"
     PLAN_ID=$(json_value "$PLAN_FILE" payload.plan_id)
     APPLY_TOKEN=$(json_value "$PLAN_FILE" payload.confirmation_token)
     [ -n "$PLAN_ID" ] && [ -n "$APPLY_TOKEN" ] || fail "plan lacks id/token"
@@ -604,5 +632,31 @@ run_guest verify_untouched "" "$PLAN_ID" "" "$INITRAMFS_PLAN"
 grep -q '===VERIFY_OK===' "$LAST_LOG" || fail "external-ESP refusal wrote to target"
 assert_esp_unchanged
 echo "pass: external ESP refused before persistent recovery writes"
+
+# Non-default root subvolume /@root: end-to-end plan/apply/status/revert.
+# Guards against a regression that hardcodes /@ in the swap, the
+# backup path, the replacement source, or the revert restoration.
+# Every guest invocation passes /@root as both the kernel cmdline
+# RECOVERY_ROOT_SUBVOL and (via ROOT_ARGS) the catos-system
+# --root-subvolume flag.
+create_fixture nondefault_root
+emit_plan_with_root_subvol consistent /@root
+run_guest apply "" "$PLAN_ID" "$APPLY_TOKEN" "$INITRAMFS_RUN" /@root
+assert_rc APPLY 0
+run_guest status "" "$PLAN_ID" "" "$INITRAMFS_RUN" /@root
+assert_rc STATUS 0
+capture_json STATUS "$WORKDIR/status-nondefault-root.json"
+assert_json_value "$WORKDIR/status-nondefault-root.json" payload.reconciled_state completed
+run_guest verify_applied "" "$PLAN_ID" "" "$INITRAMFS_RUN" /@root
+grep -q '===VERIFY_OK===' "$LAST_LOG" || fail "non-default-root applied-state verification failed"
+assert_esp_unchanged
+REVERT_TOKEN_NONDEFAULT=$(json_value "$WORKDIR/status-nondefault-root.json" payload.revert_confirmation_token)
+[ -n "$REVERT_TOKEN_NONDEFAULT" ] || fail "non-default-root status did not emit revert token"
+run_guest revert "" "$PLAN_ID" "$REVERT_TOKEN_NONDEFAULT" "$INITRAMFS_RUN" /@root
+assert_rc REVERT 0
+run_guest verify_reverted "" "$PLAN_ID" "" "$INITRAMFS_RUN" /@root
+grep -q '===VERIFY_OK===' "$LAST_LOG" || fail "non-default-root reverted-state verification failed"
+assert_esp_unchanged
+echo "pass: non-default root subvolume /@root plan/apply/status/revert"
 
 echo "pass: authoritative phase-3 recovery QEMU acceptance succeeded"
