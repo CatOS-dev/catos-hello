@@ -164,7 +164,6 @@ impl Engine {
             }
             TransactionState::OldRootMoved
             | TransactionState::NewRootInstalled
-            | TransactionState::BootFinalizationPending
             | TransactionState::Verifying => {
                 // Swap happened; the staging path now contains the
                 // OLD /@, and the active /@ is the new root. Swapping
@@ -181,7 +180,6 @@ impl Engine {
                 match last_persistent {
                     TransactionState::OldRootMoved
                     | TransactionState::NewRootInstalled
-                    | TransactionState::BootFinalizationPending
                     | TransactionState::Verifying => {
                         self.swap_roots_back()?;
                     }
@@ -228,7 +226,6 @@ impl Engine {
             AdvanceAction::CreateReplacement => self.do_create_replacement(),
             AdvanceAction::SwapRoots => self.do_swap_roots(),
             AdvanceAction::VerifyNewRoot => self.do_verify_new_root(),
-            AdvanceAction::FinalizeBoot => self.do_finalize_boot(),
             AdvanceAction::VerifyFinal => self.do_verify_final(),
             AdvanceAction::MarkCompleted => {
                 self.transition(Intent::Complete, "complete")?;
@@ -488,67 +485,26 @@ impl Engine {
         Ok(())
     }
 
-    fn do_finalize_boot(&mut self) -> Result<(), RecoveryError> {
-        let plan = &self.record.plan;
-        match plan.finalization {
-            crate::model::recovery::BootFinalizationDecision::NotRequired => {
-                self.transition(Intent::Advance, "skip-finalize-boot")?;
-                Ok(())
-            }
-            crate::model::recovery::BootFinalizationDecision::RequiredUnavailable => Err(self
-                .failure(
-                    RecoveryErrorKind::BootFinalizationUnavailable,
-                    crate::recovery::boot::finalization_required_but_unavailable_message(),
-                    true,
-                    true,
-                )),
-            crate::model::recovery::BootFinalizationDecision::RequiredAvailable => {
-                let tool_path = Path::new(crate::recovery::boot::CATOS_BOOTLOADU_PATH);
-                if !tool_path.exists() {
-                    return Err(self.failure(
-                        RecoveryErrorKind::BootFinalizationFailed,
-                        format!(
-                            "bootloadu interface {} is missing on the host running the recovery",
-                            tool_path.display()
-                        ),
-                        true,
-                        true,
-                    ));
-                }
-                let mounted_root = self.mount_of(&plan.current_root.path);
-                let mounted_root_str = mounted_root.to_str().unwrap_or("").to_string();
-                let argv = ["update", "--root", mounted_root_str.as_str()];
-                let output = crate::process::run_trusted_tool(
-                    "catos-firmware-boot-update",
-                    &argv,
-                    std::time::Duration::from_secs(120),
-                    1024 * 1024,
-                );
-                match output {
-                    Ok(out) if out.success() => {
-                        self.transition(Intent::Advance, "finalize-boot")?;
-                        Ok(())
-                    }
-                    Ok(out) => Err(self.failure(
-                        RecoveryErrorKind::BootFinalizationFailed,
-                        format!(
-                            "bootloadu exited rc={} stderr={:?}",
-                            out.status.code().unwrap_or(-1),
-                            String::from_utf8_lossy(&out.stderr).trim()
-                        ),
-                        true,
-                        true,
-                    )),
-                    Err(message) => Err(self.failure(
-                        RecoveryErrorKind::BootFinalizationFailed,
-                        format!("cannot run bootloadu: {message}"),
-                        true,
-                        true,
-                    )),
-                }
-            }
-        }
-    }
+    // TODO(phase-3 follow-up, boot-consistency gate): the future
+    // READ-ONLY boot-consistency check is a PRE-WRITE refusal gate, NOT
+    // a post-swap verification. By the time the engine reaches
+    // `NewRootInstalled` (the state this function transitions OUT of),
+    // the pre-recovery backup snapshot, the writable replacement
+    // subvolume, AND the `renameat2(RENAME_EXCHANGE)` root switch have
+    // ALL been persisted to disk. There is no "first persistent write"
+    // left to refuse here. The pre-write gate therefore belongs at the
+    // very start of apply — between `do_preflight` and
+    // `do_create_backup` — where it can still abort the transaction
+    // with zero on-disk side effects. A check placed at THIS location
+    // (between `NewRootInstalled` and `Verifying`) could only refuse
+    // to mark the transaction `Completed` and surface a diagnostic for
+    // the operator; it could not undo the root swap.
+    //
+    // Whatever shape the gate takes, it MUST be read-only: it MUST NOT
+    // call any bootloader tool or write any boot resource. Recovery no
+    // longer finalizes boot; do not reintroduce a call to
+    // catos-firmware-boot-update, bootctl, grub-mkconfig, or any other
+    // boot-update interface from this engine.
 
     fn do_verify_final(&mut self) -> Result<(), RecoveryError> {
         // Re-run the new-root verification as a final sanity check.

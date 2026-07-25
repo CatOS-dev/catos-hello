@@ -1,23 +1,16 @@
 //! Boot / ESP layout detection.
 //!
-//! The decision this module makes drives the recovery's
-//! boot-finalization step. The rule is:
-//!
-//! * If `/boot` lives INSIDE the root subvolume AND there is no
-//!   separate ESP path on a different filesystem, the snapshot's boot
-//!   resources travel with the snapshot; no finalization work is
-//!   needed.
-//! * If `/boot` or the ESP is on a separate filesystem / subvolume,
-//!   the recovered root may carry a different kernel + modules set
-//!   than what the running boot loader expects. Phase 3 MUST run the
-//!   CatOS bootloadu interface after the root swap. If that interface
-//!   is not positively detected, phase 3 refuses the recovery rather
-//!   than ship a system that may not boot.
+//! This module is purely descriptive: it inspects a mounted snapshot
+//! and records what boot resources it carries (`/boot` location, ESP,
+//! UKIs, kernel modules, initramfs). Recovery does NOT act on this
+//! information to update any bootloader — a future phase may consult
+//! it as part of a read-only boot-consistency check that refuses the
+//! first persistent write if external boot resources disagree with
+//! the new root.
 //!
 //! We DO NOT reimplement any bootloader logic here. The module only
-//! (a) inspects the source snapshot's `/boot` and `/usr/lib/modules`,
-//! (b) reads the source fstab to discover separate `/boot`/ESP mounts,
-//! and (c) decides whether the CatOS bootloadu interface is present.
+//! inspects the source snapshot's `/boot` and `/usr/lib/modules` and
+//! reads the source fstab to discover separate `/boot`/ESP mounts.
 //!
 //! Boot detection runs against a real mounted snapshot path (the
 //! btrfs toplevel mounted read-only inside a private namespace). We
@@ -25,14 +18,10 @@
 //! openat2 confinement in `probe::fs_probe` exists for hostile
 //! unmounted targets, not for paths we ourselves just mounted.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use crate::model::fstab::{FstabEntry, FstabEntryKind, FstabSource};
-use crate::model::recovery::{BootFinalizationDecision, BootLayout};
-
-/// Trusted path where the CatOS bootloadu interface lives. Phase 3
-/// only trusts this exact path; PATH lookups are forbidden.
-pub const CATOS_BOOTLOADU_PATH: &str = "/usr/bin/catos-firmware-boot-update";
+use crate::model::recovery::BootLayout;
 
 /// Detect the boot layout of a mounted snapshot / root candidate.
 ///
@@ -89,8 +78,6 @@ pub fn detect_layout(mounted_root: &Path, fstab: &[FstabEntry]) -> BootLayout {
         has_initramfs = has_initramfs_files(mounted_root);
     }
 
-    let bootloadu_detected = bootloadu_present(mounted_root);
-
     // The "boot inside root" flag is exclusive: if the fstab also
     // surfaces a separate /boot, we trust the fstab and demote.
     let boot_inside_root =
@@ -105,39 +92,7 @@ pub fn detect_layout(mounted_root: &Path, fstab: &[FstabEntry]) -> BootLayout {
         uki_paths,
         kernel_versions,
         has_initramfs,
-        bootloadu_detected,
     }
-}
-
-/// Decide the recovery's finalization step. Pure function of the
-/// layout.
-pub fn decide_finalization(layout: &BootLayout) -> BootFinalizationDecision {
-    if layout.boot_inside_root
-        && !layout.boot_separate_filesystem
-        && !layout.boot_separate_subvolume
-        && layout.esp_device.is_none()
-    {
-        return BootFinalizationDecision::NotRequired;
-    }
-    if layout.bootloadu_detected {
-        BootFinalizationDecision::RequiredAvailable
-    } else {
-        BootFinalizationDecision::RequiredUnavailable
-    }
-}
-
-/// Mark the canonical "we are NOT going to fake a boot finalize"
-/// refusal. The engine surfaces this so the recovery UI does not need
-/// to parse free text.
-pub fn finalization_required_but_unavailable_message() -> &'static str {
-    "boot finalization is required but no stable CatOS bootloadu interface was detected at the source snapshot"
-}
-
-/// Compute the path inside a mounted snapshot where the bootloadu
-/// interface would live. Returned for diagnostics; never used as a
-/// trusted tool path directly by phase 3.
-pub fn bootloadu_path_inside_snapshot(mounted_root: &Path) -> PathBuf {
-    mounted_root.join(CATOS_BOOTLOADU_PATH.trim_start_matches('/'))
 }
 
 // ---------------------------------------------------------------------------
@@ -228,11 +183,6 @@ fn has_initramfs_files(root: &Path) -> bool {
     })
 }
 
-fn bootloadu_present(root: &Path) -> bool {
-    let rel = CATOS_BOOTLOADU_PATH.trim_start_matches('/');
-    root.join(rel).exists()
-}
-
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -241,7 +191,7 @@ fn bootloadu_present(root: &Path) -> bool {
 mod tests {
     use super::*;
     use crate::model::fstab::{FstabEntry, FstabEntryKind, FstabSource};
-    use crate::model::recovery::BootLayout as BL;
+    use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn scratch(name: &str) -> PathBuf {
@@ -256,82 +206,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(&path);
         std::fs::create_dir_all(&path).unwrap();
         path
-    }
-
-    #[test]
-    fn decide_returns_not_required_when_boot_inside_root_and_no_esp() {
-        let layout = BL {
-            boot_inside_root: true,
-            boot_separate_filesystem: false,
-            boot_separate_subvolume: false,
-            esp_mount_point: None,
-            esp_device: None,
-            uki_paths: vec![],
-            kernel_versions: vec![],
-            has_initramfs: false,
-            bootloadu_detected: false,
-        };
-        assert_eq!(
-            decide_finalization(&layout),
-            BootFinalizationDecision::NotRequired
-        );
-    }
-
-    #[test]
-    fn decide_returns_required_unavailable_when_separate_boot_no_bootloadu() {
-        let layout = BL {
-            boot_inside_root: false,
-            boot_separate_filesystem: true,
-            boot_separate_subvolume: false,
-            esp_mount_point: None,
-            esp_device: None,
-            uki_paths: vec![],
-            kernel_versions: vec![],
-            has_initramfs: false,
-            bootloadu_detected: false,
-        };
-        assert_eq!(
-            decide_finalization(&layout),
-            BootFinalizationDecision::RequiredUnavailable
-        );
-    }
-
-    #[test]
-    fn decide_returns_required_available_when_separate_boot_and_bootloadu() {
-        let layout = BL {
-            boot_inside_root: false,
-            boot_separate_filesystem: true,
-            boot_separate_subvolume: false,
-            esp_mount_point: None,
-            esp_device: None,
-            uki_paths: vec![],
-            kernel_versions: vec![],
-            has_initramfs: false,
-            bootloadu_detected: true,
-        };
-        assert_eq!(
-            decide_finalization(&layout),
-            BootFinalizationDecision::RequiredAvailable
-        );
-    }
-
-    #[test]
-    fn decide_returns_required_unavailable_when_esp_present_without_bootloadu() {
-        let layout = BL {
-            boot_inside_root: true,
-            boot_separate_filesystem: false,
-            boot_separate_subvolume: false,
-            esp_mount_point: Some("/boot/efi".into()),
-            esp_device: Some("/dev/nvme0n1p1".into()),
-            uki_paths: vec![],
-            kernel_versions: vec![],
-            has_initramfs: false,
-            bootloadu_detected: false,
-        };
-        assert_eq!(
-            decide_finalization(&layout),
-            BootFinalizationDecision::RequiredUnavailable
-        );
     }
 
     /// `detect_layout` must downgrade `boot_inside_root=true` to false

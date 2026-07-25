@@ -89,7 +89,6 @@ pub fn detect_capabilities(fs: &dyn FilesystemProbe, root: &SystemRoot) -> Vec<C
         systemd_available(fs),
         pacman_present_in_target(fs, root),
         mkinitcpio_present_in_target(fs, root),
-        bootloadu_present_in_target(fs, root),
         tool_available(fs, CapabilityKind::BtrfsToolAvailable, "btrfs"),
         tool_available(fs, CapabilityKind::CryptsetupAvailable, "cryptsetup"),
         tool_available(fs, CapabilityKind::LsblkAvailable, "lsblk"),
@@ -536,16 +535,6 @@ fn mkinitcpio_present_in_target(fs: &dyn FilesystemProbe, root: &SystemRoot) -> 
     )
 }
 
-fn bootloadu_present_in_target(fs: &dyn FilesystemProbe, root: &SystemRoot) -> Capability {
-    target_tool_capability(
-        fs,
-        root,
-        CapabilityKind::BootloaduPresentInTarget,
-        "bootloadu",
-        "usr/bin/bootloadu",
-    )
-}
-
 fn target_tool_capability(
     fs: &dyn FilesystemProbe,
     root: &SystemRoot,
@@ -807,20 +796,16 @@ mod tests {
         assert!(codes.contains(&"TARGET_TOOL_PERMISSION_DENIED"));
     }
 
-    /// mkinitcpio and bootloadu probes use the same code path; smoke-test
-    /// that they default to Unavailable when missing.
+    /// mkinitcpio probe uses the same code path as pacman; smoke-test
+    /// that it defaults to Unavailable when missing.
     #[test]
-    fn mkinitcpio_and_bootloadu_default_unavailable() {
+    fn mkinitcpio_default_unavailable() {
         let fs = FixtureFilesystem::new()
             .dir("/")
             .dir("/usr")
             .dir("/usr/bin");
         assert_eq!(
             mkinitcpio_present_in_target(&fs, &root()).status,
-            CapabilityStatus::Unavailable
-        );
-        assert_eq!(
-            bootloadu_present_in_target(&fs, &root()).status,
             CapabilityStatus::Unavailable
         );
     }

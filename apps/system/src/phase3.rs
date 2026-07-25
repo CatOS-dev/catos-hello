@@ -157,14 +157,11 @@ fn run_inspect(args: &RecoveryArgs) -> Result<RecoveryInspectReport, RecoveryErr
     let boot_layout = probe.boot_layout;
     let catos_identity = probe.catos_identity;
 
-    let finalization = crate::recovery::boot::decide_finalization(&boot_layout);
-
     Ok(RecoveryInspectReport {
         filesystem,
         current_root: current_root_identity,
         source_snapshot: snapshot_identity,
         boot_layout,
-        finalization,
         target_catos_identity: catos_identity,
         warnings: vec![],
     })
@@ -187,7 +184,6 @@ fn run_plan(args: &RecoveryArgs) -> Result<RecoveryPlan, RecoveryError> {
     let _ = selection.esp_device;
 
     let probe = probe_target_readonly(&device, Some(&snapshot))?;
-    let finalization = crate::recovery::boot::decide_finalization(&probe.boot_layout);
 
     let plan_id = generate_plan_id();
     let entropy = generate_entropy();
@@ -204,8 +200,7 @@ fn run_plan(args: &RecoveryArgs) -> Result<RecoveryPlan, RecoveryError> {
         generated_on_host: current_hostname(),
         confirmation_token_entropy: entropy,
     };
-    let mut plan = build_recovery_plan(inputs)?;
-    plan.finalization = finalization;
+    let plan = build_recovery_plan(inputs)?;
     // run_plan is read-only. The plan is emitted to stdout; the
     // operator (or a wrapper script) saves it and feeds it back to
     // `apply --plan-file <path>`.
@@ -706,7 +701,6 @@ fn recommend(record: &TransactionRecord) -> crate::model::recovery::RecoveryReco
         | S::ReplacementCreated
         | S::OldRootMoved
         | S::NewRootInstalled
-        | S::BootFinalizationPending
         | S::Verifying => R::Resume,
     }
 }

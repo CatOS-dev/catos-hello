@@ -566,13 +566,13 @@ PHASE-2 SUBCOMMANDS (read-only storage discovery + safe RO target mount):
 PHASE-3 SUBCOMMANDS (btrfs root-snapshot recovery transaction):
     recovery list     List existing transactions on the configured root.
     recovery inspect  Read-only: show filesystem + current-root + snapshot
-                      identity and the boot-finalization decision.
+                      identity and the source-snapshot boot layout.
     recovery plan     Read-only: emit an immutable RecoveryPlan bound to a
                       plan id and confirmation token. Does NOT write.
     recovery apply    Execute the plan: mount the btrfs toplevel rw, run the
-                      state machine, swap roots via renameat2(RENAME_EXCHANGE),
-                      finalize boot if required. Requires --plan-id and
-                      --confirm. Must run as root.
+                      state machine, swap roots via renameat2(RENAME_EXCHANGE).
+                      Does NOT touch the bootloader or the ESP. Requires
+                      --plan-id and --confirm. Must run as root.
     recovery status   Read the transaction record, reconcile with disk facts,
                       emit a RecoveryStatusReport.
     recovery resume   Continue an in-flight transaction from its last

@@ -52,8 +52,6 @@ pub enum CapabilityKind {
     PacmanPresentInTarget,
     /// `mkinitcpio` binary present inside the *target* root.
     MkinitcpioPresentInTarget,
-    /// `bootloadu` binary present inside the *target* root.
-    BootloaduPresentInTarget,
     /// `btrfs` tool resolvable on host PATH.
     BtrfsToolAvailable,
     /// `cryptsetup` tool resolvable on host PATH.

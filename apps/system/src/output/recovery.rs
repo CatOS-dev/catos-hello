@@ -187,16 +187,10 @@ fn render_inspect<W: Write>(out: &mut W, report: &RecoveryInspectReport) -> std:
         report.source_snapshot.generation,
         report.source_snapshot.read_only
     )?;
-    writeln!(out, "  finalization     : {:?}", report.finalization)?;
     writeln!(
         out,
         "  boot inside root : {}",
         report.boot_layout.boot_inside_root
-    )?;
-    writeln!(
-        out,
-        "  bootloadu present: {}",
-        report.boot_layout.bootloadu_detected
     )?;
     render_warnings(out, &report.warnings)
 }
@@ -221,7 +215,6 @@ fn render_plan<W: Write>(out: &mut W, plan: &RecoveryPlan) -> std::io::Result<()
     )?;
     writeln!(out, "  backup path      : {}", plan.backup_root_path)?;
     writeln!(out, "  staging path     : {}", plan.staging_root_path)?;
-    writeln!(out, "  finalization     : {:?}", plan.finalization)?;
     writeln!(out, "  predicted steps  :")?;
     for step in &plan.predicted_steps {
         writeln!(out, "    - {step}")?;
@@ -341,15 +334,15 @@ fn json_envelope(
 mod tests {
     use super::*;
     use crate::model::recovery::{
-        BootFinalizationDecision, BootLayout, BtrfsFilesystemIdentity, BtrfsSubvolumeIdentity,
-        CatosIdentity, CompletedStep, DiskFacts, FstabRootDefinition, RecoveryRecommendation,
-        RecoveryStatusReport, TransactionState,
+        BootLayout, BtrfsFilesystemIdentity, BtrfsSubvolumeIdentity, CatosIdentity, CompletedStep,
+        DiskFacts, FstabRootDefinition, RecoveryRecommendation, RecoveryStatusReport,
+        TransactionState, RECOVERY_PLAN_SCHEMA_VERSION, TX_RECORD_SCHEMA_VERSION,
     };
     use std::path::PathBuf;
 
     fn sample_plan() -> RecoveryPlan {
         RecoveryPlan {
-            schema_version: 1,
+            schema_version: RECOVERY_PLAN_SCHEMA_VERSION,
             plan_id: "tx-1".into(),
             generated_at_unix: 1000,
             generated_on_host: Some("host".into()),
@@ -374,7 +367,6 @@ mod tests {
             },
             target_catos_identity: Some(CatosIdentity::default()),
             boot_layout: BootLayout::default(),
-            finalization: BootFinalizationDecision::NotRequired,
             backup_root_path: "/.catos-recovery/backups/tx-1/root-before".into(),
             staging_root_path: "/.catos-recovery/staging/tx-1/new-root".into(),
             fstab_root_definition: FstabRootDefinition {
@@ -430,7 +422,7 @@ mod tests {
     fn status_envelope_carries_reconciled_state() {
         let plan = sample_plan();
         let record = TransactionRecord {
-            schema_version: 1,
+            schema_version: TX_RECORD_SCHEMA_VERSION,
             transaction_id: "tx-1".into(),
             created_at_unix: 1,
             last_updated_unix: 2,

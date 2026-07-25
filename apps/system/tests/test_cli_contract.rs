@@ -123,14 +123,14 @@ fn json_has_required_top_level_keys() {
     ] {
         assert!(v.get(key).is_some(), "missing top-level JSON key: {key}");
     }
-    // The phase-1 contract enumerates exactly these 16 capability names.
+    // The phase-1 contract enumerates exactly these 15 capabilities.
     let cap_names: Vec<&str> = v["capabilities"]
         .as_array()
         .unwrap()
         .iter()
         .map(|c| c["name"].as_str().unwrap())
         .collect();
-    assert_eq!(cap_names.len(), 16, "expected 16 phase-1 capabilities");
+    assert_eq!(cap_names.len(), 15, "expected 15 phase-1 capabilities");
     for required in [
         "read_target_root",
         "read_proc",
@@ -143,7 +143,6 @@ fn json_has_required_top_level_keys() {
         "systemd_available",
         "pacman_present_in_target",
         "mkinitcpio_present_in_target",
-        "bootloadu_present_in_target",
         "btrfs_tool_available",
         "cryptsetup_available",
         "lsblk_available",
@@ -192,6 +191,28 @@ fn help_and_version_exit_zero() {
     assert!(ok);
     assert_eq!(code, 0);
     assert!(stdout_v.contains("catos-system"));
+}
+
+// Guards against re-introducing the bootloader-coupling claims that
+// were removed from the help text. The --help output is part of the
+// documented contract: it must not promise bootloader work that the
+// engine does not perform.
+#[test]
+fn help_does_not_claim_boot_finalization() {
+    let (ok, _, stdout, _) = run(&["--help"]);
+    assert!(ok);
+    assert!(
+        !stdout.contains("boot-finalization"),
+        "--help still mentions boot-finalization: {stdout}"
+    );
+    assert!(
+        !stdout.contains("finalize boot"),
+        "--help still mentions finalize boot: {stdout}"
+    );
+    assert!(
+        !stdout.contains("bootloadu"),
+        "--help still mentions bootloadu: {stdout}"
+    );
 }
 
 // ---- sub-command view dispatch (review issue #1) ----

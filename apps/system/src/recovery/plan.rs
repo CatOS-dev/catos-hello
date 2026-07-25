@@ -9,8 +9,8 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::model::recovery::{
-    BootFinalizationDecision, BootLayout, BtrfsFilesystemIdentity, BtrfsSubvolumeIdentity,
-    CatosIdentity, FstabRootDefinition, RecoveryError, RecoveryPlan, RECOVERY_PLAN_SCHEMA_VERSION,
+    BootLayout, BtrfsFilesystemIdentity, BtrfsSubvolumeIdentity, CatosIdentity,
+    FstabRootDefinition, RecoveryError, RecoveryPlan, RECOVERY_PLAN_SCHEMA_VERSION,
 };
 
 /// Inputs to [`build_plan`]. Everything the builder needs to produce a
@@ -92,8 +92,6 @@ pub fn build_plan(inputs: PlanInputs) -> Result<RecoveryPlan, RecoveryError> {
         crate::model::recovery::TransactionPaths::staging_dir()
     );
 
-    let finalization = decide_finalization(&inputs.boot_layout);
-
     let mut refusal_conditions = Vec::new();
     refusal_conditions.push("plan id, filesystem FSID, or subvolume identity has changed".into());
     refusal_conditions
@@ -104,12 +102,6 @@ pub fn build_plan(inputs: PlanInputs) -> Result<RecoveryPlan, RecoveryError> {
     refusal_conditions.push(
         "the configured backup or staging path is already occupied by a foreign object".into(),
     );
-    if matches!(finalization, BootFinalizationDecision::RequiredUnavailable) {
-        refusal_conditions.push(
-            "boot finalization is required but no stable CatOS bootloadu interface is available"
-                .into(),
-        );
-    }
 
     let mut risks_and_warnings = Vec::new();
     risks_and_warnings.push(format!(
@@ -120,13 +112,11 @@ pub fn build_plan(inputs: PlanInputs) -> Result<RecoveryPlan, RecoveryError> {
         "the source snapshot at {} will remain readonly and will not be modified",
         inputs.source_snapshot.path
     ));
-    if matches!(finalization, BootFinalizationDecision::RequiredAvailable) {
-        risks_and_warnings.push(
-            "boot resources will be reconciled after the root switch by invoking the CatOS \
-             bootloadu interface at a fixed trusted path"
-                .into(),
-        );
-    }
+    risks_and_warnings.push(
+        "recovery swaps the root subvolume only; it does NOT update any bootloader, ESP, \
+         UKI, or initramfs. Boot resources outside the root subvolume are NOT reconciled."
+            .into(),
+    );
 
     let predicted_steps = vec![
         "preflight".into(),
@@ -135,11 +125,6 @@ pub fn build_plan(inputs: PlanInputs) -> Result<RecoveryPlan, RecoveryError> {
         "create_replacement".into(),
         "swap_roots".into(),
         "verify_new_root".into(),
-        if matches!(finalization, BootFinalizationDecision::RequiredAvailable) {
-            "finalize_boot".into()
-        } else {
-            "skip_finalize_boot".into()
-        },
         "verify_final".into(),
         "complete".into(),
     ];
@@ -167,7 +152,6 @@ pub fn build_plan(inputs: PlanInputs) -> Result<RecoveryPlan, RecoveryError> {
         source_snapshot: inputs.source_snapshot,
         target_catos_identity: inputs.catos_identity,
         boot_layout: inputs.boot_layout,
-        finalization,
         backup_root_path,
         staging_root_path,
         fstab_root_definition: inputs.fstab_root_definition,
@@ -177,23 +161,6 @@ pub fn build_plan(inputs: PlanInputs) -> Result<RecoveryPlan, RecoveryError> {
         confirmation_token,
         evidence: Vec::new(),
     })
-}
-
-/// Decide whether boot finalization is required, and if so whether a
-/// stable CatOS bootloadu interface is available.
-fn decide_finalization(layout: &BootLayout) -> BootFinalizationDecision {
-    if layout.boot_inside_root
-        && !layout.boot_separate_filesystem
-        && !layout.boot_separate_subvolume
-        && layout.esp_device.is_none()
-    {
-        return BootFinalizationDecision::NotRequired;
-    }
-    if layout.bootloadu_detected {
-        BootFinalizationDecision::RequiredAvailable
-    } else {
-        BootFinalizationDecision::RequiredUnavailable
-    }
 }
 
 /// Build the confirmation token string. The format is `v1:<plan_id>:<token>`,
@@ -283,7 +250,7 @@ mod tests {
         BtrfsFilesystemIdentity, BtrfsSubvolumeIdentity, FstabRootDefinition, RecoveryErrorKind,
     };
 
-    fn inputs(read_only: bool, bootloadu: bool) -> PlanInputs {
+    fn inputs(read_only: bool) -> PlanInputs {
         PlanInputs {
             filesystem: BtrfsFilesystemIdentity {
                 fsid: "fsid".into(),
@@ -313,7 +280,6 @@ mod tests {
                 uki_paths: vec![],
                 kernel_versions: vec![],
                 has_initramfs: false,
-                bootloadu_detected: bootloadu,
             },
             catos_identity: None,
             fstab_root_definition: FstabRootDefinition {
@@ -329,7 +295,7 @@ mod tests {
 
     #[test]
     fn build_plan_produces_stable_paths() {
-        let plan = build_plan(inputs(true, false)).unwrap();
+        let plan = build_plan(inputs(true)).unwrap();
         assert_eq!(
             plan.backup_root_path,
             "/.catos-recovery/backups/p-1/root-before"
@@ -342,20 +308,20 @@ mod tests {
 
     #[test]
     fn build_plan_rejects_non_readonly_snapshot() {
-        let err = build_plan(inputs(false, false)).unwrap_err();
+        let err = build_plan(inputs(false)).unwrap_err();
         assert_eq!(err.kind, RecoveryErrorKind::SnapshotNotReadonly);
     }
 
     #[test]
     fn build_plan_rejects_insufficient_entropy() {
-        let mut i = inputs(true, false);
+        let mut i = inputs(true);
         i.confirmation_token_entropy = vec![0u8; 4];
         assert!(build_plan(i).is_err());
     }
 
     #[test]
     fn build_plan_rejects_empty_plan_id() {
-        let mut i = inputs(true, false);
+        let mut i = inputs(true);
         i.plan_id = "".into();
         assert!(build_plan(i).is_err());
     }
@@ -412,32 +378,15 @@ mod tests {
     }
 
     #[test]
-    fn finalization_decision_is_not_required_when_boot_in_root() {
-        let plan = build_plan(inputs(true, false)).unwrap();
-        assert_eq!(plan.finalization, BootFinalizationDecision::NotRequired);
-    }
-
-    #[test]
-    fn finalization_decision_is_required_unavailable_when_no_bootloadu() {
-        let mut i = inputs(true, false);
-        i.boot_layout.boot_inside_root = false;
-        i.boot_layout.boot_separate_filesystem = true;
-        let plan = build_plan(i).unwrap();
-        assert_eq!(
-            plan.finalization,
-            BootFinalizationDecision::RequiredUnavailable
-        );
-    }
-
-    #[test]
-    fn finalization_decision_is_required_available_with_bootloadu() {
-        let mut i = inputs(true, true);
-        i.boot_layout.boot_inside_root = false;
-        i.boot_layout.boot_separate_filesystem = true;
-        let plan = build_plan(i).unwrap();
-        assert_eq!(
-            plan.finalization,
-            BootFinalizationDecision::RequiredAvailable
-        );
+    fn predicted_steps_do_not_include_boot_finalization() {
+        // Recovery MUST NOT call any bootloader tool. The predicted
+        // step list is part of the JSON contract; pinning it here
+        // guards against re-introducing a finalize_boot step.
+        let plan = build_plan(inputs(true)).unwrap();
+        assert!(!plan
+            .predicted_steps
+            .iter()
+            .any(|s| s.contains("finalize") || s.contains("bootloader")));
+        assert!(plan.predicted_steps.contains(&"verify_final".to_string()));
     }
 }

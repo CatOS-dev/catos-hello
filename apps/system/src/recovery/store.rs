@@ -31,9 +31,22 @@ use std::os::unix::fs::PermissionsExt;
 use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
 
+use serde::Deserialize;
+
 use crate::model::recovery::{
-    RecoveryError, RecoveryErrorKind, TransactionRecord, TX_RECORD_SCHEMA_VERSION,
+    RecoveryError, RecoveryErrorKind, TransactionRecord, RECOVERY_PLAN_SCHEMA_VERSION,
+    TX_RECORD_SCHEMA_VERSION,
 };
+
+/// Minimal view used to peek at a record's `schema_version` field
+/// BEFORE attempting a typed deserialization. This keeps v1 records
+/// (whose embedded state enum has lost a variant) from being
+/// misreported as `StateRecordCorrupt`: they surface as
+/// `UnsupportedTransactionSchema` instead.
+#[derive(Deserialize)]
+struct SchemaVersionProbe {
+    schema_version: u32,
+}
 
 /// Load a transaction record from `path`. Performs schema validation
 /// and surfaces a structured error for missing, corrupt, or
@@ -54,6 +67,31 @@ pub fn load_record(path: &Path) -> Result<TransactionRecord, RecoveryError> {
             ));
         }
     };
+    // Peek at schema_version BEFORE typed deserialization. A v1 record
+    // whose embedded `TransactionState` enum lost a variant would
+    // otherwise fail serde parsing and surface as `StateRecordCorrupt`,
+    // masking the real cause. Reject it explicitly here.
+    let probe: SchemaVersionProbe = match serde_json::from_slice(&body) {
+        Ok(probe) => probe,
+        Err(error) => {
+            return Err(RecoveryError::new(
+                RecoveryErrorKind::StateRecordCorrupt,
+                format!("cannot parse {}: {error}", path.display()),
+            ));
+        }
+    };
+    if probe.schema_version != TX_RECORD_SCHEMA_VERSION {
+        return Err(RecoveryError::new(
+            RecoveryErrorKind::UnsupportedTransactionSchema,
+            format!(
+                "transaction record {} has unsupported schema_version: found {}, supported {}; \
+                 recreate the transaction with the current tooling",
+                path.display(),
+                probe.schema_version,
+                TX_RECORD_SCHEMA_VERSION
+            ),
+        ));
+    }
     let record: TransactionRecord = match serde_json::from_slice(&body) {
         Ok(record) => record,
         Err(error) => {
@@ -63,17 +101,6 @@ pub fn load_record(path: &Path) -> Result<TransactionRecord, RecoveryError> {
             ));
         }
     };
-    if record.schema_version != TX_RECORD_SCHEMA_VERSION {
-        return Err(RecoveryError::new(
-            RecoveryErrorKind::UnsupportedTransactionSchema,
-            format!(
-                "transaction record {} has schema_version {}; expected {}",
-                path.display(),
-                record.schema_version,
-                TX_RECORD_SCHEMA_VERSION
-            ),
-        ));
-    }
     Ok(record)
 }
 
@@ -302,45 +329,57 @@ pub fn load_plan(path: &Path) -> Result<crate::model::recovery::RecoveryPlan, Re
     // envelope `{ invocation, kind, payload, ... }`; the actual plan
     // lives under `payload`. Accept both the bare `RecoveryPlan` and
     // the wrapped envelope so a freshly-redirected file just works.
-    let plan: crate::model::recovery::RecoveryPlan = match serde_json::from_slice(&body) {
-        Ok(plan) => plan,
-        Err(_) => match serde_json::from_slice::<serde_json::Value>(&body) {
-            Ok(value) => {
-                let payload = value
-                    .get("payload")
-                    .ok_or_else(|| RecoveryError::new(
-                        RecoveryErrorKind::StateRecordCorrupt,
-                        format!(
-                            "plan file {} is neither a bare RecoveryPlan nor the wrapped envelope (no `payload` field)",
-                            path.display()
-                        ),
-                    ))?;
-                serde_json::from_value(payload.clone()).map_err(|error| {
-                    RecoveryError::new(
-                        RecoveryErrorKind::StateRecordCorrupt,
-                        format!("cannot parse plan {} payload: {error}", path.display()),
-                    )
-                })?
-            }
+    let value: serde_json::Value = match serde_json::from_slice(&body) {
+        Ok(value) => value,
+        Err(error) => {
+            return Err(RecoveryError::new(
+                RecoveryErrorKind::StateRecordCorrupt,
+                format!("cannot parse plan {}: {error}", path.display()),
+            ));
+        }
+    };
+    let plan_value = match value.get("payload") {
+        Some(payload) => payload,
+        None => &value,
+    };
+    // Peek at schema_version BEFORE typed deserialization. A v1 plan
+    // whose `BootLayout` lost `bootloadu_detected` would otherwise be
+    // silently accepted (serde ignores unknown fields) and surface no
+    // diagnostic. Reject it explicitly here.
+    let probe: SchemaVersionProbe = match serde_json::from_value(plan_value.clone()) {
+        Ok(probe) => probe,
+        Err(error) => {
+            return Err(RecoveryError::new(
+                RecoveryErrorKind::StateRecordCorrupt,
+                format!(
+                    "cannot read plan {} schema_version: {error}",
+                    path.display()
+                ),
+            ));
+        }
+    };
+    if probe.schema_version != RECOVERY_PLAN_SCHEMA_VERSION {
+        return Err(RecoveryError::new(
+            RecoveryErrorKind::UnsupportedPlanSchema,
+            format!(
+                "plan {} has unsupported schema_version: found {}, supported {}; \
+                 regenerate the plan with the current tooling",
+                path.display(),
+                probe.schema_version,
+                RECOVERY_PLAN_SCHEMA_VERSION
+            ),
+        ));
+    }
+    let plan: crate::model::recovery::RecoveryPlan =
+        match serde_json::from_value(plan_value.clone()) {
+            Ok(plan) => plan,
             Err(error) => {
                 return Err(RecoveryError::new(
                     RecoveryErrorKind::StateRecordCorrupt,
                     format!("cannot parse plan {}: {error}", path.display()),
                 ));
             }
-        },
-    };
-    if plan.schema_version != crate::model::recovery::RECOVERY_PLAN_SCHEMA_VERSION {
-        return Err(RecoveryError::new(
-            RecoveryErrorKind::UnsupportedPlanSchema,
-            format!(
-                "plan {} has schema_version {}; expected {}",
-                path.display(),
-                plan.schema_version,
-                crate::model::recovery::RECOVERY_PLAN_SCHEMA_VERSION
-            ),
-        ));
-    }
+        };
     Ok(plan)
 }
 
@@ -459,9 +498,8 @@ fn libc_fsync(fd: std::os::raw::c_int) -> std::os::raw::c_int {
 mod tests {
     use super::*;
     use crate::model::recovery::{
-        BootFinalizationDecision, BootLayout, BtrfsFilesystemIdentity, BtrfsSubvolumeIdentity,
-        CompletedStep, DiskFacts, FstabRootDefinition, RecoveryPlan, TransactionPaths,
-        TransactionState,
+        BootLayout, BtrfsFilesystemIdentity, BtrfsSubvolumeIdentity, CompletedStep, DiskFacts,
+        FstabRootDefinition, RecoveryPlan, TransactionPaths, TransactionState,
     };
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -492,7 +530,6 @@ mod tests {
             },
             target_catos_identity: None,
             boot_layout: BootLayout::default(),
-            finalization: BootFinalizationDecision::NotRequired,
             backup_root_path: "/.catos-recovery/backups/p-1/root-before".into(),
             staging_root_path: "/.catos-recovery/staging/p-1/new-root".into(),
             fstab_root_definition: FstabRootDefinition {
@@ -577,7 +614,7 @@ mod tests {
         // Create parent dir then write truncated bytes directly.
         let parent = path.parent().unwrap();
         fs::create_dir_all(parent).unwrap();
-        fs::write(&path, b"{\"schema_version\":1,\"transaction_id\":\"x\"").unwrap();
+        fs::write(&path, b"{\"schema_version\":2,\"transaction_id\":\"x\"").unwrap();
         let err = load_record(&path).unwrap_err();
         assert_eq!(err.kind, RecoveryErrorKind::StateRecordCorrupt);
         let _ = fs::remove_dir_all(parent.parent().unwrap());

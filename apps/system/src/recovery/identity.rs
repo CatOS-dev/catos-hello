@@ -385,9 +385,7 @@ pub fn target_is_running_root(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::recovery::{
-        BootFinalizationDecision, BootLayout, CatosIdentity, FstabRootDefinition,
-    };
+    use crate::model::recovery::{BootLayout, CatosIdentity, FstabRootDefinition};
 
     fn sample_plan() -> RecoveryPlan {
         RecoveryPlan {
@@ -416,7 +414,6 @@ mod tests {
             },
             target_catos_identity: Some(CatosIdentity::default()),
             boot_layout: BootLayout::default(),
-            finalization: BootFinalizationDecision::NotRequired,
             backup_root_path: "/.catos-recovery/backups/tx/root-before".into(),
             staging_root_path: "/.catos-recovery/staging/tx/new-root".into(),
             fstab_root_definition: FstabRootDefinition {

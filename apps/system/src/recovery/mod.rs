@@ -18,9 +18,8 @@
 //!   external.rs   Trusted btrfs-progs invocations (subvolume show /
 //!                 snapshot / set-default). Bounded output, parameter
 //!                 arrays, no shell.
-//!   boot.rs       Boot / ESP layout detection. Safely refuses
-//!                 finalization when no stable CatOS bootloadu
-//!                 interface is available.
+//!   boot.rs       Boot / ESP layout detection. Purely descriptive;
+//!                 recovery performs no boot writes.
 //!   engine.rs     Transaction executor. Owns the per-FSID lock,
 //!                 drives the state machine, persists every transition,
 //!                 performs the renameat2(RENAME_EXCHANGE) root swap.

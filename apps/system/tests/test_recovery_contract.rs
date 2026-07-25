@@ -21,10 +21,9 @@
 
 use catos_system::model::recovery::TransactionState as S;
 use catos_system::model::recovery::{
-    BootFinalizationDecision, BootLayout, BtrfsFilesystemIdentity, BtrfsSubvolumeIdentity,
-    CatosIdentity, CompletedStep, DiskFacts, FstabRootDefinition, RecoveryErrorKind, RecoveryPlan,
-    TransactionPaths, TransactionRecord, TransactionState, RECOVERY_PLAN_SCHEMA_VERSION,
-    TX_RECORD_SCHEMA_VERSION,
+    BootLayout, BtrfsFilesystemIdentity, BtrfsSubvolumeIdentity, CatosIdentity, CompletedStep,
+    DiskFacts, FstabRootDefinition, RecoveryErrorKind, RecoveryPlan, TransactionPaths,
+    TransactionRecord, TransactionState, RECOVERY_PLAN_SCHEMA_VERSION, TX_RECORD_SCHEMA_VERSION,
 };
 use catos_system::recovery::identity::{
     drift_between, is_protected_recovery_path, safe_join, target_is_running_root,
@@ -63,7 +62,6 @@ fn sample_plan() -> RecoveryPlan {
         },
         target_catos_identity: Some(CatosIdentity::default()),
         boot_layout: BootLayout::default(),
-        finalization: BootFinalizationDecision::NotRequired,
         backup_root_path: "/.catos-recovery/backups/p-001/root-before".into(),
         staging_root_path: "/.catos-recovery/staging/p-001/new-root".into(),
         fstab_root_definition: FstabRootDefinition {
@@ -202,7 +200,7 @@ fn load_record_rejects_truncated_json() {
     let dir = scratch("truncated");
     let path = dir.join("tx/state.json");
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-    std::fs::write(&path, b"{\"schema_version\":1,\"transaction_").unwrap();
+    std::fs::write(&path, b"{\"schema_version\":2,\"transaction_").unwrap();
     let err = store::load_record(&path).unwrap_err();
     assert_eq!(err.kind, RecoveryErrorKind::StateRecordCorrupt);
     let _ = std::fs::remove_dir_all(&dir);
@@ -219,6 +217,42 @@ fn load_record_rejects_future_schema_version() {
     std::fs::write(&path, body).unwrap();
     let err = store::load_record(&path).unwrap_err();
     assert_eq!(err.kind, RecoveryErrorKind::UnsupportedTransactionSchema);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A v1 transaction record (the on-disk shape BEFORE the v2 schema
+/// bump) MUST surface as `UnsupportedTransactionSchema`, NOT as
+/// `StateRecordCorrupt`. This is the load-bearing reason schema
+/// versions were bumped to 2: a v1 record may reference a state
+/// variant that no longer exists in v2, and serde would otherwise
+/// fail to deserialize it and report a misleading "corrupt" error.
+#[test]
+fn load_record_rejects_v1_schema_as_unsupported_not_corrupt() {
+    let dir = scratch("v1-schema");
+    let path = dir.join("tx/state.json");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    // Hand-written v1 record: schema_version=1 and a state value that
+    // only existed in v1 (`boot_finalization_pending`).
+    std::fs::write(
+        &path,
+        b"{\"schema_version\":1,\"transaction_id\":\"x\",\"created_at_unix\":1,\
+          \"last_updated_unix\":1,\"plan\":null,\"state\":\"boot_finalization_pending\",\
+          \"completed_steps\":[]}",
+    )
+    .unwrap();
+    let err = store::load_record(&path).unwrap_err();
+    assert_eq!(
+        err.kind,
+        RecoveryErrorKind::UnsupportedTransactionSchema,
+        "v1 record must be rejected as unsupported, not corrupt; got message: {}",
+        err.message
+    );
+    assert!(err.message.contains("found 1"), "message: {}", err.message);
+    assert!(
+        err.message.contains("supported 2"),
+        "message: {}",
+        err.message
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -327,12 +361,10 @@ fn running_root_falls_back_to_subvol_path_when_subvolid_missing() {
 
 #[test]
 fn state_machine_completed_only_from_verifying() {
-    // The most load-bearing invariant: nothing skips boot finalization.
+    // The most load-bearing invariant: nothing skips the final
+    // verification step.
     assert!(S::Verifying.transition(Intent::Complete).is_ok());
     assert!(S::NewRootInstalled.transition(Intent::Complete).is_err());
-    assert!(S::BootFinalizationPending
-        .transition(Intent::Complete)
-        .is_err());
     assert!(S::Planned.transition(Intent::Complete).is_err());
 }
 
@@ -355,7 +387,6 @@ fn state_machine_revert_always_reaches_reverting_from_non_terminal() {
         S::ReplacementCreated,
         S::OldRootMoved,
         S::NewRootInstalled,
-        S::BootFinalizationPending,
         S::Verifying,
         S::FailedRecoverable,
     ] {
@@ -472,9 +503,9 @@ fn recovery_paths_layout_is_namespaced_under_top_level() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn plan_builder_emits_finalization_decision_matching_layout() {
+fn plan_builder_emits_no_boot_finalization_step() {
     use catos_system::recovery::build_recovery_plan;
-    let mut inputs = PlanInputs {
+    let inputs = PlanInputs {
         filesystem: BtrfsFilesystemIdentity {
             fsid: "fsid-A".into(),
             device_major_minor: "259:2".into(),
@@ -495,15 +526,14 @@ fn plan_builder_emits_finalization_decision_matching_layout() {
             evidence: vec![],
         },
         boot_layout: BootLayout {
-            boot_inside_root: true,
-            boot_separate_filesystem: false,
+            boot_inside_root: false,
+            boot_separate_filesystem: true,
             boot_separate_subvolume: false,
             esp_mount_point: None,
             esp_device: None,
             uki_paths: vec![],
             kernel_versions: vec![],
             has_initramfs: false,
-            bootloadu_detected: false,
         },
         catos_identity: None,
         fstab_root_definition: FstabRootDefinition {
@@ -515,19 +545,16 @@ fn plan_builder_emits_finalization_decision_matching_layout() {
         generated_on_host: None,
         confirmation_token_entropy: vec![1u8; 32],
     };
-    let plan = build_recovery_plan(inputs.clone()).unwrap();
-    assert_eq!(plan.finalization, BootFinalizationDecision::NotRequired);
-
-    // Mutate to require finalization; without bootloadu, the plan
-    // surfaces RequiredUnavailable.
-    inputs.boot_layout.boot_inside_root = false;
-    inputs.boot_layout.boot_separate_filesystem = true;
-    inputs.plan_id = "p-plan-2".into();
     let plan = build_recovery_plan(inputs).unwrap();
-    assert_eq!(
-        plan.finalization,
-        BootFinalizationDecision::RequiredUnavailable
-    );
+    // Recovery MUST NOT plan to call any bootloader tool. The predicted
+    // step list is part of the JSON contract; pinning it here locks out
+    // re-introducing any bootloader-step regardless of the boot layout
+    // (separate /boot, ESP, etc.).
+    assert!(!plan
+        .predicted_steps
+        .iter()
+        .any(|s| s.contains("finalize") || s.contains("bootloader")));
+    assert!(plan.predicted_steps.contains(&"verify_final".to_string()));
 }
 
 // ---------------------------------------------------------------------------

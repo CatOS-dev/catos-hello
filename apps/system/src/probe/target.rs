@@ -254,7 +254,6 @@ fn probe_target_tools(fs: &dyn FilesystemProbe, root: &SystemRoot) -> Vec<ToolPa
     [
         ("pacman", "usr/bin/pacman"),
         ("mkinitcpio", "usr/bin/mkinitcpio"),
-        ("bootloadu", "usr/bin/bootloadu"),
     ]
     .iter()
     .map(|(name, rel)| probe_target_tool(fs, root, name, rel))

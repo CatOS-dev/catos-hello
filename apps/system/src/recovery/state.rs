@@ -9,8 +9,7 @@
 //!
 //! The spec requires that arbitrary jumps be impossible. In particular:
 //!
-//! * You cannot reach `Completed` without passing through
-//!   `BootFinalizationPending` and `Verifying`.
+//! * You cannot reach `Completed` without passing through `Verifying`.
 //! * You cannot re-enter `Planned` from any state that has done a
 //!   persistent write.
 //! * You cannot leave a terminal state via any automatic transition.
@@ -52,8 +51,7 @@ impl TransactionState {
             TransactionState::BackupCreated => Some(TransactionState::ReplacementCreated),
             TransactionState::ReplacementCreated => Some(TransactionState::OldRootMoved),
             TransactionState::OldRootMoved => Some(TransactionState::NewRootInstalled),
-            TransactionState::NewRootInstalled => Some(TransactionState::BootFinalizationPending),
-            TransactionState::BootFinalizationPending => Some(TransactionState::Verifying),
+            TransactionState::NewRootInstalled => Some(TransactionState::Verifying),
             TransactionState::Verifying => Some(TransactionState::Completed),
             // Terminal / non-advancing states.
             TransactionState::Completed
@@ -79,7 +77,7 @@ impl TransactionState {
             },
             Intent::Complete => {
                 // Only `Verifying` reaches `Completed`. This prevents a
-                // crash landing in `BootFinalizationPending` from being
+                // crash landing in `NewRootInstalled` from being
                 // silently upgraded to `Completed` by a buggy resume.
                 if self == TransactionState::Verifying {
                     Ok(TransactionState::Completed)
@@ -128,8 +126,7 @@ impl TransactionState {
             TransactionState::BackupCreated => Some(AdvanceAction::CreateReplacement),
             TransactionState::ReplacementCreated => Some(AdvanceAction::SwapRoots),
             TransactionState::OldRootMoved => Some(AdvanceAction::VerifyNewRoot),
-            TransactionState::NewRootInstalled => Some(AdvanceAction::FinalizeBoot),
-            TransactionState::BootFinalizationPending => Some(AdvanceAction::VerifyFinal),
+            TransactionState::NewRootInstalled => Some(AdvanceAction::VerifyFinal),
             TransactionState::Verifying => Some(AdvanceAction::MarkCompleted),
             // Terminal / non-advancing states have no action.
             TransactionState::Completed
@@ -151,7 +148,6 @@ pub enum AdvanceAction {
     CreateReplacement,
     SwapRoots,
     VerifyNewRoot,
-    FinalizeBoot,
     VerifyFinal,
     MarkCompleted,
 }
@@ -233,7 +229,7 @@ pub fn reconcile_with_disk_facts(
         // the swap is partially complete in a way the engine can't
         // reason about safely. Surface as FailedManualIntervention so
         // the operator reviews before any further automatic action.
-        S::OldRootMoved | S::NewRootInstalled | S::BootFinalizationPending | S::Verifying => {
+        S::OldRootMoved | S::NewRootInstalled | S::Verifying => {
             if !backup_ok || !staging_ok {
                 S::FailedManualIntervention
             } else {
@@ -286,12 +282,6 @@ mod tests {
         );
         assert_eq!(
             S::NewRootInstalled.transition(Intent::Advance).unwrap(),
-            S::BootFinalizationPending
-        );
-        assert_eq!(
-            S::BootFinalizationPending
-                .transition(Intent::Advance)
-                .unwrap(),
             S::Verifying
         );
         assert_eq!(
@@ -314,7 +304,7 @@ mod tests {
     #[test]
     fn completed_can_only_be_reached_from_verifying() {
         // This is the single most important invariant: nothing skips
-        // boot finalization.
+        // the final verification step.
         let err = S::NewRootInstalled
             .transition(Intent::Complete)
             .unwrap_err();
@@ -332,7 +322,6 @@ mod tests {
             S::ReplacementCreated,
             S::OldRootMoved,
             S::NewRootInstalled,
-            S::BootFinalizationPending,
             S::Verifying,
             S::FailedRecoverable,
         ] {

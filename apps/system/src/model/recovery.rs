@@ -32,11 +32,22 @@ use crate::model::inspection::Warning;
 
 /// Recovery transaction record schema version. Bumped only on
 /// backward-incompatible changes to [`TransactionRecord`].
-pub const TX_RECORD_SCHEMA_VERSION: u32 = 1;
+///
+/// v2 drops the `BootFinalizationPending` variant from
+/// [`TransactionState`] (recovery no longer finalizes boot) and the
+/// `finalization` field from the embedded [`RecoveryPlan`]. A v1
+/// record is rejected as `UnsupportedTransactionSchema` rather than
+/// re-interpreted.
+pub const TX_RECORD_SCHEMA_VERSION: u32 = 2;
 
 /// Recovery plan schema version. Bumped only on backward-incompatible
 /// changes to [`RecoveryPlan`].
-pub const RECOVERY_PLAN_SCHEMA_VERSION: u32 = 1;
+///
+/// v2 drops the `finalization` field and the `bootloadu_detected`
+/// flag from [`BootLayout`]. A v1 plan is rejected as
+/// `UnsupportedPlanSchema` rather than silently loading with
+/// removed fields ignored.
+pub const RECOVERY_PLAN_SCHEMA_VERSION: u32 = 2;
 
 // ---------------------------------------------------------------------------
 // Identity of a btrfs subvolume / filesystem at a point in time
@@ -86,12 +97,11 @@ pub struct BtrfsSubvolumeIdentity {
 
 /// Layout of the boot resources of the system being recovered.
 ///
-/// This drives the boot-finalization step decision. The rule is: if
-/// `/boot` or the ESP is NOT part of the root subvolume being recovered,
-/// the post-recovery root may carry different kernels/modules and the
-/// boot resources MUST be reconciled before the transaction is marked
-/// complete. Phase 3 will refuse if no stable CatOS bootloadu interface
-/// is available rather than fake success.
+/// This is purely descriptive. Recovery performs no boot writes: it does
+/// not touch the ESP, regenerate UKIs, or invoke any bootloader tool.
+/// A future phase may consult these fields as part of a read-only
+/// boot-consistency check that refuses the first persistent write if
+/// external boot resources disagree with the new root.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct BootLayout {
     /// `/boot` is a directory inside the root subvolume (not a separate
@@ -117,28 +127,6 @@ pub struct BootLayout {
     pub kernel_versions: Vec<String>,
     /// Whether the snapshot appears to ship an initramfs.
     pub has_initramfs: bool,
-    /// Whether a CatOS bootloadu interface was positively detected at
-    /// plan time on the snapshot. If false, the apply step will refuse
-    /// to switch a layout that requires finalization.
-    pub bootloadu_detected: bool,
-}
-
-/// Decision the plan emits about boot finalization.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
-#[serde(rename_all = "snake_case")]
-pub enum BootFinalizationDecision {
-    /// The recovery does not need any boot work: `/boot` and ESP live
-    /// inside the root subvolume and will follow the snapshot exactly.
-    #[default]
-    NotRequired,
-    /// Boot finalization is required AND a stable CatOS bootloadu
-    /// interface was detected; the apply step will call it after the
-    /// root switch with a fixed trusted path and a parameter array.
-    RequiredAvailable,
-    /// Boot finalization is required BUT no stable CatOS bootloadu
-    /// interface was detected; the apply step will refuse the
-    /// transaction at plan time rather than silently ship a broken boot.
-    RequiredUnavailable,
 }
 
 // ---------------------------------------------------------------------------
@@ -172,8 +160,6 @@ pub struct RecoveryPlan {
 
     /// Boot layout of the source snapshot.
     pub boot_layout: BootLayout,
-    /// Finalization decision derived from `boot_layout`.
-    pub finalization: BootFinalizationDecision,
 
     /// Where the pre-recovery backup of the current root will live.
     /// Always under the btrfs top-level.
@@ -259,8 +245,6 @@ pub enum TransactionState {
     OldRootMoved,
     /// New `/@` re-verified post-swap (CatOS layout, fstab readable).
     NewRootInstalled,
-    /// Boot finalization done; awaiting final verify.
-    BootFinalizationPending,
     /// Final verification in progress.
     Verifying,
     /// All steps completed; transaction is terminal-success.
@@ -285,7 +269,6 @@ impl TransactionState {
             TransactionState::ReplacementCreated => "replacement_created",
             TransactionState::OldRootMoved => "old_root_moved",
             TransactionState::NewRootInstalled => "new_root_installed",
-            TransactionState::BootFinalizationPending => "boot_finalization_pending",
             TransactionState::Verifying => "verifying",
             TransactionState::Completed => "completed",
             TransactionState::Reverting => "reverting",
@@ -316,7 +299,6 @@ impl TransactionState {
                 | TransactionState::ReplacementCreated
                 | TransactionState::OldRootMoved
                 | TransactionState::NewRootInstalled
-                | TransactionState::BootFinalizationPending
                 | TransactionState::Verifying
                 | TransactionState::Completed
                 | TransactionState::Reverting
@@ -333,7 +315,6 @@ impl TransactionState {
             self,
             TransactionState::OldRootMoved
                 | TransactionState::NewRootInstalled
-                | TransactionState::BootFinalizationPending
                 | TransactionState::Verifying
                 | TransactionState::Completed
         )
@@ -344,7 +325,6 @@ impl TransactionState {
         matches!(
             self,
             TransactionState::NewRootInstalled
-                | TransactionState::BootFinalizationPending
                 | TransactionState::Verifying
                 | TransactionState::Completed
         )
@@ -361,7 +341,6 @@ impl TransactionState {
                 | TransactionState::ReplacementCreated
                 | TransactionState::OldRootMoved
                 | TransactionState::NewRootInstalled
-                | TransactionState::BootFinalizationPending
                 | TransactionState::Verifying
                 | TransactionState::FailedRecoverable
         )
@@ -553,11 +532,6 @@ pub enum RecoveryErrorKind {
     /// The root swap cannot be performed because of a name/path
     /// conflict.
     RootSwitchConflict,
-    /// Boot finalization is required but no stable CatOS bootloadu
-    /// interface was detected.
-    BootFinalizationUnavailable,
-    /// Boot finalization was attempted and the external tool failed.
-    BootFinalizationFailed,
     /// Mount cleanup left residual mounts.
     CleanupIncomplete,
     /// The transaction state file is corrupt, truncated, or
@@ -596,8 +570,6 @@ impl RecoveryErrorKind {
             RecoveryErrorKind::TransactionAlreadyActive => "transaction_already_active",
             RecoveryErrorKind::InsufficientSpace => "insufficient_space",
             RecoveryErrorKind::RootSwitchConflict => "root_switch_conflict",
-            RecoveryErrorKind::BootFinalizationUnavailable => "boot_finalization_unavailable",
-            RecoveryErrorKind::BootFinalizationFailed => "boot_finalization_failed",
             RecoveryErrorKind::CleanupIncomplete => "cleanup_incomplete",
             RecoveryErrorKind::StateRecordCorrupt => "state_record_corrupt",
             RecoveryErrorKind::UnsupportedTransactionSchema => "unsupported_transaction_schema",
@@ -652,7 +624,6 @@ pub struct RecoveryInspectReport {
     pub current_root: BtrfsSubvolumeIdentity,
     pub source_snapshot: BtrfsSubvolumeIdentity,
     pub boot_layout: BootLayout,
-    pub finalization: BootFinalizationDecision,
     pub target_catos_identity: Option<CatosIdentity>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<Warning>,
@@ -768,10 +739,6 @@ mod tests {
             (TransactionState::ReplacementCreated, "replacement_created"),
             (TransactionState::OldRootMoved, "old_root_moved"),
             (TransactionState::NewRootInstalled, "new_root_installed"),
-            (
-                TransactionState::BootFinalizationPending,
-                "boot_finalization_pending",
-            ),
             (TransactionState::Verifying, "verifying"),
             (TransactionState::Completed, "completed"),
             (TransactionState::Reverting, "reverting"),
@@ -799,7 +766,6 @@ mod tests {
             TransactionState::ReplacementCreated,
             TransactionState::OldRootMoved,
             TransactionState::NewRootInstalled,
-            TransactionState::BootFinalizationPending,
             TransactionState::Verifying,
             TransactionState::Completed,
             TransactionState::Reverting,
@@ -846,14 +812,6 @@ mod tests {
             (
                 RecoveryErrorKind::SnapshotNotReadonly,
                 "snapshot_not_readonly",
-            ),
-            (
-                RecoveryErrorKind::BootFinalizationUnavailable,
-                "boot_finalization_unavailable",
-            ),
-            (
-                RecoveryErrorKind::BootFinalizationFailed,
-                "boot_finalization_failed",
             ),
             (
                 RecoveryErrorKind::UnsupportedTransactionSchema,
@@ -936,7 +894,6 @@ mod tests {
                 pretty_name: None,
             }),
             boot_layout: BootLayout::default(),
-            finalization: BootFinalizationDecision::NotRequired,
             backup_root_path: "/.catos-recovery/backups/tx/root-before".into(),
             staging_root_path: "/.catos-recovery/staging/tx/new-root".into(),
             fstab_root_definition: FstabRootDefinition {
