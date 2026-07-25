@@ -1,7 +1,11 @@
 # catos-system
 
-Read-only system backend for CatOS. A single static musl binary installed at
-`/usr/lib/catos/catos-system`, exposed through three multicall symlinks:
+System backend for CatOS. Phase 1 is read-only environment + target
+inspection, phase 2 is read-only storage discovery + safe RO target
+mount, and phase 3 is the explicitly-authorized, transactional,
+crash-resumable Btrfs root-snapshot recovery. The backend ships as a
+single static musl binary installed at `/usr/lib/catos/catos-system`,
+exposed through three multicall symlinks:
 
 ```
 /usr/bin/catos-update   -> ../lib/catos/catos-system
@@ -12,6 +16,18 @@ Read-only system backend for CatOS. A single static musl binary installed at
 All three symlinks point to the same inode. There is exactly one binary
 target. `argv[0]` is honoured only for the JSON `invocation` field and for
 help text; it never gates a permission.
+
+## Read-only vs. write scope
+
+| Phase | Writes to the target device? |
+|-------|------------------------------|
+| Phase 1 — environment + target inspection | **Never.** Pure reads of the running system and the target root. |
+| Phase 2 — storage discovery + safe target mount | **Never.** Mounts are read-only with filesystem-specific safety options (ext4 `noload`, xfs `norecovery`, btrfs `rescue=nologreplay`, ...) so journal replay and superblock updates are suppressed. Pre-existing mounts are never unmounted. |
+| Phase 3 — Btrfs root-snapshot recovery | **Yes, only on the operator's explicit authorization.** `recovery apply`, `resume`, and `revert` mount the target's btrfs top-level read-write inside a private mount namespace, perform a single `renameat2(RENAME_EXCHANGE)` root swap, and persist transaction state after every state transition. |
+
+Phase 3 is the only place in `catos-system` that writes to the target
+device. The write path is bounded, transactional, and never touches the
+ESP, the bootloader, `/boot`, initramfs images, or firmware entries.
 
 ## Scope (phase 1 + phase 2 + phase 3)
 

@@ -3,7 +3,7 @@ name = "catos-system"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.74"
-description = "CatOS system backend for read-only discovery, target inspection, and recovery mount planning"
+description = "CatOS system backend: phase-1 read-only environment + target inspection, phase-2 read-only storage discovery + safe RO target mount, phase-3 explicitly-authorized transactional Btrfs root-snapshot recovery"
 license = "GPL-3.0-or-later"
 publish = false
 # Single binary target. The library is exposed only so unit tests can drive

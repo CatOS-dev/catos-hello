@@ -605,10 +605,20 @@ EXIT CODES:
     {ser}  JSON serialisation failed
 
 NOTES:
-    * This is a read-only tool. It never writes to the target root.
+    * Phases 1 and 2 are read-only with respect to the target device:
+      environment/capabilities/inspection probes never mount, and
+      'target mount' uses read-only filesystem-specific safety options
+      (ext4 noload, xfs norecovery, btrfs rescue=nologreplay, ...) so
+      journal replay and superblock updates are suppressed.
+    * Phase 3 (recovery apply/resume/revert) is the ONLY place that
+      writes to the target device. The writes are bounded to the
+      btrfs top-level, transactional, crash-resumable, and require
+      --plan-id + --confirm (--transaction + --confirm for revert).
+      Phase 3 never touches the ESP, the bootloader, /boot,
+      initramfs images, or firmware entries.
     * 'target mount' enters a private mount namespace (CLONE_NEWNS) and
-      flips / to MS_REC|MS_PRIVATE so its mounts do NOT propagate to the
-      host. Pre-existing mounts are never unmounted.
+      flips / to MS_REC|MS_PRIVATE so its mounts do NOT propagate to
+      the host. Pre-existing mounts are never unmounted.
     * Phase 2 mounts are read-only with filesystem-specific safety options
       (ext4 noload, xfs norecovery, btrfs rescue=nologreplay, etc.) so journal replay
       and superblock updates are suppressed.
