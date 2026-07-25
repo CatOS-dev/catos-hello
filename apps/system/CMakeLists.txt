@@ -118,6 +118,9 @@ if(BUILD_TESTS)
     option(CATOS_SYSTEM_STORAGE_SMOKE
            "Enable real ext4+ESP QEMU recovery test (opt-in)"
            OFF)
+    option(CATOS_SYSTEM_RECOVERY_SMOKE
+           "Enable real btrfs recovery crash/resume QEMU test (opt-in; requires a musl binary built with --features recovery_fault_injection)"
+           OFF)
     if(CATOS_SYSTEM_INITRAMFS_SMOKE)
         # Two test variants:
         #   * bare:         no initramfs markers; verifies binary starts
@@ -163,6 +166,43 @@ if(BUILD_TESTS)
             TIMEOUT 240
             SKIP_RETURN_CODE 77
             LABELS "rust;integration;qemu;storage"
+        )
+    endif()
+    if(CATOS_SYSTEM_RECOVERY_SMOKE)
+        # The recovery crash/resume test needs a second musl binary
+        # built with the recovery_fault_injection cargo feature. We
+        # route this build into a separate cargo target dir so the
+        # default release binary stays unfeatured and the two
+        # variants do not fight over the same target dir.
+        set(CATOS_SYSTEM_FAULT_CARGO_TARGET_DIR "${CMAKE_CURRENT_BINARY_DIR}/cargo-target-fault")
+        set(CATOS_SYSTEM_FAULT_BIN
+            "${CATOS_SYSTEM_FAULT_CARGO_TARGET_DIR}/${CATOS_SYSTEM_TARGET}/release/catos-system")
+        add_custom_command(
+            OUTPUT "${CATOS_SYSTEM_FAULT_BIN}"
+            COMMAND ${CMAKE_COMMAND} -E env
+                    "CARGO_TARGET_DIR=${CATOS_SYSTEM_FAULT_CARGO_TARGET_DIR}"
+                    "${CARGO_CMD}" build --release --locked --frozen
+                    --target ${CATOS_SYSTEM_TARGET}
+                    --features recovery_fault_injection
+            WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+            DEPENDS ${CATOS_SYSTEM_SOURCES} ${CATOS_SYSTEM_MANIFESTS}
+            COMMENT "Building catos-system with recovery_fault_injection (Rust ${CATOS_SYSTEM_TARGET}, release)"
+            VERBATIM
+        )
+        add_custom_target(catos-system-fault-bin DEPENDS "${CATOS_SYSTEM_FAULT_BIN}")
+
+        add_test(
+            NAME catos-system-recovery-qemu-smoke
+            COMMAND "${BASH_CMD}"
+                    "${CMAKE_CURRENT_SOURCE_DIR}/scripts/recovery-qemu-smoke.sh"
+                    --bin "${CATOS_SYSTEM_BIN}"
+                    --test-bin "${CATOS_SYSTEM_FAULT_BIN}"
+        )
+        set_tests_properties(catos-system-recovery-qemu-smoke PROPERTIES
+            TIMEOUT 600
+            SKIP_RETURN_CODE 77
+            LABELS "rust;integration;qemu;recovery"
+            DEPENDS catos-system-fault-bin
         )
     endif()
 endif()

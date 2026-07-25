@@ -27,6 +27,14 @@ serde_json = { version = "1", default-features = false, features = ["std"] }
 # No extra dev-deps: tests use only std + serde_json + tempfile-free helpers
 # built on std::env::temp_dir.
 
+# Test-only fault injection for the recovery engine. Enables the
+# CATOS_RECOVERY_FAULT_AT hook so the QEMU crash-resume test can
+# simulate a SIGKILL after every persistent step. NEVER enable in
+# release builds.
+[features]
+default = []
+recovery_fault_injection = []
+
 # Release profile tuned for size. Comparison recorded in apps/system/README.md:
 #   opt-level = "z" produced a smaller stripped static binary than "s" on this
 #   toolchain, so "z" is the default.
