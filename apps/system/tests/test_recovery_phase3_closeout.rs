@@ -773,3 +773,161 @@ fn secure_dir_remove_session_dir_refuses_symlink() {
     assert_eq!(err.kind, RecoveryErrorKind::SessionDirectoryCleanupFailed);
     let _ = std::fs::remove_dir_all(&parent);
 }
+
+// ===========================================================================
+// F. Cleanup-summary persistence engine API contract
+// ===========================================================================
+//
+// Pins the engine API contract that drove the cleanup-persistence bug
+// and its fix.
+//
+// `Engine::attach_cleanup(summary)` is the ONLY public API that persists
+// a new `last_cleanup` value to the durable transaction record. Mutating
+// `engine.record_mut().last_cleanup = Some(...)` updates the in-memory
+// record only — it does NOT touch the on-disk state file. The pre-fix
+// phase-3 orchestrator relied on exactly that non-persistent mutation
+// to "restamp" the record after the rw mount session was torn down,
+// leaving the on-disk record stuck on the pre-teardown placeholder.
+// The fix removes that pattern from the orchestrator and adds a
+// remount-based `attach_cleanup(real)` call so the on-disk record
+// matches the renderer output.
+//
+// This test pins the engine API contract so a future change that
+// accidentally makes `record_mut` persistent (which would silently
+// mask orchestrator bugs by making everything persistent) OR removes
+// `attach_cleanup`'s persistence (which would silently re-introduce
+// the bug) is caught immediately. The orchestrator-level regression
+// coverage lives in the QEMU recovery smoke test, which observes the
+// on-disk record via `status` after a real apply.
+
+#[test]
+fn record_mut_last_cleanup_is_inmemory_only_and_attach_cleanup_persists() {
+    use catos_system::model::recovery::{
+        BtrfsFilesystemIdentity, BtrfsSubvolumeIdentity, FstabRootDefinition, RecoveryPlan,
+        RECOVERY_PLAN_SCHEMA_VERSION,
+    };
+    use catos_system::recovery::engine::{Engine, EngineOptions};
+    use catos_system::recovery::store;
+    use std::path::PathBuf;
+
+    let top = std::env::temp_dir().join(format!(
+        "catos-record-mut-contract-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos(),
+    ));
+    std::fs::create_dir_all(&top).unwrap();
+
+    let plan = RecoveryPlan {
+        schema_version: RECOVERY_PLAN_SCHEMA_VERSION,
+        plan_id: "tx-0000000000000000000000000000000a".into(),
+        generated_at_unix: 1,
+        generated_on_host: None,
+        filesystem: BtrfsFilesystemIdentity {
+            fsid: "fsid-record-mut-contract".into(),
+            device_major_minor: "259:0".into(),
+            label: None,
+        },
+        current_root: BtrfsSubvolumeIdentity {
+            path: "/@".into(),
+            subvolume_id: 256,
+            generation: 10,
+            uuid: None,
+            parent_uuid: None,
+            read_only: false,
+            evidence: vec![],
+        },
+        source_snapshot: BtrfsSubvolumeIdentity {
+            path: "/@snapshots/1".into(),
+            subvolume_id: 300,
+            generation: 8,
+            uuid: None,
+            parent_uuid: None,
+            read_only: true,
+            evidence: vec![],
+        },
+        target_catos_identity: None,
+        boot_layout: Default::default(),
+        boot_consistency: catos_system::recovery::boot::evaluate_readonly_consistency(
+            &Default::default(),
+        ),
+        backup_root_path:
+            "/.catos-recovery/backups/tx-0000000000000000000000000000000a/root-before".into(),
+        staging_root_path: "/.catos-recovery/staging/tx-0000000000000000000000000000000a/new-root"
+            .into(),
+        fstab_root_definition: FstabRootDefinition {
+            source: "/dev/null".into(),
+            fstype: "btrfs".into(),
+            options: vec!["subvol=/@".into()],
+        },
+        predicted_steps: vec![],
+        refusal_conditions: vec![],
+        risks_and_warnings: vec![],
+        nonce: "00".repeat(32),
+        plan_digest: String::new(),
+        confirmation_token: String::new(),
+        evidence: vec![],
+    };
+    let mut plan = plan;
+    plan.plan_digest = catos_system::recovery::plan::effective_plan_digest(&plan).unwrap();
+    plan.confirmation_token = catos_system::recovery::plan::build_confirmation_token(
+        &plan.plan_id,
+        &plan.plan_digest,
+        &plan.nonce,
+    );
+
+    let mut engine = Engine::begin(
+        EngineOptions {
+            top_level_mount: top.clone(),
+            device_path: PathBuf::from("/dev/null"),
+            validated_filesystem: plan.filesystem.clone(),
+        },
+        plan,
+    )
+    .expect("Engine::begin must persist the initial record");
+
+    let placeholder = CleanupSummary {
+        unmounted: Vec::new(),
+        residual: Vec::new(),
+        all_clean: true,
+    };
+    engine
+        .attach_cleanup(placeholder.clone())
+        .expect("attach_cleanup must persist");
+
+    let real = CleanupSummary {
+        unmounted: vec!["/run/catos-system/sessions/recovery-rw-contract".into()],
+        residual: Vec::new(),
+        all_clean: true,
+    };
+    // Mimic the pre-fix orchestrator's post-teardown restamping.
+    engine.record_mut().last_cleanup = Some(real.clone());
+
+    // The in-memory record carries the restamped value.
+    assert_eq!(
+        engine.record().last_cleanup,
+        Some(real.clone()),
+        "in-memory record must reflect record_mut updates"
+    );
+
+    // The on-disk record does NOT — record_mut is non-persistent by
+    // contract. attach_cleanup is the only persistent path.
+    let state_path =
+        top.join(".catos-recovery/transactions/tx-0000000000000000000000000000000a/state.json");
+    let on_disk = store::load_record(&state_path).expect("on-disk record must load");
+    assert_eq!(
+        on_disk.last_cleanup,
+        Some(placeholder),
+        "on-disk record must carry the last attach_cleanup value, not a record_mut mutation"
+    );
+    assert_ne!(
+        on_disk.last_cleanup,
+        Some(real),
+        "record_mut must NOT persist; if this fails, the engine API contract changed and every \
+         orchestrator call site must be re-audited"
+    );
+
+    let _ = std::fs::remove_dir_all(&top);
+}

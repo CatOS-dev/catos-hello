@@ -355,6 +355,7 @@ fn run_apply(
     let mut mount_session = RecoveryRwSession::mount(&device)?;
     let top_level_mount = mount_session.top_level_mount().to_path_buf();
     let rw_target = validate_mounted_filesystem(&top_level_mount, &device)?;
+    let validated_filesystem = rw_target.filesystem.clone();
 
     let drive_outcome = (|| {
         let mut engine = Engine::begin(
@@ -369,16 +370,12 @@ fn run_apply(
         Ok::<(Engine, TransactionState), RecoveryError>((engine, final_state))
     })();
 
-    // attach_cleanup MUST run while the rw mount session is still
-    // alive: the transaction record lives on the btrfs top-level,
-    // reachable only through the session mount. We persist a
-    // placeholder "all_clean" summary before tearing down, then
-    // re-stamp the in-memory record (which the renderer will emit
-    // via the Phase3Outcome) with the REAL cleanup summary computed
-    // after teardown. The on-disk record carries the placeholder;
-    // the process output carries the truth. This split is forced
-    // by the physical constraint that the record is unreachable
-    // after umount.
+    // Tear down the rw mount FIRST. The returned `CleanupSummary` is
+    // the authoritative teardown report — it records whether umount2
+    // succeeded, whether MNT_DETACH fallback was needed, and whether
+    // the session directory was removed. We persist it to the
+    // transaction record AFTER the teardown via a brief remount, so
+    // later `status` reads the truth instead of a pre-teardown guess.
     let (mut engine, final_state) = match drive_outcome {
         Ok(pair) => pair,
         Err(mut error) => {
@@ -387,15 +384,22 @@ fn run_apply(
             return Err(error);
         }
     };
-    let placeholder = CleanupSummary {
-        unmounted: Vec::new(),
-        residual: Vec::new(),
-        all_clean: true,
-    };
-    engine.attach_cleanup(placeholder)?;
     let real_cleanup = mount_session.cleanup();
+    // Keep the in-memory record consistent with the renderer output.
     engine.record_mut().last_cleanup = Some(real_cleanup.clone());
-    Ok((engine.record().clone(), final_state, real_cleanup))
+    let transaction_id = engine.record().transaction_id.clone();
+    let returned_record = engine.record().clone();
+    drop(engine);
+    drop(mount_session);
+
+    persist_real_cleanup_after_teardown(
+        &device,
+        &transaction_id,
+        &validated_filesystem,
+        real_cleanup.clone(),
+    )?;
+
+    Ok((returned_record, final_state, real_cleanup))
 }
 
 fn engine_attach_cleanup_into_error(error: &mut RecoveryError, cleanup: CleanupSummary) {
@@ -408,6 +412,54 @@ fn engine_attach_cleanup_into_error(error: &mut RecoveryError, cleanup: CleanupS
         combined.push_str(&suffix);
         error.message = combined.into_boxed_str();
     }
+}
+
+/// Persist the real post-teardown `CleanupSummary` into the on-disk
+/// transaction record so subsequent `status` reads the truth.
+///
+/// The transaction record lives on the btrfs top-level, which is
+/// unreachable after `RecoveryRwSession::cleanup()` umounts it. To
+/// reach the record again we mount a fresh read-write session,
+/// re-acquire the per-FSID transaction lock via `Engine::load_for_write`,
+/// and call `Engine::attach_cleanup(real)`, which atomic-writes +
+/// fsyncs the updated record. The brief session is then torn down
+/// with the same `RecoveryRwSession::cleanup()` discipline.
+///
+/// Failure semantics: if this persistence step fails, the caller
+/// already holds the in-memory truth (the renderer emits it via the
+/// returned `Phase3Outcome`), and the recovery outcome itself
+/// (Completed / Reverted state plus the on-disk root swap) was
+/// persisted long before this function ran. We therefore propagate
+/// the error so the operator sees a non-success exit code and can
+/// investigate the audit gap, but the durable recovery work is
+/// already done.
+fn persist_real_cleanup_after_teardown(
+    device: &Path,
+    transaction_id: &str,
+    validated_filesystem: &BtrfsFilesystemIdentity,
+    real_cleanup: CleanupSummary,
+) -> Result<(), RecoveryError> {
+    let mut session = RecoveryRwSession::mount(device)?;
+    let top_level_mount = session.top_level_mount().to_path_buf();
+    let persist_outcome = (|| {
+        let mut engine = Engine::load_for_write(
+            EngineOptions {
+                top_level_mount: top_level_mount.clone(),
+                device_path: device.to_path_buf(),
+                validated_filesystem: validated_filesystem.clone(),
+            },
+            transaction_id,
+        )?;
+        engine.attach_cleanup(real_cleanup)
+    })();
+    let session_cleanup = session.cleanup();
+    if !session_cleanup.all_clean {
+        eprintln!(
+            "catos-system: warning: cleanup-persistence mount session left residual mounts: {:?}",
+            session_cleanup.residual
+        );
+    }
+    persist_outcome
 }
 
 // ---------------------------------------------------------------------------
@@ -577,12 +629,13 @@ fn run_resume(
         engine_attach_cleanup_into_error(&mut error, cleanup);
         return Err(error);
     }
+    let validated_filesystem = target.filesystem.clone();
     let drive_outcome = (|| {
         let mut engine = Engine::load_for_write(
             EngineOptions {
                 top_level_mount: top_level_mount.clone(),
                 device_path: device.clone(),
-                validated_filesystem: target.filesystem.clone(),
+                validated_filesystem: validated_filesystem.clone(),
             },
             transaction_id,
         )?;
@@ -590,9 +643,8 @@ fn run_resume(
         Ok::<(Engine, TransactionState), RecoveryError>((engine, final_state))
     })();
 
-    // attach_cleanup persists a placeholder; the real cleanup
-    // summary is restamped onto the in-memory record after
-    // teardown. See run_apply for the rationale.
+    // See run_apply: tear down first, persist the real summary via a
+    // brief remount so later `status` reads the truth.
     let (mut engine, final_state) = match drive_outcome {
         Ok(pair) => pair,
         Err(mut error) => {
@@ -601,15 +653,21 @@ fn run_resume(
             return Err(error);
         }
     };
-    let placeholder = CleanupSummary {
-        unmounted: Vec::new(),
-        residual: Vec::new(),
-        all_clean: true,
-    };
-    engine.attach_cleanup(placeholder)?;
     let real_cleanup = mount_session.cleanup();
     engine.record_mut().last_cleanup = Some(real_cleanup.clone());
-    Ok((engine.record().clone(), final_state, real_cleanup))
+    let transaction_id = engine.record().transaction_id.clone();
+    let returned_record = engine.record().clone();
+    drop(engine);
+    drop(mount_session);
+
+    persist_real_cleanup_after_teardown(
+        &device,
+        &transaction_id,
+        &validated_filesystem,
+        real_cleanup.clone(),
+    )?;
+
+    Ok((returned_record, final_state, real_cleanup))
 }
 
 // ---------------------------------------------------------------------------
@@ -650,12 +708,13 @@ fn run_revert(
         engine_attach_cleanup_into_error(&mut error, cleanup);
         return Err(error);
     }
+    let validated_filesystem = target.filesystem.clone();
     let revert_outcome = (|| {
         let mut engine = Engine::load_for_revert(
             EngineOptions {
                 top_level_mount: top_level_mount.clone(),
                 device_path: device.clone(),
-                validated_filesystem: target.filesystem.clone(),
+                validated_filesystem: validated_filesystem.clone(),
             },
             transaction_id,
             confirm,
@@ -664,9 +723,8 @@ fn run_revert(
         Ok::<(Engine, TransactionState), RecoveryError>((engine, final_state))
     })();
 
-    // attach_cleanup persists a placeholder; the real cleanup
-    // summary is restamped onto the in-memory record after
-    // teardown. See run_apply for the rationale.
+    // See run_apply: tear down first, persist the real summary via a
+    // brief remount so later `status` reads the truth.
     let (mut engine, final_state) = match revert_outcome {
         Ok(pair) => pair,
         Err(mut error) => {
@@ -675,15 +733,21 @@ fn run_revert(
             return Err(error);
         }
     };
-    let placeholder = CleanupSummary {
-        unmounted: Vec::new(),
-        residual: Vec::new(),
-        all_clean: true,
-    };
-    engine.attach_cleanup(placeholder)?;
     let real_cleanup = mount_session.cleanup();
     engine.record_mut().last_cleanup = Some(real_cleanup.clone());
-    Ok((engine.record().clone(), final_state, real_cleanup))
+    let transaction_id = engine.record().transaction_id.clone();
+    let returned_record = engine.record().clone();
+    drop(engine);
+    drop(mount_session);
+
+    persist_real_cleanup_after_teardown(
+        &device,
+        &transaction_id,
+        &validated_filesystem,
+        real_cleanup.clone(),
+    )?;
+
+    Ok((returned_record, final_state, real_cleanup))
 }
 
 // ---------------------------------------------------------------------------
