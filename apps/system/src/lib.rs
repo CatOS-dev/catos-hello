@@ -15,6 +15,7 @@
 //! ```
 
 pub mod cli;
+pub mod doctor;
 pub mod entry;
 pub mod error;
 pub mod model;
