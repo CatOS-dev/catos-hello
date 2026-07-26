@@ -183,8 +183,9 @@ fn missing_tool_short_circuits_to_tool_missing() {
 }
 
 #[test]
-fn normal_repair_success_path_produces_repaired_outcome() {
-    // Each tool's "exit 0" must mean Clean.
+fn normal_repair_success_path_reports_only_supported_certainty() {
+    // Read/check tools may report Clean on exit 0; modify-mode
+    // xfs_repair cannot distinguish a clean filesystem from one it fixed.
     let runner = RecordedRunner::new().queue_raw(0, b"".to_vec(), b"".to_vec());
     assert_eq!(
         e2fsck_flow(&runner, "/dev/sda1").unwrap().outcome,
@@ -203,7 +204,7 @@ fn normal_repair_success_path_produces_repaired_outcome() {
     let runner = RecordedRunner::new().queue_raw(0, b"".to_vec(), b"".to_vec());
     assert_eq!(
         xfs_flow(&runner, "/dev/sda1").unwrap().outcome,
-        FlowOutcome::Clean
+        FlowOutcome::Repaired
     );
     let runner = RecordedRunner::new().queue_raw(0, b"".to_vec(), b"".to_vec());
     assert_eq!(
@@ -388,9 +389,9 @@ fn unknown_filesystem_is_refused_as_unsupported_by_routing() {
 
 #[test]
 fn multiple_equally_plausible_candidates_are_refused() {
-    // Spec: "多个候选时拒绝". Without an explicit device, two
-    // equally-plausible root candidates MUST trigger
-    // AmbiguousTarget. We never guess.
+    // Raw block-device discovery carries no CatOS identity evidence.
+    // It must refuse without exposing ordinary data filesystems as
+    // repair candidates.
     let devices = vec![
         make_device("sda1", "/dev/sda1", "ext4"),
         make_device("sdb1", "/dev/sdb1", "ext4"),
@@ -399,9 +400,7 @@ fn multiple_equally_plausible_candidates_are_refused() {
     let decision = evaluate_safety(&devices, &selection, None);
     match decision.verdict {
         SafetyVerdict::AmbiguousTarget { candidates } => {
-            assert_eq!(candidates.len(), 2);
-            assert!(candidates.contains(&"/dev/sda1".to_string()));
-            assert!(candidates.contains(&"/dev/sdb1".to_string()));
+            assert!(candidates.is_empty());
         }
         other => panic!("expected AmbiguousTarget, got {other:?}"),
     }
