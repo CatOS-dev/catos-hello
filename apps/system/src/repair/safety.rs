@@ -123,65 +123,16 @@ pub fn evaluate_safety(
         return decide_explicit(devices, explicit, running_root_device, evidence);
     }
 
-    // No explicit selection: find a unique, plausible root candidate.
-    let root_candidates: Vec<&BlockDevice> = devices
-        .iter()
-        .filter(|device| is_plausible_root_candidate(device))
-        .collect();
-
     evidence.push(Evidence::new(
         "AUTO_DISCOVERY",
         "repair::safety",
-        format!(
-            "discovered {} plausible root candidate(s)",
-            root_candidates.len()
-        ),
+        "raw block-device discovery is insufficient for automatic repair; a verified CatOS root must be selected by the orchestrator",
     ));
-
-    match root_candidates.len() {
-        0 => {
-            evidence.push(Evidence::new(
-                "NO_ROOT_CANDIDATE",
-                "repair::safety",
-                "no device looks like a CatOS root; operator must specify --device".to_string(),
-            ));
-            SafetyDecision {
-                verdict: SafetyVerdict::AmbiguousTarget {
-                    candidates: Vec::new(),
-                },
-                evidence,
-            }
-        }
-        1 => {
-            let device = root_candidates[0];
-            refuse_unsafe_running_root_or_mounted(device, running_root_device, evidence)
-        }
-        _ => {
-            for candidate in &root_candidates {
-                evidence.push(Evidence::new(
-                    "AMBIGUOUS_CANDIDATE",
-                    "repair::safety",
-                    format!(
-                        "candidate {} fstype={:?}",
-                        candidate.name,
-                        candidate.filesystem.as_deref().unwrap_or("?")
-                    ),
-                ));
-            }
-            SafetyDecision {
-                verdict: SafetyVerdict::AmbiguousTarget {
-                    candidates: root_candidates
-                        .iter()
-                        .filter_map(|d| {
-                            d.dev_path
-                                .as_ref()
-                                .map(|p| p.to_string_lossy().into_owned())
-                        })
-                        .collect(),
-                },
-                evidence,
-            }
-        }
+    SafetyDecision {
+        verdict: SafetyVerdict::AmbiguousTarget {
+            candidates: Vec::new(),
+        },
+        evidence,
     }
 }
 
@@ -555,34 +506,22 @@ mod tests {
     }
 
     #[test]
-    fn auto_discovery_picks_unique_candidate() {
+    fn raw_auto_discovery_never_selects_a_filesystem() {
         let devices = vec![ext4_root("sda1", "/dev/sda1")];
         let selection = RepairTargetSelection::default();
         let decision = evaluate_safety(&devices, &selection, None);
-        match decision.verdict {
-            SafetyVerdict::Proceed { device, .. } => {
-                assert_eq!(device, PathBuf::from("/dev/sda1"));
-            }
-            other => panic!("expected Proceed, got {other:?}"),
-        }
+        assert!(matches!(decision.verdict, SafetyVerdict::AmbiguousTarget { candidates } if candidates.is_empty()));
     }
 
     #[test]
-    fn auto_discovery_refuses_multiple_candidates() {
+    fn raw_auto_discovery_does_not_leak_unverified_candidates() {
         let devices = vec![
             ext4_root("sda1", "/dev/sda1"),
             ext4_root("sdb1", "/dev/sdb1"),
         ];
         let selection = RepairTargetSelection::default();
         let decision = evaluate_safety(&devices, &selection, None);
-        match decision.verdict {
-            SafetyVerdict::AmbiguousTarget { candidates } => {
-                assert_eq!(candidates.len(), 2);
-                assert!(candidates.contains(&"/dev/sda1".to_string()));
-                assert!(candidates.contains(&"/dev/sdb1".to_string()));
-            }
-            other => panic!("expected AmbiguousTarget, got {other:?}"),
-        }
+        assert!(matches!(decision.verdict, SafetyVerdict::AmbiguousTarget { candidates } if candidates.is_empty()));
     }
 
     #[test]
