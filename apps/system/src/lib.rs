@@ -29,6 +29,7 @@ pub mod process;
 pub mod recovery;
 pub mod repair;
 pub mod system_root;
+pub mod update;
 
 pub use error::{exit_code, Error, FsError};
 

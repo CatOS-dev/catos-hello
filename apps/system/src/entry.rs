@@ -703,22 +703,14 @@ fn validate_repair_device_arg(path: &std::path::Path) -> bool {
     true
 }
 
-/// `catos-update` routing. The entry point is intentionally recognised
-/// but defines no commands in this stage. It MUST NOT inherit any
-/// `catos-system` subcommand (no `catos-update inspect`, etc.). Future
-/// stages will define the update workflow.
+/// `catos-update` routing. Delegates to the dedicated `update` module
+/// which owns the privilege-elevation + `checkupdates` + `pacman -Syu`
+/// workflow. The module handles `-c/--check`, `-l/--list`, `-d/--devel`;
+/// any other token is rejected before any external command runs. This
+/// MUST NOT inherit any `catos-system` subcommand (no `catos-update
+/// inspect`, etc.).
 fn run_update(argv: &[String]) -> i32 {
-    if argv.is_empty() {
-        eprintln!(
-            "catos-update: no commands defined in this stage; this entry point is reserved for future update workflows"
-        );
-        return exit_code::ARG_ERROR;
-    }
-    let other = argv.first().map(String::as_str).unwrap_or("");
-    eprintln!(
-        "catos-update: argument error: unknown command {other:?}; no update commands are defined in this stage"
-    );
-    exit_code::ARG_ERROR
+    crate::update::run(argv)
 }
 
 fn print_recovery_command_help(command: &str) -> i32 {
@@ -777,9 +769,7 @@ fn print_help(invocation: Invocation) -> i32 {
             );
         }
         Invocation::CatosUpdate => {
-            print!(
-                "catos-update {version} - CatOS update entry point (reserved)\n\nUSAGE:\n    catos-update --help\n    catos-update --version\n\nOPTIONS:\n    -h, --help    Show this help message and exit.\n    -V, --version Print program version and exit.\n\nNOTES:\n    * This entry point is intentionally recognised but defines no\n      update commands in this stage. It does NOT inherit any\n      `catos-system` subcommand (no `catos-update inspect`, etc.).\n    * Future stages will define the update workflow.\n",
-            );
+            crate::update::print_help();
         }
         Invocation::CatosRecovery => {
             print!(
