@@ -210,6 +210,10 @@ fn auto_select_catos_root(
         .filter(|root| {
             root.confidence == RootCandidateConfidence::High
                 && root.is_catos.status == DetectionStatus::Detected
+                && root
+                    .evidence
+                    .iter()
+                    .any(|evidence| evidence.code == "FSTAB_ROOT_MATCH")
         })
         .filter_map(|root| PathBuf::from(&root.source).is_absolute().then(|| &root.source))
         .filter_map(|source| {
