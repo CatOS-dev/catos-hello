@@ -405,20 +405,34 @@ fn repair_without_args_rejects_and_lists_three_domains() {
 }
 
 #[test]
-fn repair_domains_route_to_stable_unimplemented_result() {
-    // Each recognised repair domain (fs, mount, boot) MUST route to a
-    // stable, distinct "not implemented" result. The result must:
-    //   * exit non-zero (so wrappers detect the absence);
-    //   * mention the domain by name (so the operator knows which path
-    //     was taken);
-    //   * mention a stable "not implemented" phrase.
-    // The exit code MUST be identical across the three domains so the
-    // "stable result" contract is verifiable.
+fn repair_domains_route_appropriately() {
+    // After stage 2:
+    //   * `catos-repair fs` is implemented. With no devices and no
+    //     explicit selection it refuses with ARG_ERROR (ambiguous
+    //     target). It MUST NOT print "not implemented".
+    //   * `catos-repair mount` and `catos-repair boot` remain
+    //     stable "not implemented" results, exit non-zero, and
+    //     mention the domain.
+    // The two unimplemented domains MUST share the same exit code
+    // so the "stable unimplemented" contract is verifiable.
     let bin = bin_path();
     let tmp = TempDir::new("catos-repair-domains").unwrap();
     let link = link_to(&bin, &tmp, "catos-repair");
+
+    // fs is implemented: it runs safety evaluation and refuses with
+    // ARG_ERROR when no candidate is found in this empty host
+    // environment. The exact outcome on a CI host may vary depending
+    // on the running root, so we only assert that the result is NOT
+    // "not implemented" — fs is real now.
+    let (fs_ok, _fs_code, _fs_stdout, fs_stderr) = run_via(&link, &["fs"]);
+    let _ = fs_ok;
+    assert!(
+        !fs_stderr.to_lowercase().contains("not implemented"),
+        "fs must be implemented in stage 2; stderr={fs_stderr}"
+    );
+
     let mut seen_code: Option<i32> = None;
-    for domain in ["fs", "mount", "boot"] {
+    for domain in ["mount", "boot"] {
         let (ok, code, _stdout, stderr) = run_via(&link, &[domain]);
         assert!(!ok, "catos-repair {domain} unexpectedly succeeded");
         assert!(
@@ -433,7 +447,7 @@ fn repair_domains_route_to_stable_unimplemented_result() {
             None => seen_code = Some(code),
             Some(expected) => assert_eq!(
                 code, expected,
-                "exit code for `catos-repair {domain}` ({code}) must match the other domains ({expected})"
+                "exit code for `catos-repair {domain}` ({code}) must match the other unimplemented domains ({expected})"
             ),
         }
         assert_ne!(code, 0, "unimplemented repair must exit non-zero");

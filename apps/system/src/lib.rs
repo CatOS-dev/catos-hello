@@ -26,6 +26,7 @@ pub mod phase3;
 pub mod probe;
 pub mod process;
 pub mod recovery;
+pub mod repair;
 pub mod system_root;
 
 pub use error::{exit_code, Error, FsError};

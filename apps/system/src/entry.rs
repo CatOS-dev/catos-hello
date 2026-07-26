@@ -211,13 +211,13 @@ fn run_via_full_parser(invocation: Invocation, argv: &[String]) -> i32 {
     }
 }
 
-/// `catos-repair` routing. Only `fs`, `mount`, `boot` are recognised;
-/// each routes to a stable, distinct "not implemented" result. Any
-/// other name — including names that exist on `catos-system` or
-/// `catos-recovery` (inspect, recovery, plan, apply, status, ...) — is
-/// rejected with `ARG_ERROR` before any work happens. This is what
-/// keeps the repair surface from accidentally inheriting other entry
-/// points' commands.
+/// `catos-repair` routing. `fs` is implemented in stage 2; `mount`
+/// and `boot` remain stable "not implemented" results. Any other
+/// name — including names that exist on `catos-system` or
+/// `catos-recovery` (inspect, recovery, plan, apply, status, ...) —
+/// is rejected with `ARG_ERROR` before any work happens. This is
+/// what keeps the repair surface from accidentally inheriting other
+/// entry points' commands.
 fn run_repair(argv: &[String]) -> i32 {
     let domain_list = REPAIR_DOMAINS.join("|");
     match argv.first().map(String::as_str) {
@@ -227,6 +227,7 @@ fn run_repair(argv: &[String]) -> i32 {
             );
             exit_code::ARG_ERROR
         }
+        Some("fs") => run_repair_fs(&argv[1..]),
         Some(domain) if REPAIR_DOMAINS.contains(&domain) => {
             eprintln!(
                 "catos-repair: {domain}: repair domain recognised but not implemented in this stage"
@@ -240,6 +241,147 @@ fn run_repair(argv: &[String]) -> i32 {
             exit_code::ARG_ERROR
         }
     }
+}
+
+/// `catos-repair fs` parsing + dispatch. The accepted forms are:
+///
+/// ```text
+/// catos-repair fs [--json] [<device>]
+/// catos-repair fs <device> [--json]
+/// ```
+///
+/// `<device>` is an optional positional `/dev/...` path. When
+/// omitted, the orchestrator runs auto-discovery and refuses on
+/// ambiguity.
+///
+/// `--help` / `--version` are handled by the top-level dispatcher
+/// before this function is reached.
+fn run_repair_fs(argv: &[String]) -> i32 {
+    use std::io::Write;
+
+    let mut json = false;
+    let mut explicit_device: Option<String> = None;
+    let mut idx = 0;
+    while idx < argv.len() {
+        let arg = &argv[idx];
+        match arg.as_str() {
+            "--json" => {
+                json = true;
+                idx += 1;
+            }
+            other if !other.starts_with('-') => {
+                if explicit_device.is_some() {
+                    eprintln!(
+                        "catos-repair: argument error: only one positional <device> may be supplied"
+                    );
+                    return exit_code::ARG_ERROR;
+                }
+                explicit_device = Some(other.to_string());
+                idx += 1;
+            }
+            other => {
+                eprintln!(
+                    "catos-repair: argument error: unknown flag {other:?}; expected [--json] [<device>]"
+                );
+                return exit_code::ARG_ERROR;
+            }
+        }
+    }
+
+    let selection = match explicit_device {
+        Some(device) => {
+            let path = std::path::Path::new(&device);
+            if !validate_repair_device_arg(path) {
+                eprintln!(
+                    "catos-repair: argument error: <device> must be an absolute /dev/... path without .. or prefix components"
+                );
+                return exit_code::ARG_ERROR;
+            }
+            crate::repair::safety::RepairTargetSelection {
+                explicit_device: Some(path.to_path_buf()),
+            }
+        }
+        None => crate::repair::safety::RepairTargetSelection::default(),
+    };
+
+    let report = crate::repair::run_fs_repair(selection);
+    let exit = outcome_exit_code(report.final_outcome);
+
+    let render_result = if json {
+        crate::output::render_repair_json(&report, "catos-repair", std::path::Path::new("/"))
+            .and_then(|s| {
+                write_json_stdout(&s)
+                    .map_err(|e| Error::SerializeFailed(format!("stdout write: {e}")))
+            })
+    } else {
+        let mut out = std::io::stdout();
+        crate::output::render_repair_human(&report, &mut out)
+            .and_then(|_| out.flush())
+            .map_err(|e| Error::SerializeFailed(format!("stdout write: {e}")))
+    };
+    match render_result {
+        Ok(()) => exit,
+        Err(e) => {
+            eprintln!("catos-repair: {e}");
+            e.exit_code()
+        }
+    }
+}
+
+/// Compute the process exit code for a repair outcome. The exit
+/// codes are chosen to align with the existing phase-1 contract:
+///
+/// * `0` for any success (clean / repaired / repaired_with_risk).
+///   RepairedWithRisk is still a success: the spec says repair may
+///   fail honestly, but a successful repair — even a risky one — is
+///   what the user asked for. The risk is in the report.
+/// * `5` (PROBE_FAILED) for repairable-but-failed outcomes
+///   (unrepaired, verification_failed). Matches the existing
+///   "we could not produce the requested result" semantics.
+/// * `5` for unsupported / tool_missing: the orchestrator COULD not
+///   run the request.
+/// * `2` (ARG_ERROR) for refusals that map back to "the operator
+///   needs to do something different": ambiguous_target,
+///   refused_mounted, refused_running_root. This mirrors how
+///   "missing argument" and "you must disambiguate" are the same
+///   user-facing class.
+/// * `5` for Unknown (defensive; should never appear in practice).
+fn outcome_exit_code(outcome: crate::model::repair::FsRepairOutcome) -> i32 {
+    use crate::model::repair::FsRepairOutcome;
+    match outcome {
+        FsRepairOutcome::Clean | FsRepairOutcome::Repaired | FsRepairOutcome::RepairedWithRisk => {
+            exit_code::SUCCESS
+        }
+        FsRepairOutcome::Unrepaired
+        | FsRepairOutcome::Unsupported
+        | FsRepairOutcome::ToolMissing
+        | FsRepairOutcome::VerificationFailed
+        | FsRepairOutcome::Unknown => exit_code::PROBE_FAILED,
+        FsRepairOutcome::RefusedMounted
+        | FsRepairOutcome::RefusedRunningRoot
+        | FsRepairOutcome::AmbiguousTarget => exit_code::ARG_ERROR,
+    }
+}
+
+/// Validate the positional `<device>` argument: absolute, under
+/// `/dev/`, no `..` or platform prefix. Reuses the same checks as
+/// `cli::parse_device_path` without dragging in the phase-2
+/// TargetSelection parser (which has its own per-option quirks).
+fn validate_repair_device_arg(path: &std::path::Path) -> bool {
+    use std::path::Component;
+    let mut components = path.components();
+    if components.next() != Some(Component::RootDir)
+        || components.next() != Some(Component::Normal("dev".as_ref()))
+    {
+        return false;
+    }
+    if path
+        .components()
+        .any(|component| matches!(component, Component::ParentDir | Component::Prefix(_)))
+    {
+        return false;
+    }
+    true
 }
 
 /// `catos-update` routing. The entry point is intentionally recognised
@@ -275,7 +417,7 @@ fn print_help(invocation: Invocation) -> i32 {
         Invocation::CatosRepair => {
             let domain_list = REPAIR_DOMAINS.join("|");
             print!(
-                "catos-repair {version} - CatOS fs/mount/boot repair entry point\n\nUSAGE:\n    catos-repair <DOMAIN>\n    catos-repair --help\n    catos-repair --version\n\nREPAIR DOMAINS (recognised; not implemented in this stage):\n    fs      Filesystem repair domain.\n    mount   Mount-table / fstab repair domain.\n    boot    Bootloader / boot topology repair domain.\n\nOPTIONS:\n    -h, --help    Show this help message and exit.\n    -V, --version Print program version and exit.\n\nNOTES:\n    * Only the three domains above are recognised. Anything else is\n      rejected with ARG_ERROR; in particular `catos-repair` does NOT\n      inherit `catos-system` or `catos-recovery` subcommands\n      (no `catos-repair inspect`, `catos-repair recovery ...`, ...).\n    * No repair logic is implemented in this stage; each recognised\n      domain ({domain_list}) returns a stable \"not implemented\" result.\n",
+                "catos-repair {version} - CatOS fs/mount/boot repair entry point\n\nUSAGE:\n    catos-repair <DOMAIN> [OPTIONS] [<DEVICE>]\n    catos-repair --help\n    catos-repair --version\n\nREPAIR DOMAINS:\n    fs      Filesystem repair domain (implemented in stage 2).\n            Routes to the matching system fsck tool after safety\n            checks. Supports ext2/ext3/ext4, vfat/fat, f2fs, xfs,\n            and btrfs.\n    mount   Mount-table / fstab repair domain (not implemented).\n    boot    Bootloader / boot topology repair domain (not implemented).\n\nOPTIONS:\n    --json     Emit a stable JSON report on stdout.\n    -h, --help    Show this help message and exit.\n    -V, --version Print program version and exit.\n\nFS DOMAIN ARGUMENTS:\n    catos-repair fs [--json] [<device>]\n        <device> is an optional positional /dev/... path. When\n        omitted, auto-discovery runs and refuses on ambiguity.\n        ESP, swap, LUKS, LVM PV, mdraid members are never auto-\n        selected; specify them explicitly if you really mean it.\n\nNOTES:\n    * Only the three domains above are recognised. Anything else is\n      rejected with ARG_ERROR; in particular `catos-repair` does NOT\n      inherit `catos-system` or `catos-recovery` subcommands\n      (no `catos-repair inspect`, `catos-repair recovery ...`, ...).\n    * `catos-repair fs` always refuses the running root and any\n      target that is already mounted. Repair is best-effort; failures\n      are reported honestly.\n    * The `mount` and `boot` domains ({domain_list} minus `fs`)\n      remain stable \"not implemented\" results.\n",
             );
         }
         Invocation::CatosUpdate => {
