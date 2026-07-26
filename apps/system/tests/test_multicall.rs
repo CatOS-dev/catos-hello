@@ -406,24 +406,20 @@ fn repair_without_args_rejects_and_lists_three_domains() {
 
 #[test]
 fn repair_domains_route_appropriately() {
-    // After stage 2:
-    //   * `catos-repair fs` is implemented. With no devices and no
-    //     explicit selection it refuses with ARG_ERROR (ambiguous
-    //     target). It MUST NOT print "not implemented".
-    //   * `catos-repair mount` and `catos-repair boot` remain
-    //     stable "not implemented" results, exit non-zero, and
-    //     mention the domain.
-    // The two unimplemented domains MUST share the same exit code
-    // so the "stable unimplemented" contract is verifiable.
+    // After stage 3:
+    //   * `catos-repair fs` is implemented (stage 2). With no
+    //     devices and no explicit selection it refuses with
+    //     ARG_ERROR (ambiguous target).
+    //   * `catos-repair mount` is implemented (stage 3). It builds
+    //     a structured report and may exit 0 (clean / partially
+    //     repaired) or non-zero depending on the host. It MUST NOT
+    //     print "not implemented".
+    //   * `catos-repair boot` remains a stable "not implemented"
+    //     result, exits non-zero, and mentions the domain.
     let bin = bin_path();
     let tmp = TempDir::new("catos-repair-domains").unwrap();
     let link = link_to(&bin, &tmp, "catos-repair");
 
-    // fs is implemented: it runs safety evaluation and refuses with
-    // ARG_ERROR when no candidate is found in this empty host
-    // environment. The exact outcome on a CI host may vary depending
-    // on the running root, so we only assert that the result is NOT
-    // "not implemented" — fs is real now.
     let (fs_ok, _fs_code, _fs_stdout, fs_stderr) = run_via(&link, &["fs"]);
     let _ = fs_ok;
     assert!(
@@ -431,27 +427,31 @@ fn repair_domains_route_appropriately() {
         "fs must be implemented in stage 2; stderr={fs_stderr}"
     );
 
-    let mut seen_code: Option<i32> = None;
-    for domain in ["mount", "boot"] {
-        let (ok, code, _stdout, stderr) = run_via(&link, &[domain]);
-        assert!(!ok, "catos-repair {domain} unexpectedly succeeded");
-        assert!(
-            stderr.contains(domain),
-            "stderr must mention domain {domain}: {stderr}"
-        );
-        assert!(
-            stderr.to_lowercase().contains("not implemented"),
-            "stderr must say 'not implemented' for {domain}: {stderr}"
-        );
-        match seen_code {
-            None => seen_code = Some(code),
-            Some(expected) => assert_eq!(
-                code, expected,
-                "exit code for `catos-repair {domain}` ({code}) must match the other unimplemented domains ({expected})"
-            ),
-        }
-        assert_ne!(code, 0, "unimplemented repair must exit non-zero");
-    }
+    let (mount_ok, _mount_code, _mount_stdout, mount_stderr) = run_via(&link, &["mount"]);
+    let _ = mount_ok;
+    assert!(
+        !mount_stderr
+            .to_lowercase()
+            .contains("not implemented in this stage"),
+        "mount must be implemented in stage 3; stderr={mount_stderr}"
+    );
+
+    let (boot_ok, boot_code, _boot_stdout, boot_stderr) = run_via(&link, &["boot"]);
+    assert!(!boot_ok, "catos-repair boot unexpectedly succeeded");
+    assert!(
+        boot_stderr.contains("boot"),
+        "stderr must mention domain boot: {boot_stderr}"
+    );
+    assert!(
+        boot_stderr
+            .to_lowercase()
+            .contains("not implemented in this stage"),
+        "stderr must say 'not implemented in this stage' for boot: {boot_stderr}"
+    );
+    assert_ne!(
+        boot_code, 0,
+        "unimplemented repair domain must exit non-zero"
+    );
 }
 
 #[test]
