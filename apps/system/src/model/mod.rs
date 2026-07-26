@@ -1,5 +1,6 @@
 //! Data model layer. Pure data + serde, no I/O.
 
+pub mod boot_repair;
 pub mod capability;
 pub mod evidence;
 pub mod fstab;
@@ -11,6 +12,11 @@ pub mod repair;
 pub mod runtime;
 pub mod storage;
 
+pub use boot_repair::{
+    BootAction, BootRepairOutcome, BootRepairReport, BootVerification, CmdlineConflict,
+    FirmwareClass, FirmwareMethod, ProviderEvidence, ProviderId, SecureBootReport, TargetCommand,
+    TargetCommandResult,
+};
 pub use capability::{Capability, CapabilityKind, CapabilityStatus};
 pub use evidence::Evidence;
 pub use fstab::{FstabEntry, FstabEntryKind, FstabParseError, FstabSource};
