@@ -44,7 +44,7 @@ missing=()
 [ -x "$QEMU_BIN" ] || missing+=("qemu-system-x86_64")
 [ -x "$BUSYBOX" ] || missing+=("static busybox")
 [ -f "$KERNEL" ] || missing+=("kernel image")
-for tool in cpio gzip timeout truncate mkfs.btrfs sha256sum grep find ldd awk; do
+for tool in cpio gzip timeout truncate mkfs.btrfs sfdisk sha256sum grep find ldd awk; do
     command -v "$tool" >/dev/null 2>&1 || missing+=("$tool")
 done
 if [ "${#missing[@]}" -ne 0 ]; then
@@ -84,7 +84,6 @@ fail() {
 }
 
 truncate -s 256M "$IMAGE"
-mkfs.btrfs -q -f -U 11111111-2222-3333-4444-555555555555 -m single -d single "$IMAGE"
 
 rm -rf "$INITRAMFS"
 mkdir -p "$INITRAMFS"/{bin,sbin,proc,sys,dev,run,mnt,target,verify,usr/bin,usr/sbin}
@@ -96,12 +95,20 @@ for applet in sh mount umount cat echo sleep poweroff mkdir grep find sync ln; d
 done
 ln -sf /bin/busybox "$INITRAMFS/sbin/poweroff"
 
-cp /usr/bin/btrfs "$INITRAMFS/usr/bin/btrfs"
-ldd /usr/bin/btrfs | awk '/=> \/[^ ]+/ {print $3} $1 ~ /^\// {print $1}' | while read -r library; do
-    [ -f "$library" ] || continue
-    mkdir -p "$INITRAMFS$(dirname "$library")"
-    cp -L "$library" "$INITRAMFS$library"
-done
+copy_tool() {
+    local source
+    source=$(command -v "$1")
+    mkdir -p "$INITRAMFS$(dirname "$source")"
+    cp -L "$source" "$INITRAMFS$source"
+    ldd "$source" | awk '/=> \/[^ ]+/ {print $3} $1 ~ /^\// {print $1}' | while read -r library; do
+        [ -f "$library" ] || continue
+        mkdir -p "$INITRAMFS$(dirname "$library")"
+        cp -L "$library" "$INITRAMFS$library"
+    done
+}
+copy_tool btrfs
+copy_tool mkfs.btrfs
+copy_tool sfdisk
 
 cat > "$INITRAMFS/init" <<'GUEST'
 #!/bin/sh
@@ -113,23 +120,27 @@ mount -t devtmpfs none /dev
 for _ in 1 2 3 4 5; do [ -b /dev/vda ] && break; sleep 1; done
 [ -b /dev/vda ] || { echo '===MOUNT_REPAIR_FATAL=== missing vda'; poweroff -f; }
 
-mount /dev/vda /mnt || { echo '===MOUNT_REPAIR_FATAL=== mount top-level'; poweroff -f; }
+printf 'label: dos\n, , L\n' | sfdisk /dev/vda >/dev/null || { echo '===MOUNT_REPAIR_FATAL=== partition target'; poweroff -f; }
+for _ in 1 2 3 4 5; do [ -b /dev/vda1 ] && break; sleep 1; done
+[ -b /dev/vda1 ] || { echo '===MOUNT_REPAIR_FATAL=== missing vda1'; poweroff -f; }
+mkfs.btrfs -q -f -U 11111111-2222-3333-4444-555555555555 -m single -d single /dev/vda1 || { echo '===MOUNT_REPAIR_FATAL=== format target'; poweroff -f; }
+mount /dev/vda1 /mnt || { echo '===MOUNT_REPAIR_FATAL=== mount top-level'; poweroff -f; }
 btrfs subvolume create /mnt/@
 btrfs subvolume create /mnt/@snapshots
-mount -o subvol=/@ /dev/vda /target || { echo '===MOUNT_REPAIR_FATAL=== mount root'; poweroff -f; }
-mkdir -p /target/etc
+mount -o subvol=/@ /dev/vda1 /target || { echo '===MOUNT_REPAIR_FATAL=== mount root'; poweroff -f; }
+mkdir -p /target/etc /target/usr
 cat > /target/etc/os-release <<'EOF'
 ID=catos
 EOF
 cat > /target/etc/fstab <<'EOF'
-UUID=old  /  btrfs  defaults,compress=zstd:3,subvol=/wrong  0 1
+UUID=target  /  btrfs  defaults,compress=zstd:3,subvol=/wrong  0 1
 UUID=target  /.snapshots  btrfs  defaults,subvol=/bad  0 0
 EOF
 umount /target
 umount /mnt
 
 mkdir -p /run/udev/data
-major_minor=$(cat /sys/class/block/vda/dev)
+major_minor=$(cat /sys/class/block/vda/vda1/dev)
 cat > "/run/udev/data/b${major_minor}" <<'EOF'
 E:ID_FS_TYPE=btrfs
 E:ID_FS_UUID=target
@@ -138,14 +149,14 @@ E:ID_FS_LABEL=catos-target
 EOF
 ln -sf /bin/catos-system /bin/catos-repair
 echo '===MOUNT_REPAIR_BEGIN==='
-/bin/catos-repair mount --root-device /dev/vda --json
+/bin/catos-repair mount --json
 rc=$?
 echo "===MOUNT_REPAIR_END=== rc=$rc"
 
-mount /dev/vda /mnt || { echo '===MOUNT_REPAIR_FATAL=== remount top-level'; poweroff -f; }
+mount /dev/vda1 /mnt || { echo '===MOUNT_REPAIR_FATAL=== remount top-level'; poweroff -f; }
 btrfs subvolume list /mnt | grep -q ' path @home$' || echo '===MOUNT_REPAIR_ASSERT=== missing @home'
 btrfs subvolume list /mnt | grep -q ' path @snapshots$' || echo '===MOUNT_REPAIR_ASSERT=== missing @snapshots'
-mount -o subvol=/@ /dev/vda /verify || { echo '===MOUNT_REPAIR_FATAL=== verify root'; poweroff -f; }
+mount -o subvol=/@ /dev/vda1 /verify || { echo '===MOUNT_REPAIR_FATAL=== verify root'; poweroff -f; }
 grep -q 'UUID=target  /  btrfs  defaults,compress=zstd:3,subvol=/@  0 1' /verify/etc/fstab || echo '===MOUNT_REPAIR_ASSERT=== root fstab not repaired'
 grep -q 'UUID=target  /.snapshots  btrfs  defaults,subvol=/@snapshots  0 0' /verify/etc/fstab || echo '===MOUNT_REPAIR_ASSERT=== snapshots fstab not repaired'
 [ -d /verify/home ] || echo '===MOUNT_REPAIR_ASSERT=== home directory missing'

@@ -43,7 +43,8 @@ use std::path::{Path, PathBuf};
 use crate::model::evidence::Evidence;
 use crate::model::fstab::FstabSource;
 use crate::model::inspection::Warning;
-use crate::model::storage::BlockDevice;
+use crate::model::runtime::DetectionStatus;
+use crate::model::storage::{BlockDevice, DeviceClass, PartitionRole, RootCandidateConfidence};
 use crate::probe::fs_probe::{FilesystemProbe, RealFilesystem};
 use crate::probe::discover_devices;
 use crate::recovery::confined;
@@ -56,6 +57,7 @@ use crate::model::mount_repair::{
     PlannedDirectory, PlannedFstabEdit, PlannedSubvolume, TargetIdentity,
 };
 use crate::mount::plan::build_probe_plan;
+use crate::mount::probe::probe_unmounted_candidates;
 use crate::mount::session::Session;
 use crate::parse::fstab::{parse_all_with_diagnostics, FstabEntry, FstabEntryKind};
 use crate::repair::fstab_edit::apply_edits;
@@ -965,12 +967,61 @@ fn select_cli_root<'a>(
     devices: &'a [BlockDevice],
     root_device: Option<&str>,
 ) -> Option<&'a BlockDevice> {
-    let requested = root_device?;
-    devices.iter().find(|device| {
-        device.dev_path.as_ref().is_some_and(|path| path == std::path::Path::new(requested))
-            && device.filesystem.as_deref() == Some("btrfs")
-            && !device.mounted_before_session
-    })
+    match root_device {
+        Some(requested) => devices.iter().find(|device| {
+            device
+                .dev_path
+                .as_ref()
+                .is_some_and(|path| same_block_device(path, Path::new(requested)))
+                && device.filesystem.as_deref() == Some("btrfs")
+                && !device.mounted_before_session
+        }),
+        None => auto_select_cli_root(devices),
+    }
+}
+
+fn auto_select_cli_root(devices: &[BlockDevice]) -> Option<&BlockDevice> {
+    let probes = probe_unmounted_candidates(devices, &[]);
+    let candidates: Vec<&str> = probes
+        .roots
+        .iter()
+        .filter(|root| {
+            root.filesystem.as_deref() == Some("btrfs")
+                && root.subvolume.as_deref() == Some("/@")
+                && root.confidence == RootCandidateConfidence::High
+                && root.is_catos.status == DetectionStatus::Detected
+                && root
+                    .evidence
+                    .iter()
+                    .any(|evidence| evidence.code == "FSTAB_ROOT_MATCH")
+        })
+        .map(|root| root.source.as_str())
+        .collect();
+    match candidates.as_slice() {
+        [source] => devices.iter().find(|device| {
+            device.dev_path.as_deref() == Some(Path::new(source))
+                && !device.mounted_before_session
+                && !device.removable
+                && device.class != DeviceClass::Disk
+                && device.partition_role != PartitionRole::WholeDisk
+        }),
+        _ => None,
+    }
+}
+
+fn same_block_device(discovered: &Path, requested: &Path) -> bool {
+    if discovered == requested {
+        return true;
+    }
+    use std::os::unix::fs::{FileTypeExt, MetadataExt};
+    match (std::fs::metadata(discovered), std::fs::metadata(requested)) {
+        (Ok(left), Ok(right)) => {
+            left.file_type().is_block_device()
+                && right.file_type().is_block_device()
+                && left.rdev() == right.rdev()
+        }
+        _ => false,
+    }
 }
 
 fn observe_target_inputs(
