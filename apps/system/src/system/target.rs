@@ -1,52 +1,19 @@
-//! Phase-2 orchestrators: storage scan, target plan, target mount.
-//!
-//! These functions sit between `entry.rs` (which dispatches by command)
-//! and the probe/mount/output layers. They own the side-effects that
-//! probes deliberately avoid: spawning blkid, reading the target fstab,
-//! entering the mount namespace, and producing the final structured
-//! output that `output/` renders.
-//!
-//! Hard rule: every function here is READ-ONLY with respect to the target.
-//! `run_target_mount` mounts inside a private namespace but every mount
-//! is read-only with filesystem-specific safety options applied by
-//! `mount::plan`. No write to the target device is ever performed.
-
-use std::collections::HashSet;
-use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use super::Phase2Outcome;
+use super::util::{fresh_session_root, mount_error_to_top_error};
+use std::path::Path;
 
 use crate::shared::cli::TargetSelection;
-use crate::shared::error::{exit_code, Error};
+use crate::shared::error::Error;
 use crate::shared::model::fstab::{FstabEntry, FstabEntryKind, FstabSource};
-use crate::shared::model::inspection::{TargetInspection, Warning};
-use crate::shared::model::mount::{MountError, MountPlan, MountSession};
-use crate::shared::model::storage::StorageReport;
+use crate::shared::model::inspection::Warning;
+use crate::shared::model::mount::MountError;
 use crate::shared::mount::plan::{build_plan, PlanInputs};
-use crate::shared::mount::probe::{inspect_selected_root, probe_unmounted_candidates};
-use crate::shared::mount::session::{Session, SESSION_ROOT_PARENT};
+use crate::shared::mount::probe::inspect_selected_root;
+use crate::shared::mount::session::Session;
 use crate::shared::parse::fstab::parse_all_with_diagnostics;
-use crate::shared::probe::candidate::candidate_ambiguities;
 use crate::shared::probe::fs_probe::{FilesystemProbe, RealFilesystem};
-use crate::shared::probe::{discover_devices, identify_candidates};
+use crate::shared::probe::discover_devices;
 use crate::shared::system_root::SystemRoot;
-
-static SESSION_SEQUENCE: AtomicU64 = AtomicU64::new(1);
-
-/// Outcome of a phase-2 command. Each variant carries the structured
-/// model that the matching output renderer consumes.
-pub enum Phase2Outcome {
-    StorageScan(StorageReport),
-    TargetPlan {
-        plan: MountPlan,
-        warnings: Vec<Warning>,
-    },
-    TargetMount {
-        session: MountSession,
-        inspection: Box<TargetInspection>,
-        cleanup: crate::shared::model::mount::CleanupReport,
-        warnings: Vec<Warning>,
-    },
-}
 
 struct TargetInputs {
     devices: Vec<crate::shared::model::storage::BlockDevice>,
@@ -54,64 +21,6 @@ struct TargetInputs {
     warnings: Vec<Warning>,
 }
 
-/// Run `storage scan`: enumerate devices, identify candidates, emit a
-/// [`StorageReport`]. Existing mounts are inspected directly; when the
-/// caller has CAP_SYS_ADMIN, unmounted candidates are briefly mounted
-/// read-only in a private namespace and cleaned before this returns.
-pub fn run_storage_scan(root: &SystemRoot) -> Result<Phase2Outcome, Error> {
-    let fs = RealFilesystem;
-    let (devices, mut dev_warnings) = discover_devices(&fs);
-    let fstab = match read_target_fstab(root) {
-        Ok((entries, mut warnings)) => {
-            dev_warnings.append(&mut warnings);
-            entries
-        }
-        Err(error) => {
-            dev_warnings.push(Warning::new(
-                "TARGET_FSTAB_UNREADABLE",
-                format!("could not read target fstab: {error}"),
-            ));
-            Vec::new()
-        }
-    };
-    let (mut root_candidates, mut esp_candidates, _, cand_warnings) =
-        identify_candidates(&devices, &fstab);
-    let mut probed = probe_unmounted_candidates(&devices, &fstab);
-
-    let probed_root_sources: HashSet<&str> = probed
-        .roots
-        .iter()
-        .map(|candidate| candidate.source.as_str())
-        .collect();
-    root_candidates.retain(|candidate| !probed_root_sources.contains(candidate.source.as_str()));
-    root_candidates.append(&mut probed.roots);
-
-    let probed_esp_sources: HashSet<&str> = probed
-        .esps
-        .iter()
-        .map(|candidate| candidate.source.as_str())
-        .collect();
-    esp_candidates.retain(|candidate| !probed_esp_sources.contains(candidate.source.as_str()));
-    esp_candidates.append(&mut probed.esps);
-
-    let ambiguities = candidate_ambiguities(&root_candidates, &esp_candidates);
-    let mut warnings = merge_warnings(dev_warnings, cand_warnings);
-    warnings.append(&mut probed.warnings);
-
-    Ok(Phase2Outcome::StorageScan(StorageReport {
-        devices,
-        root_candidates,
-        esp_candidates,
-        btrfs_subvolumes: probed.btrfs_subvolumes,
-        warnings,
-        ambiguities,
-    }))
-}
-
-/// Run `target plan`: read the target fstab, discover devices, build a
-/// [`MountPlan`] WITHOUT executing any mount. Returns the plan plus any
-/// non-fatal warnings (e.g. ambiguous device references that were
-/// resolved conservatively).
 pub fn run_target_plan(
     root: &SystemRoot,
     selection: &TargetSelection,
@@ -385,7 +294,7 @@ fn replace_esp_entry(
     Ok(())
 }
 
-fn read_target_fstab(root: &SystemRoot) -> Result<(Vec<FstabEntry>, Vec<Warning>), Error> {
+pub(super) fn read_target_fstab(root: &SystemRoot) -> Result<(Vec<FstabEntry>, Vec<Warning>), Error> {
     let fs = RealFilesystem;
     match fs.rooted_read_to_string(root.canonical_path(), Path::new("etc/fstab")) {
         Ok(body) => {
@@ -415,58 +324,11 @@ fn read_target_fstab(root: &SystemRoot) -> Result<(Vec<FstabEntry>, Vec<Warning>
     }
 }
 
-fn fresh_session_root() -> PathBuf {
-    let id = generate_session_id();
-    Path::new(SESSION_ROOT_PARENT).join(id)
-}
 
-/// Generate a process-local unique session id without relying on an early
-/// initramfs random pool. Exclusive directory creation remains the final
-/// collision and stale-session guard.
-fn generate_session_id() -> String {
-    let sequence = SESSION_SEQUENCE.fetch_add(1, Ordering::Relaxed);
-    format!("s{}-{sequence}", std::process::id())
-}
-
-fn merge_warnings(a: Vec<Warning>, b: Vec<Warning>) -> Vec<Warning> {
-    let mut out = a;
-    out.extend(b);
-    out
-}
-
-fn mount_error_to_top_error(err: MountError) -> Error {
-    Error::MountFailed(err)
-}
-
-/// Convenience used by entry.rs to detect whether a phase-2 command
-/// should set a non-success exit code based on its outcome.
-pub fn exit_code_for(outcome: &Phase2Outcome) -> i32 {
-    match outcome {
-        Phase2Outcome::StorageScan(report) if !report.ambiguities.is_empty() => {
-            // Ambiguities are surfaced but not fatal: the report still
-            // contains useful device data. We exit 0 so downstream
-            // tooling can consume the JSON.
-            exit_code::SUCCESS
-        }
-        Phase2Outcome::TargetMount { cleanup, .. } if !cleanup.all_clean => exit_code::PROBE_FAILED,
-        _ => exit_code::SUCCESS,
-    }
-}
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// generate_session_id must produce a non-empty, filesystem-safe
-    /// string. Locking the format guards against a refactor that
-    /// accidentally introduces a `/` and breaks the session_root path.
-    #[test]
-    fn session_id_is_filesystem_safe() {
-        let id = generate_session_id();
-        assert!(id.starts_with('s'));
-        assert!(!id.contains('/'));
-        assert!(!id.is_empty());
-    }
 
     /// A missing fstab is a legitimate recovery state and produces an
     /// empty list rather than a fabricated host fstab.
@@ -506,60 +368,5 @@ mod tests {
             assert!(entries.is_empty());
         }
         let _ = std::fs::remove_dir_all(base);
-    }
-
-    /// exit_code_for returns SUCCESS for a clean TargetMount outcome.
-    #[test]
-    fn exit_code_for_clean_target_mount_is_success() {
-        let outcome = Phase2Outcome::TargetMount {
-            session: MountSession {
-                id: "test".into(),
-                state: crate::shared::model::mount::MountSessionState::Active,
-                namespace: crate::shared::model::mount::NamespaceState::PrivateNamespace,
-                session_root: PathBuf::from("/tmp/x"),
-                target_root: PathBuf::from("/tmp/x/target"),
-                mounts: vec![],
-                warnings: vec![],
-            },
-            inspection: Box::new(TargetInspection::default()),
-            cleanup: crate::shared::model::mount::CleanupReport::default(),
-            warnings: vec![],
-        };
-        assert_eq!(exit_code_for(&outcome), exit_code::SUCCESS);
-    }
-
-    /// exit_code_for returns PROBE_FAILED when residuals remain.
-    #[test]
-    fn exit_code_for_residual_target_mount_is_probe_failed() {
-        let outcome = Phase2Outcome::TargetMount {
-            session: MountSession {
-                id: "test".into(),
-                state: crate::shared::model::mount::MountSessionState::CleanupIncomplete,
-                namespace: crate::shared::model::mount::NamespaceState::PrivateNamespace,
-                session_root: PathBuf::from("/tmp/x"),
-                target_root: PathBuf::from("/tmp/x/target"),
-                mounts: vec![],
-                warnings: vec![],
-            },
-            inspection: Box::new(TargetInspection::default()),
-            cleanup: crate::shared::model::mount::CleanupReport {
-                residual: vec![crate::shared::model::mount::ResidualMount {
-                    resource: crate::shared::model::mount::MountedResource {
-                        order: 1,
-                        source: "/dev/sda1".into(),
-                        target: PathBuf::from("/tmp/x/target"),
-                        fstype: "ext4".into(),
-                        options: "ro".into(),
-                    },
-                    reason: "test".into(),
-                    error_code: "test".into(),
-                }],
-                directory_cleanup_error: None,
-                all_clean: false,
-                ..Default::default()
-            },
-            warnings: vec![],
-        };
-        assert_eq!(exit_code_for(&outcome), exit_code::PROBE_FAILED);
     }
 }

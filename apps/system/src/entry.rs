@@ -849,10 +849,10 @@ fn run_phase2(invocation: Invocation, args: crate::shared::cli::CliArgs) -> i32 
     use std::io::Write;
 
     let outcome_result = match args.command {
-        crate::shared::cli::Command::StorageScan => crate::phase2::run_storage_scan(&args.root),
-        crate::shared::cli::Command::TargetPlan => crate::phase2::run_target_plan(&args.root, &args.target),
+        crate::shared::cli::Command::StorageScan => crate::system::run_storage_scan(&args.root),
+        crate::shared::cli::Command::TargetPlan => crate::system::run_target_plan(&args.root, &args.target),
         crate::shared::cli::Command::TargetMount => {
-            crate::phase2::run_target_mount(&args.root, &args.target)
+            crate::system::run_target_mount(&args.root, &args.target)
         }
         // Phase-1 commands never reach here (is_phase1() routes them away).
         other => unreachable!("run_phase2 called with phase-1 command {other:?}"),
@@ -877,7 +877,7 @@ fn run_phase2(invocation: Invocation, args: crate::shared::cli::CliArgs) -> i32 
                     .map_err(|e| Error::SerializeFailed(format!("stdout write: {e}")))
             };
             match result {
-                Ok(()) => crate::phase2::exit_code_for(&outcome),
+                Ok(()) => crate::system::exit_code_for(&outcome),
                 Err(e) => {
                     eprintln!("{invocation}: {e}");
                     e.exit_code()

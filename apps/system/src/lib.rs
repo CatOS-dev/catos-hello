@@ -17,7 +17,7 @@
 pub mod chroot;
 pub mod doctor;
 pub mod entry;
-pub mod phase2;
+pub mod system;
 pub mod phase3;
 pub mod repair;
 pub mod shared;

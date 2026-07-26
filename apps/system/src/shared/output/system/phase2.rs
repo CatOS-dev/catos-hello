@@ -7,7 +7,7 @@ use std::io::Write;
 use crate::shared::error::Error;
 use crate::shared::model::mount::{CleanupReport, MountPlan, MountSession};
 use crate::shared::model::storage::StorageReport;
-use crate::phase2::Phase2Outcome;
+use crate::system::Phase2Outcome;
 
 /// Render a phase-2 outcome as JSON. Wraps every variant in a top-level
 /// object with the same stable envelope keys as phase-1 reports:
