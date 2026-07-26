@@ -67,12 +67,18 @@ pub struct DeviceLock {
 impl DeviceLock {
     #[allow(clippy::result_large_err)]
     pub fn try_acquire(device: &Path) -> Result<Self, RecoveryError> {
-        let file = OpenOptions::new().read(true).open(device).map_err(|error| {
-            RecoveryError::new(
-                RecoveryErrorKind::SyscallFailed,
-                format!("cannot open target device {} for shared write lock: {error}", device.display()),
-            )
-        })?;
+        let file = OpenOptions::new()
+            .read(true)
+            .open(device)
+            .map_err(|error| {
+                RecoveryError::new(
+                    RecoveryErrorKind::SyscallFailed,
+                    format!(
+                        "cannot open target device {} for shared write lock: {error}",
+                        device.display()
+                    ),
+                )
+            })?;
         let rc = libc_flock(file.as_raw_fd(), LOCK_EX_NB);
         if rc != 0 {
             return Err(RecoveryError::new(
@@ -96,7 +102,10 @@ impl DeviceLock {
         let metadata = std::fs::metadata(device).map_err(|error| {
             RecoveryError::new(
                 RecoveryErrorKind::SyscallFailed,
-                format!("cannot stat target device {} for shared write lock: {error}", device.display()),
+                format!(
+                    "cannot stat target device {} for shared write lock: {error}",
+                    device.display()
+                ),
             )
         })?;
         if !metadata.file_type().is_block_device() {

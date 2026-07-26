@@ -453,17 +453,35 @@ fn persist_real_cleanup_after_teardown(
         engine.attach_cleanup(real_cleanup)
     })();
     let session_cleanup = session.cleanup();
-    persist_outcome?;
-    if !session_cleanup.all_clean {
-        return Err(RecoveryError::new(
+    finish_cleanup_persistence(persist_outcome, session_cleanup)
+}
+
+fn finish_cleanup_persistence(
+    persist_outcome: Result<(), RecoveryError>,
+    session_cleanup: CleanupSummary,
+) -> Result<(), RecoveryError> {
+    match (persist_outcome, session_cleanup.all_clean) {
+        (Ok(()), true) => Ok(()),
+        (Ok(()), false) => Err(RecoveryError::new(
             RecoveryErrorKind::CleanupIncomplete,
             format!(
                 "cleanup-persistence mount session left residual mounts: {:?}",
                 session_cleanup.residual
             ),
-        ));
+        )),
+        (Err(error), true) => Err(error),
+        (Err(mut error), false) => {
+            let suffix = format!(
+                "; cleanup-persistence mount session also left residual mounts: {:?}",
+                session_cleanup.residual
+            );
+            let mut message = error.message.to_string();
+            message.push_str(&suffix);
+            error.message = message.into_boxed_str();
+            error.manual_intervention_required = true;
+            Err(error)
+        }
     }
-    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -1777,6 +1795,36 @@ mod tests {
         ensure_cli_root_matches_plan(None, "/@root").unwrap();
         let error = ensure_cli_root_matches_plan(Some("/@"), "/@root").unwrap_err();
         assert_eq!(error.kind, RecoveryErrorKind::TargetChanged);
+    }
+
+    #[test]
+    fn cleanup_persistence_reports_residual_when_persist_succeeds() {
+        let cleanup = CleanupSummary {
+            unmounted: vec![],
+            residual: vec!["synthetic residual".into()],
+            all_clean: false,
+        };
+        let error = finish_cleanup_persistence(Ok(()), cleanup).unwrap_err();
+        assert_eq!(error.kind, RecoveryErrorKind::CleanupIncomplete);
+        assert!(error.message.contains("synthetic residual"));
+    }
+
+    #[test]
+    fn cleanup_persistence_preserves_both_primary_and_cleanup_failures() {
+        let primary = RecoveryError::new(
+            RecoveryErrorKind::RecoveryFailed,
+            "synthetic persistence failure",
+        );
+        let cleanup = CleanupSummary {
+            unmounted: vec![],
+            residual: vec!["synthetic cleanup residual".into()],
+            all_clean: false,
+        };
+        let error = finish_cleanup_persistence(Err(primary), cleanup).unwrap_err();
+        assert_eq!(error.kind, RecoveryErrorKind::RecoveryFailed);
+        assert!(error.message.contains("synthetic persistence failure"));
+        assert!(error.message.contains("synthetic cleanup residual"));
+        assert!(error.manual_intervention_required);
     }
 
     fn candidate(path: &str, subvolume_id: u64) -> BtrfsSubvolumeIdentity {

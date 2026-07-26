@@ -61,6 +61,7 @@ fn target(uuid: &str) -> TargetIdentity {
         root_uuid: Some(uuid.into()),
         esp_device: None,
         esp_uuid: None,
+        boot_layout: None,
     }
 }
 
@@ -789,4 +790,192 @@ fn refused_report_marks_requires_human_action() {
     );
     assert!(r.requires_human_action);
     assert!(!r.fully_complete);
+}
+
+// ===========================================================================
+// Section 8 — complete ESP and /boot topology contract
+// ===========================================================================
+
+fn topology_device(
+    name: &str,
+    path: &str,
+    fstype: &str,
+    uuid: &str,
+    role: catos_system::model::storage::PartitionRole,
+) -> catos_system::model::storage::BlockDevice {
+    use catos_system::model::storage::{BlockDevice, DeviceClass, DiskKind};
+    BlockDevice {
+        name: name.into(),
+        dev_path: Some(PathBuf::from(path)),
+        major_minor: Some(
+            match name {
+                "root" => "8:2",
+                "boot" => "8:3",
+                _ => "8:1",
+            }
+            .into(),
+        ),
+        parent: "sda".into(),
+        class: DeviceClass::Partition,
+        disk_kind: DiskKind::Gpt,
+        partition_role: role,
+        partition_number: Some(1),
+        size_sectors: Some(1_000_000),
+        read_only: false,
+        removable: false,
+        filesystem: Some(fstype.into()),
+        uuid: Some(uuid.into()),
+        part_uuid: None,
+        label: None,
+        part_label: None,
+        mount_point: None,
+        mounts: vec![],
+        mounted_before_session: false,
+        evidence: vec![],
+    }
+}
+
+fn topology_fstab(body: &str) -> Vec<catos_system::model::fstab::FstabEntry> {
+    catos_system::parse::fstab::parse_all_with_diagnostics(body).0
+}
+
+#[test]
+fn detects_all_six_boot_and_esp_layouts() {
+    use catos_system::model::mount_repair::BootMountLayout;
+    use catos_system::model::storage::PartitionRole;
+    use catos_system::repair::mount_repair::detect_boot_mount_layout;
+
+    let root = topology_device(
+        "root",
+        "/dev/sda2",
+        "btrfs",
+        "root-uuid",
+        PartitionRole::LinuxFilesystem,
+    );
+    let boot = topology_device(
+        "boot",
+        "/dev/sda3",
+        "ext4",
+        "boot-uuid",
+        PartitionRole::LinuxFilesystem,
+    );
+    let esp = topology_device("esp", "/dev/sda1", "vfat", "ESP-UUID", PartitionRole::Esp);
+    let devices = vec![root.clone(), boot.clone(), esp.clone()];
+
+    let cases = [
+        (
+            "UUID=root-uuid / btrfs defaults,subvol=/@ 0 0\nUUID=ESP-UUID /boot/efi vfat defaults 0 2\n",
+            BootMountLayout::EspAtBootEfi {
+                esp_device: PathBuf::from("/dev/sda1"),
+            },
+        ),
+        (
+            "UUID=root-uuid / btrfs defaults,subvol=/@ 0 0\nUUID=ESP-UUID /efi vfat defaults 0 2\n",
+            BootMountLayout::EspAtEfi {
+                esp_device: PathBuf::from("/dev/sda1"),
+            },
+        ),
+        (
+            "UUID=root-uuid / btrfs defaults,subvol=/@ 0 0\nUUID=ESP-UUID /boot vfat defaults 0 2\n",
+            BootMountLayout::EspAtBoot {
+                esp_device: PathBuf::from("/dev/sda1"),
+            },
+        ),
+        (
+            "UUID=root-uuid / btrfs defaults,subvol=/@ 0 0\nUUID=boot-uuid /boot ext4 defaults 0 2\nUUID=ESP-UUID /boot/efi vfat defaults 0 2\n",
+            BootMountLayout::SeparateBootAndEsp {
+                boot_device: PathBuf::from("/dev/sda3"),
+                esp_device: PathBuf::from("/dev/sda1"),
+                esp_mount_point: "/boot/efi".into(),
+            },
+        ),
+        (
+            "UUID=root-uuid / btrfs defaults,subvol=/@ 0 0\nUUID=root-uuid /boot btrfs defaults,subvol=/@boot 0 0\nUUID=ESP-UUID /efi vfat defaults 0 2\n",
+            BootMountLayout::BootBtrfsSubvolume {
+                subvolume: "/@boot".into(),
+                esp_device: Some(PathBuf::from("/dev/sda1")),
+                esp_mount_point: Some("/efi".into()),
+            },
+        ),
+        (
+            "UUID=root-uuid / btrfs defaults,subvol=/@ 0 0\n",
+            BootMountLayout::BootInsideRoot,
+        ),
+    ];
+
+    for (body, expected) in cases {
+        let fstab = topology_fstab(body);
+        let selected_esp = expected.esp_device();
+        let observed =
+            detect_boot_mount_layout(&fstab, &devices, Path::new("/dev/sda2"), selected_esp)
+                .unwrap_or_else(|error| panic!("layout detection failed for {body:?}: {error}"));
+        assert_eq!(observed, expected);
+    }
+}
+
+#[test]
+fn separate_boot_entry_is_not_rewritten_as_the_esp() {
+    use catos_system::model::mount_repair::BootMountLayout;
+
+    let fstab = "UUID=root-uuid / btrfs defaults,subvol=/@ 0 0\n\
+                 UUID=boot-uuid /boot ext4 defaults 0 2\n\
+                 UUID=old-esp /boot/efi vfat defaults 0 2\n";
+    let mut input = MountRepairInputs {
+        fstab_text: fstab.into(),
+        target: target("root-uuid"),
+        catos_confirmation: CatosConfirmation::Confirmed,
+        subvol_facts: SubvolFacts {
+            observations: all_subvols_present(),
+        },
+        mount_point_observations: HashMap::new(),
+    };
+    input.target.esp_device = Some(PathBuf::from("/dev/sda1"));
+    input.target.esp_uuid = Some("new-esp".into());
+    input.target.boot_layout = Some(BootMountLayout::SeparateBootAndEsp {
+        boot_device: PathBuf::from("/dev/sda3"),
+        esp_device: PathBuf::from("/dev/sda1"),
+        esp_mount_point: "/boot/efi".into(),
+    });
+    let plan = build_plan(&input);
+    let rewritten = apply_in_memory(fstab, &plan).unwrap();
+    assert!(rewritten.contains("UUID=boot-uuid /boot ext4 defaults 0 2"));
+    assert!(rewritten.contains("UUID=new-esp /boot/efi vfat defaults 0 2"));
+}
+
+#[test]
+fn root_uuid_and_subvolume_are_repaired_in_one_edit() {
+    let fstab = "UUID=old / btrfs defaults,compress=zstd:3,subvol=/wrong 0 1\n";
+    let input = MountRepairInputs {
+        fstab_text: fstab.into(),
+        target: target("new"),
+        catos_confirmation: CatosConfirmation::NotConfirmed,
+        subvol_facts: SubvolFacts {
+            observations: vec![subvol_present("/@")],
+        },
+        mount_point_observations: HashMap::new(),
+    };
+    let plan = build_plan(&input);
+    let rewritten = apply_in_memory(fstab, &plan).unwrap();
+    assert_eq!(
+        rewritten,
+        "UUID=new  /  btrfs  defaults,compress=zstd:3,subvol=/@  0 1\n"
+    );
+}
+
+#[test]
+fn snapshots_wrong_subvolume_is_repaired_in_place() {
+    let fstab = "UUID=root / btrfs defaults,subvol=/@ 0 0\n\
+                 UUID=root /.snapshots btrfs defaults,subvol=/wrong 0 0\n";
+    let input = MountRepairInputs {
+        fstab_text: fstab.into(),
+        target: target("root"),
+        catos_confirmation: CatosConfirmation::Confirmed,
+        subvol_facts: SubvolFacts {
+            observations: all_subvols_present(),
+        },
+        mount_point_observations: HashMap::new(),
+    };
+    let plan = build_plan(&input);
+    let rewritten = apply_in_memory(fstab, &plan).unwrap();
+    assert!(rewritten.contains("/.snapshots  btrfs  defaults,subvol=/@snapshots  0 0"));
 }

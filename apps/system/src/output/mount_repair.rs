@@ -105,6 +105,9 @@ pub fn render_mount_repair_human<W: Write>(
                 crate::model::mount_repair::AppliedAction::SubvolumeSkipped { subvol, reason } => {
                     writeln!(out, "    subvol-skip: {subvol} ({reason})")?;
                 }
+                crate::model::mount_repair::AppliedAction::SubvolumeRolledBack { subvol } => {
+                    writeln!(out, "    subvol-rollback: {subvol}")?;
+                }
                 crate::model::mount_repair::AppliedAction::DirectoryCreated { mount_point } => {
                     writeln!(out, "    mkdir: {mount_point}")?;
                 }
@@ -113,6 +116,15 @@ pub fn render_mount_repair_human<W: Write>(
                     reason,
                 } => {
                     writeln!(out, "    mkdir-skip: {mount_point} ({reason})")?;
+                }
+                crate::model::mount_repair::AppliedAction::DirectoryRolledBack { mount_point } => {
+                    writeln!(out, "    mkdir-rollback: {mount_point}")?;
+                }
+                crate::model::mount_repair::AppliedAction::RollbackResidual {
+                    resource,
+                    reason,
+                } => {
+                    writeln!(out, "    ROLLBACK-RESIDUAL: {resource} ({reason})")?;
                 }
             }
         }
@@ -148,6 +160,9 @@ pub fn render_mount_repair_human<W: Write>(
         writeln!(out, "    mounted            : {}", verification.mounted)?;
         if let Some(fstype) = &verification.observed_root_fstype {
             writeln!(out, "    observed fstype    : {fstype}")?;
+        }
+        for target in &verification.mounted_targets {
+            writeln!(out, "    accepted mount     : {target}")?;
         }
         if let Some(msg) = &verification.failure_message {
             writeln!(out, "    failure            : {msg}")?;
@@ -219,6 +234,7 @@ mod tests {
                 root_uuid: Some("abc-123".into()),
                 esp_device: Some(PathBuf::from("/dev/nvme0n1p1")),
                 esp_uuid: Some("DEAD-BEEF".into()),
+                boot_layout: None,
             }),
             plan: Some(MountRepairPlan {
                 problems: vec![
@@ -272,6 +288,7 @@ mod tests {
             verification: Some(MountVerification {
                 mounted: true,
                 observed_root_fstype: Some("btrfs".into()),
+                mounted_targets: Vec::new(),
                 failure_message: None,
             }),
             cleanup: MountRepairCleanup {

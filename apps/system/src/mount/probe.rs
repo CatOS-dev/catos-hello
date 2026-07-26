@@ -503,7 +503,10 @@ fn inspect_btrfs_roots(
         mounted.mount_point = Some(path);
         mounted.mounted_before_session = false;
         let fstab = RealFilesystem
-            .rooted_read_to_string(mounted.mount_point.as_ref().unwrap(), Path::new("etc/fstab"))
+            .rooted_read_to_string(
+                mounted.mount_point.as_ref().unwrap(),
+                Path::new("etc/fstab"),
+            )
             .map(|body| parse_all_with_diagnostics(&body).0)
             .unwrap_or_default();
         let (mut candidates, _, _, _) = identify_candidates(&[mounted], &fstab);

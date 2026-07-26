@@ -45,8 +45,8 @@ use crate::model::storage::{BlockDevice, DeviceClass, PartitionRole, RootCandida
 use crate::mount::probe::probe_unmounted_candidates;
 use crate::probe::discover_devices;
 use crate::probe::fs_probe::RealFilesystem;
-use crate::repair::runner::{CommandRunner, TrustedRunner};
 use crate::recovery::lock::DeviceLock;
+use crate::repair::runner::{CommandRunner, TrustedRunner};
 use crate::repair::runners::{
     btrfs_flow, btrfs_topology, e2fsck_flow, f2fs_flow, fat_flow, supports_filesystem, xfs_flow,
     BtrfsTopology, FlowOutcome,
@@ -328,7 +328,11 @@ fn proceed_with_repair<R: CommandRunner + ?Sized>(
     let _guard = match RepairTargetGuard::acquire(&device, &all_devices) {
         Ok(guard) => guard,
         Err(reason) => {
-            evidence.push(Evidence::new("REPAIR_PREFLIGHT_REFUSED", "repair::orchestrator", reason));
+            evidence.push(Evidence::new(
+                "REPAIR_PREFLIGHT_REFUSED",
+                "repair::orchestrator",
+                reason,
+            ));
             return FsRepairReport {
                 target_device: Some(device),
                 filesystem_type: Some(fstype.to_string()),
@@ -358,7 +362,11 @@ fn proceed_with_repair<R: CommandRunner + ?Sized>(
                     }
                     BtrfsTopology::SingleDevice => unreachable!(),
                 };
-                evidence.push(Evidence::new("BTRFS_TOPOLOGY_REFUSED", "repair::orchestrator", reason));
+                evidence.push(Evidence::new(
+                    "BTRFS_TOPOLOGY_REFUSED",
+                    "repair::orchestrator",
+                    reason,
+                ));
                 return FsRepairReport {
                     target_device: Some(device),
                     filesystem_type: Some(fstype.to_string()),
@@ -547,16 +555,20 @@ impl RepairTargetGuard {
             .and_then(|candidate| candidate.major_minor.as_deref())
             .ok_or_else(|| "target has no discovery-time major:minor identity".to_string())?;
         verify_target_unchanged(device, expected_major_minor)?;
-        let lock = DeviceLock::try_acquire(device)
-            .map_err(|error| format!("cannot acquire shared repair/recovery lock: {}", error.message))?;
+        let lock = DeviceLock::try_acquire(device).map_err(|error| {
+            format!(
+                "cannot acquire shared repair/recovery lock: {}",
+                error.message
+            )
+        })?;
         verify_target_unchanged(device, expected_major_minor)?;
         Ok(Self { _lock: lock })
     }
 }
 
 fn verify_target_unchanged(device: &Path, expected_major_minor: &str) -> Result<(), String> {
-    let metadata = std::fs::metadata(device)
-        .map_err(|error| format!("cannot stat target device: {error}"))?;
+    let metadata =
+        std::fs::metadata(device).map_err(|error| format!("cannot stat target device: {error}"))?;
     let actual_major_minor = format!(
         "{}:{}",
         libc::major(metadata.rdev()),

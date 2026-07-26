@@ -25,8 +25,10 @@ const CONFINED_RESOLVE: u64 = RESOLVE_BENEATH | RESOLVE_NO_MAGICLINKS | RESOLVE_
 const MAX_RECOVERY_FILE_BYTES: u64 = 16 * 1024 * 1024;
 const BTRFS_SUBVOL_RDONLY: u64 = 1 << 1;
 const BTRFS_SUBVOL_NAME_MAX: usize = 4039;
+const BTRFS_PATH_NAME_MAX: usize = 4087;
 const BTRFS_IOC_SNAP_CREATE_V2: u64 = 0x5000_9417;
 const BTRFS_IOC_SUBVOL_CREATE_V2: u64 = 0x5000_9418;
+const BTRFS_IOC_SNAP_DESTROY: u64 = 0x5000_940f;
 const RENAME_EXCHANGE: libc::c_uint = 1 << 1;
 
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -47,6 +49,12 @@ struct BtrfsIoctlVolArgsV2 {
     flags: u64,
     unused: [u64; 4],
     name: [u8; BTRFS_SUBVOL_NAME_MAX + 1],
+}
+
+#[repr(C)]
+struct BtrfsIoctlVolArgs {
+    fd: i64,
+    name: [u8; BTRFS_PATH_NAME_MAX + 1],
 }
 
 struct RootedEntry {
@@ -261,12 +269,8 @@ pub fn atomic_write_rooted(
     let entry = open_rooted_parent(top_level, rooted_path, false)?;
     reject_existing_non_regular_or_symlink(entry.parent.as_raw_fd(), &entry.name, &entry.display)?;
 
-    let (temp_name, temp_fd) = create_temp_file(
-        entry.parent.as_raw_fd(),
-        &entry.name,
-        &entry.display,
-        mode,
-    )?;
+    let (temp_name, temp_fd) =
+        create_temp_file(entry.parent.as_raw_fd(), &entry.name, &entry.display, mode)?;
     let mut temp = File::from(temp_fd);
     let write_result = (|| {
         temp.write_all(bytes)
@@ -314,6 +318,60 @@ pub fn atomic_write_rooted(
 /// traversing a symlink. Existing components must be directories.
 pub fn create_rooted_directory(top_level: &Path, rooted_path: &str) -> Result<(), RecoveryError> {
     open_rooted_directory(top_level, rooted_path, true).map(|_| ())
+}
+
+/// List one rooted directory without following symlinks in any component.
+pub fn list_rooted_directory_names(
+    top_level: &Path,
+    rooted_path: &str,
+) -> Result<Vec<OsString>, RecoveryError> {
+    let directory = open_rooted_directory(top_level, rooted_path, false)?;
+    list_open_directory_names(directory.as_raw_fd(), Path::new(rooted_path))
+}
+
+/// Remove an ordinary rooted directory only after proving it is empty.
+pub fn remove_empty_rooted_directory(
+    top_level: &Path,
+    rooted_path: &str,
+) -> Result<(), RecoveryError> {
+    let entry = open_rooted_parent(top_level, rooted_path, false)?;
+    match entry_type(entry.parent.as_raw_fd(), &entry.name, &entry.display)? {
+        None => return Ok(()),
+        Some(kind) if kind == libc::S_IFDIR => {}
+        Some(libc::S_IFLNK) => {
+            return Err(unsafe_path(
+                &entry.display,
+                "empty-directory rollback target is a symlink",
+            ));
+        }
+        Some(_) => {
+            return Err(RecoveryError::new(
+                RecoveryErrorKind::RootSwitchConflict,
+                format!(
+                    "rollback target {} is not a directory",
+                    entry.display.display()
+                ),
+            ));
+        }
+    }
+    let names = list_rooted_directory_names(top_level, rooted_path)?;
+    if !names.is_empty() {
+        return Err(RecoveryError::new(
+            RecoveryErrorKind::RootSwitchConflict,
+            format!(
+                "refusing to remove non-empty rollback directory {}",
+                entry.display.display()
+            ),
+        ));
+    }
+    unlinkat_dir_name(entry.parent.as_raw_fd(), &entry.name).map_err(|error| {
+        map_path_error(&entry.display, "remove empty rooted directory", error, true)
+    })?;
+    fsync_fd(
+        entry.parent.as_raw_fd(),
+        &entry.display,
+        "fsync rooted directory parent after rollback",
+    )
 }
 
 pub fn remove_file(path: &Path) -> Result<(), RecoveryError> {
@@ -392,6 +450,48 @@ pub fn list_directory_names(path: &Path) -> Result<Vec<OsString>, RecoveryError>
             break;
         }
         let bytes = unsafe { CStr::from_ptr((*entry).d_name.as_ptr()) }.to_bytes();
+        if bytes != b"." && bytes != b".." {
+            names.push(OsString::from_vec(bytes.to_vec()));
+        }
+    }
+    Ok(names)
+}
+
+fn list_open_directory_names(
+    directory_fd: RawFd,
+    path: &Path,
+) -> Result<Vec<OsString>, RecoveryError> {
+    let duplicate = unsafe { libc::fcntl(directory_fd, libc::F_DUPFD_CLOEXEC, 3) };
+    if duplicate < 0 {
+        return Err(io_error(
+            path,
+            "duplicate rooted directory fd",
+            std::io::Error::last_os_error(),
+        ));
+    }
+    let stream = unsafe { libc::fdopendir(duplicate) };
+    if stream.is_null() {
+        let error = std::io::Error::last_os_error();
+        unsafe { libc::close(duplicate) };
+        return Err(io_error(path, "open rooted directory stream", error));
+    }
+    let mut names = Vec::new();
+    loop {
+        errno_clear();
+        let item = unsafe { libc::readdir(stream) };
+        if item.is_null() {
+            let errno = errno_get();
+            unsafe { libc::closedir(stream) };
+            if errno != 0 {
+                return Err(io_error(
+                    path,
+                    "read rooted directory",
+                    std::io::Error::from_raw_os_error(errno),
+                ));
+            }
+            break;
+        }
+        let bytes = unsafe { CStr::from_ptr((*item).d_name.as_ptr()) }.to_bytes();
         if bytes != b"." && bytes != b".." {
             names.push(OsString::from_vec(bytes.to_vec()));
         }
@@ -579,6 +679,61 @@ pub fn create_btrfs_subvolume(top_level: &Path, rooted_path: &str) -> Result<(),
 
 /// Atomically exchange two entries below the same mounted btrfs
 /// top-level using dirfd-relative `renameat2(RENAME_EXCHANGE)`.
+/// Delete a Btrfs subvolume only after proving its directory is empty.
+/// This is used solely to roll back subvolumes created by the current mount
+/// repair transaction; it never deletes pre-existing or non-empty content.
+pub fn delete_empty_btrfs_subvolume(
+    top_level: &Path,
+    rooted_path: &str,
+) -> Result<(), RecoveryError> {
+    let names = list_rooted_directory_names(top_level, rooted_path)?;
+    if !names.is_empty() {
+        return Err(RecoveryError::new(
+            RecoveryErrorKind::RootSwitchConflict,
+            format!("refusing to delete non-empty Btrfs subvolume {rooted_path}"),
+        ));
+    }
+    let destination = open_rooted_parent(top_level, rooted_path, false)?;
+    require_directory_entry(&destination)?;
+    let name = destination.name.as_bytes();
+    if name.is_empty() || name.len() > BTRFS_PATH_NAME_MAX || name.contains(&0) {
+        return Err(unsafe_path(
+            &destination.display,
+            "invalid Btrfs subvolume rollback name",
+        ));
+    }
+    let mut arguments = BtrfsIoctlVolArgs {
+        fd: 0,
+        name: [0; BTRFS_PATH_NAME_MAX + 1],
+    };
+    arguments.name[..name.len()].copy_from_slice(name);
+    let result = unsafe {
+        libc::syscall(
+            libc::SYS_ioctl,
+            destination.parent.as_raw_fd(),
+            BTRFS_IOC_SNAP_DESTROY as libc::c_ulong,
+            &mut arguments,
+        )
+    };
+    if result != 0 {
+        let error = std::io::Error::last_os_error();
+        let mut recovery_error = RecoveryError::new(
+            RecoveryErrorKind::SyscallFailed,
+            format!(
+                "BTRFS_IOC_SNAP_DESTROY {} failed: {error}",
+                destination.display.display()
+            ),
+        );
+        recovery_error.errno = error.raw_os_error();
+        return Err(recovery_error);
+    }
+    fsync_fd(
+        destination.parent.as_raw_fd(),
+        &destination.display,
+        "fsync Btrfs subvolume parent after rollback",
+    )
+}
+
 pub fn exchange_rooted_paths(
     top_level: &Path,
     left: &str,
@@ -944,6 +1099,17 @@ fn unlinkat_name(parent: RawFd, name: &OsStr) -> std::io::Result<()> {
     }
 }
 
+fn unlinkat_dir_name(parent: RawFd, name: &OsStr) -> std::io::Result<()> {
+    let c_name = CString::new(name.as_bytes())
+        .map_err(|_| std::io::Error::from_raw_os_error(libc::EINVAL))?;
+    let rc = unsafe { libc::unlinkat(parent, c_name.as_ptr(), libc::AT_REMOVEDIR) };
+    if rc == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
 fn fsync_fd(fd: RawFd, path: &Path, operation: &str) -> Result<(), RecoveryError> {
     let rc = unsafe { libc::fsync(fd) };
     if rc == 0 {
@@ -1099,6 +1265,33 @@ mod tests {
     }
 
     #[test]
+    fn empty_rooted_directory_is_removed_but_nonempty_is_preserved() {
+        let top = scratch("empty-dir-rollback");
+        std::fs::create_dir_all(top.join("empty")).unwrap();
+        std::fs::create_dir_all(top.join("nonempty")).unwrap();
+        std::fs::write(top.join("nonempty/data"), b"keep").unwrap();
+
+        remove_empty_rooted_directory(&top, "/empty").unwrap();
+        assert!(!top.join("empty").exists());
+        let error = remove_empty_rooted_directory(&top, "/nonempty").unwrap_err();
+        assert_eq!(error.kind, RecoveryErrorKind::RootSwitchConflict);
+        assert_eq!(std::fs::read(top.join("nonempty/data")).unwrap(), b"keep");
+        let _ = std::fs::remove_dir_all(top);
+    }
+
+    #[test]
+    fn btrfs_subvolume_rollback_refuses_nonempty_before_ioctl() {
+        let top = scratch("nonempty-subvol-rollback");
+        std::fs::create_dir_all(top.join("candidate")).unwrap();
+        std::fs::write(top.join("candidate/data"), b"keep").unwrap();
+
+        let error = delete_empty_btrfs_subvolume(&top, "/candidate").unwrap_err();
+        assert_eq!(error.kind, RecoveryErrorKind::RootSwitchConflict);
+        assert_eq!(std::fs::read(top.join("candidate/data")).unwrap(), b"keep");
+        let _ = std::fs::remove_dir_all(top);
+    }
+
+    #[test]
     fn rooted_atomic_write_replaces_target_file_and_rejects_parent_symlink() {
         let top = scratch("rooted-write");
         let outside = scratch("rooted-write-outside");
@@ -1107,13 +1300,15 @@ mod tests {
         std::fs::write(top.join("@/etc/fstab"), "old\n").unwrap();
 
         atomic_write_rooted(&top, "/@/etc/fstab", b"new\n", 0o644).unwrap();
-        assert_eq!(std::fs::read_to_string(top.join("@/etc/fstab")).unwrap(), "new\n");
+        assert_eq!(
+            std::fs::read_to_string(top.join("@/etc/fstab")).unwrap(),
+            "new\n"
+        );
 
         std::fs::remove_file(top.join("@/etc/fstab")).unwrap();
         std::fs::remove_dir(top.join("@/etc")).unwrap();
         symlink(&outside, top.join("@/etc")).unwrap();
-        let error = atomic_write_rooted(&top, "/@/etc/fstab", b"blocked\n", 0o644)
-            .unwrap_err();
+        let error = atomic_write_rooted(&top, "/@/etc/fstab", b"blocked\n", 0o644).unwrap_err();
         assert_eq!(error.kind, RecoveryErrorKind::UnsafeRecoveryPath);
         assert!(!outside.join("fstab").exists());
 

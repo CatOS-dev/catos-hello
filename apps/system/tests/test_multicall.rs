@@ -602,3 +602,26 @@ fn doctor_remains_argumentless_after_routing_changes() {
         assert_eq!(code, 2);
     }
 }
+
+#[test]
+fn recovery_subcommand_help_lists_real_required_options() {
+    let directory = TempDir::new("recovery-subcommand-help").unwrap();
+    let recovery = directory.path.join("catos-recovery");
+    symlink(bin_path(), &recovery).unwrap();
+    let output = Command::new(&recovery)
+        .args(["apply", "--help"])
+        .output()
+        .expect("run catos-recovery apply --help");
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    for required in ["--root-device", "--plan-file", "--plan-id", "--confirm"] {
+        assert!(
+            stdout.contains(required),
+            "missing {required} in apply help: {stdout}"
+        );
+    }
+    assert!(
+        !stdout.contains("COMMANDS:\n    list"),
+        "apply help fell back to top-level help"
+    );
+}

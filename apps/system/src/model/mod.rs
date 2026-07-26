@@ -20,10 +20,10 @@ pub use mount::{
     MountStep, MountedResource, NamespaceState,
 };
 pub use mount_repair::{
-    default_mount_options, AppliedAction, CatosSubvolSpec, FstabDigest, FstabTransaction,
-    MountProblem, MountRepairCleanup, MountRepairOutcome, MountRepairPlan, MountRepairReport,
-    MountVerification, PlannedDirectory, PlannedFstabEdit, PlannedSubvolume, TargetIdentity,
-    CATOS_STANDARD_SUBVOLS,
+    default_mount_options, AppliedAction, BootMountLayout, CatosSubvolSpec, FstabDigest,
+    FstabTransaction, MountProblem, MountRepairCleanup, MountRepairOutcome, MountRepairPlan,
+    MountRepairReport, MountVerification, PlannedDirectory, PlannedFstabEdit, PlannedSubvolume,
+    TargetIdentity, CATOS_STANDARD_SUBVOLS,
 };
 pub use runtime::{Detection, DetectionStatus, PrimaryRuntimeMode, RuntimeFacts};
 pub use storage::{

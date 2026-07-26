@@ -20,7 +20,7 @@
 //! * The plan binds to disk facts (root identity, fstab digest) at
 //!   build time. Any drift detected before apply MUST abort the plan.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
@@ -105,6 +105,72 @@ pub fn default_mount_options(fstype: &str) -> Option<&'static str> {
         "f2fs" => Some("defaults,compress_algorithm=lz4,compress_chksum,gc_merge,lazytime"),
         "vfat" | "fat" | "exfat" => Some("defaults,umask=0077"),
         _ => None,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Boot / ESP mount topology
+// ---------------------------------------------------------------------------
+
+/// The six supported CatOS `/boot` and ESP mount layouts. Detection is
+/// descriptive and never chooses a new layout: mount repair preserves the
+/// target's existing topology and only corrects stale device references.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum BootMountLayout {
+    /// `/boot` lives inside the root and the ESP is mounted below it.
+    EspAtBootEfi { esp_device: PathBuf },
+    /// `/boot` lives inside the root and the ESP is mounted at `/efi`.
+    EspAtEfi { esp_device: PathBuf },
+    /// The ESP itself is mounted directly at `/boot`.
+    EspAtBoot { esp_device: PathBuf },
+    /// `/boot` is a separate ordinary filesystem and the ESP is a second
+    /// filesystem mounted at `/boot/efi` or `/efi`.
+    SeparateBootAndEsp {
+        boot_device: PathBuf,
+        esp_device: PathBuf,
+        esp_mount_point: String,
+    },
+    /// `/boot` is a separate Btrfs subvolume on the root filesystem. An
+    /// external ESP may additionally be mounted at `/boot/efi` or `/efi`.
+    BootBtrfsSubvolume {
+        subvolume: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        esp_device: Option<PathBuf>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        esp_mount_point: Option<String>,
+    },
+    /// `/boot` and all boot resources live inside the root filesystem and
+    /// no external ESP mount is described by fstab (BIOS or firmware layout
+    /// managed outside fstab).
+    BootInsideRoot,
+}
+
+impl BootMountLayout {
+    pub fn esp_device(&self) -> Option<&Path> {
+        match self {
+            BootMountLayout::EspAtBootEfi { esp_device }
+            | BootMountLayout::EspAtEfi { esp_device }
+            | BootMountLayout::EspAtBoot { esp_device }
+            | BootMountLayout::SeparateBootAndEsp { esp_device, .. } => Some(esp_device),
+            BootMountLayout::BootBtrfsSubvolume { esp_device, .. } => esp_device.as_deref(),
+            BootMountLayout::BootInsideRoot => None,
+        }
+    }
+
+    pub fn esp_mount_point(&self) -> Option<&str> {
+        match self {
+            BootMountLayout::EspAtBootEfi { .. } => Some("/boot/efi"),
+            BootMountLayout::EspAtEfi { .. } => Some("/efi"),
+            BootMountLayout::EspAtBoot { .. } => Some("/boot"),
+            BootMountLayout::SeparateBootAndEsp {
+                esp_mount_point, ..
+            } => Some(esp_mount_point),
+            BootMountLayout::BootBtrfsSubvolume {
+                esp_mount_point, ..
+            } => esp_mount_point.as_deref(),
+            BootMountLayout::BootInsideRoot => None,
+        }
     }
 }
 
@@ -363,11 +429,21 @@ pub enum AppliedAction {
         subvol: String,
         reason: String,
     },
+    SubvolumeRolledBack {
+        subvol: String,
+    },
     DirectoryCreated {
         mount_point: String,
     },
     DirectorySkipped {
         mount_point: String,
+        reason: String,
+    },
+    DirectoryRolledBack {
+        mount_point: String,
+    },
+    RollbackResidual {
+        resource: String,
         reason: String,
     },
 }
@@ -399,6 +475,10 @@ pub struct TargetIdentity {
     /// UUID of the ESP filesystem, when known.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub esp_uuid: Option<String>,
+    /// Detected `/boot` and ESP topology. Mount repair refuses to edit an
+    /// ESP source until this layout has been established unambiguously.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub boot_layout: Option<BootMountLayout>,
 }
 
 /// Digest of the original fstab content as observed at plan time.
@@ -485,6 +565,11 @@ pub struct MountVerification {
     /// fstype the kernel reported for the root mount, when available.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub observed_root_fstype: Option<String>,
+    /// Every fstab target actually mounted during acceptance. A successful
+    /// repair of the standard CatOS layout includes `/`, standard subvolume
+    /// mount points, and any external `/boot` or ESP mount.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mounted_targets: Vec<String>,
     /// Failure message, when the verification mount failed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub failure_message: Option<String>,
@@ -678,6 +763,7 @@ mod tests {
             root_uuid: Some("abc".into()),
             esp_device: None,
             esp_uuid: None,
+            boot_layout: None,
         };
         let r = MountRepairReport::clean(target.clone());
         assert_eq!(r.final_outcome, MountRepairOutcome::Clean);

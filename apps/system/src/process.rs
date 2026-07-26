@@ -205,6 +205,25 @@ mod tests {
     }
 
     #[test]
+    fn capped_reader_keeps_pipe_open_until_writer_finishes() {
+        use std::io::Write;
+        use std::os::unix::net::UnixStream;
+
+        let (reader, mut writer) = UnixStream::pair().unwrap();
+        let writer_thread = std::thread::spawn(move || {
+            let bytes = vec![b'x'; 1024 * 1024];
+            writer.write_all(&bytes).unwrap();
+            writer.shutdown(std::net::Shutdown::Write).unwrap();
+        });
+        let (retained, truncated) = read_capped(reader, 64).unwrap();
+        writer_thread
+            .join()
+            .expect("writer must not receive EPIPE after report cap");
+        assert_eq!(retained, vec![b'x'; 64]);
+        assert!(truncated);
+    }
+
+    #[test]
     fn capped_reader_drains_bytes_after_the_limit() {
         let bytes = vec![b'x'; 128 * 1024];
         let (retained, truncated) = read_capped(&bytes[..], 64).unwrap();

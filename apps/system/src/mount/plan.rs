@@ -281,6 +281,10 @@ pub struct PlanInputs<'a> {
     pub fstab: &'a [FstabEntry],
     /// Whether the caller wants ESP/boot mounts included.
     pub include_boot: bool,
+    /// Whether ordinary local fstab entries should be mounted. Phase 2 keeps
+    /// this false to minimise probe surface; mount-repair verification sets
+    /// it true so every repaired standard subvolume is acceptance-tested.
+    pub include_local: bool,
 }
 
 /// Build a [`MountPlan`] from inputs. Pure: no I/O beyond the resolver
@@ -348,9 +352,9 @@ pub fn build_plan(inputs: PlanInputs<'_>) -> Result<MountPlan, MountError> {
                 rationale.push(format!("skipped pseudo fs: target={}", entry.target));
                 continue;
             }
-            FstabEntryKind::OtherLocal => {
+            FstabEntryKind::OtherLocal if !inputs.include_local => {
                 rationale.push(format!(
-                    "skipped non-boot local fs (phase 2 reports but does not mount): target={}",
+                    "skipped non-boot local fs (caller did not request full local verification): target={}",
                     entry.target
                 ));
                 continue;
@@ -784,6 +788,7 @@ mod tests {
             devices: &[dev],
             fstab: &fstab,
             include_boot: false,
+            include_local: false,
         })
         .expect("plan");
         assert_eq!(plan.steps.len(), 1);
@@ -825,6 +830,7 @@ mod tests {
             devices: &[dev],
             fstab: &fstab,
             include_boot: false,
+            include_local: false,
         })
         .expect("plan");
         let root = &plan.steps[0];
@@ -863,6 +869,7 @@ mod tests {
             devices: &[dev],
             fstab: &fstab,
             include_boot: false,
+            include_local: false,
         })
         .unwrap_err();
         assert_eq!(err.kind, MountErrorKind::UnsafeTargetPath);
@@ -895,6 +902,7 @@ mod tests {
             devices: &[dev],
             fstab: &fstab,
             include_boot: false,
+            include_local: false,
         })
         .expect("plan");
         let options = &plan.steps[0].options;
@@ -954,6 +962,7 @@ mod tests {
             devices: &[dev],
             fstab: &fstab,
             include_boot: false,
+            include_local: false,
         })
         .expect("plan");
         assert!(plan.steps[0].options.contains(&"norecovery".into()));
@@ -996,6 +1005,7 @@ mod tests {
             devices: &[root_dev, esp_dev],
             fstab: &fstab,
             include_boot: true,
+            include_local: false,
         })
         .expect("plan");
         assert_eq!(plan.steps.len(), 2);
@@ -1048,6 +1058,7 @@ mod tests {
             devices: &[root_dev],
             fstab: &fstab,
             include_boot: false,
+            include_local: false,
         })
         .expect("plan");
         assert_eq!(plan.steps.len(), 1); // only the root step
@@ -1092,6 +1103,7 @@ mod tests {
             devices: &[root_dev, esp_dev],
             fstab: &fstab,
             include_boot: true,
+            include_local: false,
         })
         .unwrap();
         assert_eq!(plan.steps.len(), 1);
@@ -1124,6 +1136,7 @@ mod tests {
             devices: &[dev],
             fstab: &fstab,
             include_boot: false,
+            include_local: false,
         })
         .unwrap_err();
         assert_eq!(err.kind, MountErrorKind::UnsupportedFilesystem);
@@ -1151,6 +1164,7 @@ mod tests {
             devices: &[],
             fstab: &fstab,
             include_boot: false,
+            include_local: false,
         })
         .unwrap_err();
         assert_eq!(err.kind, MountErrorKind::AmbiguousDeviceReference);
@@ -1179,6 +1193,7 @@ mod tests {
             devices: &[esp],
             fstab: &fstab,
             include_boot: true,
+            include_local: false,
         })
         .unwrap_err();
         assert_eq!(err.kind, MountErrorKind::AmbiguousRootCandidate);

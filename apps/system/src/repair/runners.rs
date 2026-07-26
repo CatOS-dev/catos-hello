@@ -515,10 +515,12 @@ pub fn btrfs_topology<R: CommandRunner + ?Sized>(
 ///
 /// ## Sequence (verified against btrfs-check(8), btrfs-progs current)
 ///
-/// 1. `btrfs check --readonly DEVICE` — read-only check. The man
-///    page says `btrfs check` is read-only by default; we add
-///    `--readonly` explicitly so the audit trail is unambiguous.
-/// 2. If (1) reports errors, run `btrfs check --repair DEVICE` as
+/// 1. `btrfs check --readonly DEVICE` — read-only check. The command can
+///    return zero after falling back to a healthy DUP metadata mirror while
+///    still printing `checksum verify failed`; that explicit diagnostic is
+///    treated as corruption rather than a clean result.
+/// 2. If (1) reports errors by status or checksum diagnostic, run
+///    `btrfs check --repair DEVICE` as
 ///    the **authorized last-resort fallback**. The man page warns
 ///    verbatim: "Do not use --repair unless you are advised to do
 ///    so by a developer or an experienced user...".
@@ -557,7 +559,13 @@ pub fn btrfs_flow<R: CommandRunner + ?Sized>(
         vec!["check".into(), "--readonly".into(), device.into()],
     );
     let check_result = runner.invoke(&check_invocation)?;
-    let check_interp = decode_btrfs_exit(&check_result);
+    let check_detected_corruption = btrfs_reports_metadata_checksum_failure(&check_result);
+    let mut check_interp = decode_btrfs_exit(&check_result);
+    if check_detected_corruption {
+        check_interp.clean = false;
+        check_interp.errors_uncorrected = true;
+        check_interp.label = Some("btrfs-metadata-checksum-failure".into());
+    }
     let check_attempt = RepairAttempt {
         kind: AttemptKind::ReadonlyCheck,
         tool: RepairTool::BtrfsCheck,
@@ -583,8 +591,10 @@ pub fn btrfs_flow<R: CommandRunner + ?Sized>(
             outcome: FlowOutcome::TimedOut,
         });
     }
-    if check_result.exit_code == 0 {
-        // Clean: no repair needed.
+    if check_result.exit_code == 0 && !check_detected_corruption {
+        // Clean: no repair needed. btrfs-progs may still return zero after
+        // recovering a bad DUP metadata mirror; the explicit checksum
+        // diagnostic above is therefore part of the corruption verdict.
         return Ok(FlowResult {
             attempts: vec![check_attempt],
             outcome: FlowOutcome::Clean,
@@ -623,7 +633,13 @@ pub fn btrfs_flow<R: CommandRunner + ?Sized>(
         vec!["check".into(), "--readonly".into(), device.into()],
     );
     let recheck_result = runner.invoke(&recheck_invocation)?;
-    let recheck_interp = decode_btrfs_exit(&recheck_result);
+    let recheck_detected_corruption = btrfs_reports_metadata_checksum_failure(&recheck_result);
+    let mut recheck_interp = decode_btrfs_exit(&recheck_result);
+    if recheck_detected_corruption {
+        recheck_interp.clean = false;
+        recheck_interp.errors_uncorrected = true;
+        recheck_interp.label = Some("btrfs-metadata-checksum-failure".into());
+    }
     let recheck_attempt = RepairAttempt {
         kind: AttemptKind::VerificationCheck,
         tool: RepairTool::BtrfsCheck,
@@ -637,7 +653,10 @@ pub fn btrfs_flow<R: CommandRunner + ?Sized>(
         rationale: "btrfs check --readonly (post-repair recheck)".into(),
     };
 
-    let outcome = if repair_result.exit_code == 0 && recheck_result.exit_code == 0 {
+    let outcome = if repair_result.exit_code == 0
+        && recheck_result.exit_code == 0
+        && !recheck_detected_corruption
+    {
         FlowOutcome::RepairedViaHighRiskFallback
     } else {
         FlowOutcome::Unrepaired
@@ -647,6 +666,18 @@ pub fn btrfs_flow<R: CommandRunner + ?Sized>(
         attempts: vec![check_attempt, repair_attempt, recheck_attempt],
         outcome,
     })
+}
+
+fn btrfs_reports_metadata_checksum_failure(result: &ToolResult) -> bool {
+    const DIAGNOSTIC: &[u8] = b"checksum verify failed";
+    result
+        .stdout
+        .windows(DIAGNOSTIC.len())
+        .any(|window| window == DIAGNOSTIC)
+        || result
+            .stderr
+            .windows(DIAGNOSTIC.len())
+            .any(|window| window == DIAGNOSTIC)
 }
 
 pub fn decode_btrfs_exit(result: &ToolResult) -> ExitInterpretation {
@@ -920,6 +951,39 @@ mod tests {
         assert!(!runner.any_invocation_with_flag("--repair"));
         assert_eq!(flow.attempts.len(), 1);
         assert_eq!(flow.attempts[0].kind, AttemptKind::ReadonlyCheck);
+    }
+
+    #[test]
+    fn btrfs_zero_exit_with_metadata_checksum_failure_runs_repair() {
+        let runner = RecordedRunner::new()
+            .queue_raw(
+                0,
+                b"checksum verify failed on 30605312 wanted 0x1 found 0x2\nno error found".to_vec(),
+                b"".to_vec(),
+            )
+            .queue_raw(0, b"repaired mirror".to_vec(), b"".to_vec())
+            .queue_raw(0, b"clean".to_vec(), b"".to_vec());
+        let flow = btrfs_flow(&runner, "/dev/sda1").unwrap();
+        assert_eq!(flow.outcome, FlowOutcome::RepairedViaHighRiskFallback);
+        assert_eq!(flow.attempts.len(), 3);
+        assert!(!flow.attempts[0].exit.clean);
+        assert!(flow.attempts[0].exit.errors_uncorrected);
+        assert!(runner.any_invocation_with_flag("--repair"));
+    }
+
+    #[test]
+    fn btrfs_recheck_checksum_failure_keeps_outcome_unrepaired() {
+        let runner = RecordedRunner::new()
+            .queue_raw(1, b"errors".to_vec(), b"".to_vec())
+            .queue_raw(0, b"repair returned success".to_vec(), b"".to_vec())
+            .queue_raw(
+                0,
+                b"checksum verify failed on 30605312 wanted 0x1 found 0x2".to_vec(),
+                b"".to_vec(),
+            );
+        let flow = btrfs_flow(&runner, "/dev/sda1").unwrap();
+        assert_eq!(flow.outcome, FlowOutcome::Unrepaired);
+        assert!(!flow.attempts[2].exit.clean);
     }
 
     #[test]

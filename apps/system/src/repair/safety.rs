@@ -510,7 +510,9 @@ mod tests {
         let devices = vec![ext4_root("sda1", "/dev/sda1")];
         let selection = RepairTargetSelection::default();
         let decision = evaluate_safety(&devices, &selection, None);
-        assert!(matches!(decision.verdict, SafetyVerdict::AmbiguousTarget { candidates } if candidates.is_empty()));
+        assert!(
+            matches!(decision.verdict, SafetyVerdict::AmbiguousTarget { candidates } if candidates.is_empty())
+        );
     }
 
     #[test]
@@ -521,7 +523,9 @@ mod tests {
         ];
         let selection = RepairTargetSelection::default();
         let decision = evaluate_safety(&devices, &selection, None);
-        assert!(matches!(decision.verdict, SafetyVerdict::AmbiguousTarget { candidates } if candidates.is_empty()));
+        assert!(
+            matches!(decision.verdict, SafetyVerdict::AmbiguousTarget { candidates } if candidates.is_empty())
+        );
     }
 
     #[test]

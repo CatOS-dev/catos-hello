@@ -229,17 +229,10 @@ if(BUILD_TESTS)
         )
     endif()
     if(CATOS_SYSTEM_REPAIR_SMOKE)
-        # Stage-2 real-filesystem repair smoke test. Builds corrupt
-        # ext4/vfat/btrfs images (and xfs when xfsprogs is present),
-        # boots the static binary in QEMU, and asserts:
-        #   * each fstype routes to the correct tool;
-        #   * ext4 e2fsck repairs the corruption;
-        #   * vfat fsck.fat repairs the corruption;
-        #   * btrfs check --readonly -> --repair -> --readonly sequence;
-        #   * xfs normal repair on a clean image (no -L fallback);
-        #   * xfs -L fallback on a dirty-log image, flagged as
-        #     RepairedWithRisk;
-        #   * no residual session mounts under /run/catos-system.
+        # Stage-2 real-filesystem repair smoke test. It repairs damaged
+        # ext4/vfat images, corrupts one metadata-DUP Btrfs mirror and proves
+        # --repair plus clean recheck, exercises normal XFS repair, and creates
+        # a real dirty XFS journal by killing a writer VM before proving -L.
         # Skips with exit 77 when qemu/kernel/busybox/mkfs tools are
         # missing.
         add_test(
@@ -255,6 +248,9 @@ if(BUILD_TESTS)
         )
     endif()
     if(CATOS_SYSTEM_MOUNT_REPAIR_SMOKE)
+        # Stage-3 state-changing acceptance: all six boot/ESP layouts,
+        # independent ext4 /boot, Btrfs @boot, offline/current ext4 roots,
+        # complete mount verification, cleanup, and empty-object rollback.
         add_test(
             NAME catos-system-mount-repair-qemu-smoke
             COMMAND "${BASH_CMD}"

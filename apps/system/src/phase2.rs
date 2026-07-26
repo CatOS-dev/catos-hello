@@ -123,6 +123,7 @@ pub fn run_target_plan(
         devices: &inputs.devices,
         fstab: &inputs.fstab,
         include_boot: true,
+        include_local: false,
     })
     .map_err(mount_error_to_top_error)?;
     Ok(Phase2Outcome::TargetPlan {
@@ -146,6 +147,7 @@ pub fn run_target_mount(
         devices: &inputs.devices,
         fstab: &inputs.fstab,
         include_boot: true,
+        include_local: false,
     })
     .map_err(mount_error_to_top_error)?;
 

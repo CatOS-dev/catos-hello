@@ -90,7 +90,7 @@ missing=()
 # corruptible image; missing tools cause the corresponding assertion
 # to be skipped rather than fabricated.
 for tool in cpio gzip timeout mkfs.ext4 mkfs.vfat mkfs.btrfs \
-            e2fsck fsck.fat btrfs debugfs sha256sum python3 ldd; do
+            e2fsck fsck.fat btrfs btrfs-map-logical debugfs sha256sum python3 ldd; do
     command -v "$tool" >/dev/null 2>&1 || missing+=("$tool")
 done
 # xfs is optional — many minimal hosts do not ship xfsprogs. The
@@ -119,8 +119,8 @@ INITRAMFS_IMG="$WORKDIR/initramfs.cpio.gz"
 SERIAL_LOG="$WORKDIR/serial.log"
 
 # Image files. vda = ext4 (corrupted); vdb = vfat (corrupted);
-# vdc = btrfs (corrupted); vdd = xfs (clean — tests normal repair
-# on a healthy fs); vde = xfs (dirty log — tests the -L fallback).
+# vdc = Btrfs metadata-DUP with one damaged root-tree mirror; vdd = XFS
+# normal repair; vde = XFS dirty log that must use the -L fallback.
 EXT4_IMG="$WORKDIR/ext4.img"
 VFAT_IMG="$WORKDIR/vfat.img"
 BTRFS_IMG="$WORKDIR/btrfs.img"
@@ -186,24 +186,68 @@ if [ "$VFAT_HASH_BEFORE_CORRUPT" = "$VFAT_HASH_AFTER_CORRUPT" ]; then
     exit 1
 fi
 
-# btrfs image: build a clean filesystem. We do NOT corrupt it
-# because reliably triggering a btrfs --readonly failure on a
-# freshly-mkfs'd image requires either btrfs-corrupt-block (not
-# packaged in most distros) or knowledge of the on-disk layout that
-# is fragile across btrfs-progs versions. The smoke test here
-# verifies the clean-check path: a healthy btrfs image MUST route
-# to `btrfs check --readonly` and exit clean. The damage-detection
-# and --repair paths are covered by the unit tests in
-# tests/test_repair_contract.rs (which inject canned exit codes
-# through RecordedRunner).
-truncate -s 128M "$BTRFS_IMG"
-mkfs.btrfs -q -f -L repair-btrfs -m single -d single "$BTRFS_IMG"
+# Btrfs image: metadata DUP gives the root-tree block two physical
+# mirrors. Corrupt one mirror at a mapped physical offset. Current
+# btrfs-progs can return exit 0 after reading the healthy mirror while still
+# printing "checksum verify failed"; catos-repair treats that diagnostic as
+# real corruption, invokes --repair, and requires a clean diagnostic recheck.
+truncate -s 512M "$BTRFS_IMG"
+mkfs.btrfs -q -f -L repair-btrfs -m dup -d single "$BTRFS_IMG"
 BTRFS_HASH_BEFORE_CORRUPT=$(sha256sum "$BTRFS_IMG" | awk '{print $1}')
-BTRFS_HASH_AFTER_CORRUPT="$BTRFS_HASH_BEFORE_CORRUPT"
+BTRFS_ROOT_LOGICAL=$(btrfs inspect-internal dump-tree -t root "$BTRFS_IMG" 2>/dev/null \
+    | awk '/^leaf [0-9]+/ { print $2; exit }')
+if [ -z "$BTRFS_ROOT_LOGICAL" ]; then
+    echo "fail: could not identify the Btrfs root-tree logical block" >&2
+    KEEP=1
+    exit 1
+fi
+BTRFS_MAP_OUTPUT=$(btrfs-map-logical \
+    -l "$BTRFS_ROOT_LOGICAL" -c 1 -b 16384 \
+    -o "$WORKDIR/btrfs-root-copy.bin" "$BTRFS_IMG" 2>&1)
+BTRFS_ROOT_PHYSICAL=$(printf '%s\n' "$BTRFS_MAP_OUTPUT" \
+    | awk '/^mirror 1 logical / { print $6; exit }')
+if [ -z "$BTRFS_ROOT_PHYSICAL" ]; then
+    echo "fail: could not map Btrfs root-tree mirror 1" >&2
+    echo "$BTRFS_MAP_OUTPUT" >&2
+    KEEP=1
+    exit 1
+fi
+python3 - "$BTRFS_IMG" "$((BTRFS_ROOT_PHYSICAL + 1024))" <<'PY_BTRFS_CORRUPT'
+import sys
+path = sys.argv[1]
+offset = int(sys.argv[2])
+with open(path, "r+b", buffering=0) as image:
+    image.seek(offset)
+    original = image.read(1)
+    if len(original) != 1:
+        raise SystemExit("cannot read Btrfs corruption byte")
+    image.seek(offset)
+    image.write(bytes([original[0] ^ 0x5A]))
+PY_BTRFS_CORRUPT
+BTRFS_HASH_AFTER_CORRUPT=$(sha256sum "$BTRFS_IMG" | awk '{print $1}')
+if [ "$BTRFS_HASH_BEFORE_CORRUPT" = "$BTRFS_HASH_AFTER_CORRUPT" ]; then
+    echo "fail: Btrfs mirror corruption did not change the image" >&2
+    KEEP=1
+    exit 1
+fi
+set +e
+btrfs check --readonly "$BTRFS_IMG" > "$WORKDIR/btrfs-before-repair.log" 2>&1
+BTRFS_PRECHECK_RC=$?
+set -e
+if ! grep -q 'checksum verify failed' "$WORKDIR/btrfs-before-repair.log"; then
+    echo "fail: Btrfs fixture did not expose the expected checksum failure" >&2
+    cat "$WORKDIR/btrfs-before-repair.log" >&2
+    KEEP=1
+    exit 1
+fi
+# The exit code is intentionally not constrained: btrfs-progs 7.1 reports
+# this recoverable mirror corruption while returning 0.
+: "$BTRFS_PRECHECK_RC"
 
-# xfs images (only if mkfs.xfs + xfs_repair are present). The clean
-# image exercises normal xfs_repair; the dirty image forces the -L
-# fallback by zeroing the log uncleanly.
+# XFS images (only if xfsprogs is present). The clean image exercises
+# normal xfs_repair. The second image is mounted and written in a separate
+# QEMU boot that the host kills without unmounting, producing a real dirty
+# journal for the mandatory -L fallback acceptance.
 if [ "$HAVE_XFS" -eq 1 ]; then
     truncate -s 512M "$XFS_CLEAN_IMG"
     mkfs.xfs -q -f -L xfs-clean "$XFS_CLEAN_IMG"
@@ -216,14 +260,6 @@ if [ "$HAVE_XFS" -eq 1 ]; then
 
     truncate -s 512M "$XFS_DIRTY_IMG"
     mkfs.xfs -q -f -L xfs-dirty "$XFS_DIRTY_IMG"
-    # For the dirty-log fallback, we deliberately leave the image
-    # untouched and rely on xfs_repair refusing to mount the log
-    # when we mark it dirty through a different channel: we corrupt
-    # the log area itself. XFS log starts at the second 4KiB block
-    # typically; we zero 4KiB there to force the log-replay failure.
-    # xfs_repair will then exit 2 ("dirty log") and we MUST fall
-    # back to -L.
-    dd if=/dev/zero of="$XFS_DIRTY_IMG" bs=4096 count=1 seek=1 conv=notrunc status=none
     XFS_DIRTY_HASH_AFTER_CORRUPT=$(sha256sum "$XFS_DIRTY_IMG" | awk '{print $1}')
 fi
 
@@ -234,7 +270,7 @@ fi
 cp "$BUSYBOX" "$INITRAMFS/bin/busybox"
 cp "$BIN" "$INITRAMFS/bin/catos-system"
 chmod +x "$INITRAMFS/bin/busybox" "$INITRAMFS/bin/catos-system"
-for applet in sh mount cat echo sleep modprobe poweroff mkdir grep awk find; do
+for applet in sh mount cat echo sleep modprobe poweroff mkdir grep awk find dd sync; do
     ln -sf /bin/busybox "$INITRAMFS/bin/$applet"
 done
 ln -sf /bin/busybox "$INITRAMFS/sbin/poweroff"
@@ -327,6 +363,22 @@ mount -t sysfs none /sys 2>/dev/null
 mount -t devtmpfs none /dev 2>/dev/null
 modprobe vfat 2>/dev/null || true
 modprobe xfs 2>/dev/null || true
+
+if grep -q 'catos_xfs_dirty_precondition=1' /proc/cmdline; then
+    for _ in 1 2 3 4 5 6 7 8 9 10; do
+        [ -b /dev/vda ] && break
+        sleep 1
+    done
+    mkdir -p /mnt
+    mount -t xfs /dev/vda /mnt || {
+        echo '===XFS_DIRTY_FATAL=== mount failed'
+        poweroff -f
+    }
+    dd if=/dev/zero of=/mnt/dirty-payload bs=1M count=64 2>/dev/null
+    sync
+    echo '===XFS_DIRTY_READY==='
+    while true; do sleep 60; done
+fi
 
 for _ in 1 2 3 4 5 6 7 8 9 10; do
     [ -b /dev/vda ] && [ -b /dev/vdb ] && [ -b /dev/vdc ] && break
@@ -424,6 +476,57 @@ chmod +x "$INITRAMFS/init"
 # Boot QEMU and capture serial output.
 # ---------------------------------------------------------------------------
 
+accel_args=()
+if [ -w /dev/kvm ] && "$QEMU_BIN" -accel help 2>&1 | grep -q '^kvm$'; then
+    accel_args=(-enable-kvm -cpu host)
+fi
+
+if [ "$HAVE_XFS" -eq 1 ]; then
+    XFS_DIRTY_SERIAL="$WORKDIR/xfs-dirty-precondition.log"
+    "$QEMU_BIN" \
+        -M pc -m 512M -no-reboot -nographic \
+        "${accel_args[@]}" \
+        -kernel "$KERNEL" -initrd "$INITRAMFS_IMG" \
+        -append "console=ttyS0 panic=1 rdinit=/init catos_xfs_dirty_precondition=1" \
+        -drive "if=none,id=xfs_dirty_pre,file=$XFS_DIRTY_IMG,format=raw,cache=none" \
+        -device virtio-blk-pci,drive=xfs_dirty_pre \
+        < /dev/null > "$XFS_DIRTY_SERIAL" 2>&1 &
+    dirty_pid=$!
+    dirty_ready=0
+    for _ in $(seq 1 60); do
+        if grep -q '===XFS_DIRTY_READY===' "$XFS_DIRTY_SERIAL" 2>/dev/null; then
+            dirty_ready=1
+            break
+        fi
+        if ! kill -0 "$dirty_pid" 2>/dev/null; then
+            break
+        fi
+        sleep 1
+    done
+    if [ "$dirty_ready" -ne 1 ]; then
+        kill -9 "$dirty_pid" 2>/dev/null || true
+        wait "$dirty_pid" 2>/dev/null || true
+        echo "fail: could not create a real unclean XFS log" >&2
+        cat "$XFS_DIRTY_SERIAL" >&2
+        KEEP=1
+        exit 1
+    fi
+    kill -9 "$dirty_pid" 2>/dev/null || true
+    wait "$dirty_pid" 2>/dev/null || true
+    # Prove the abrupt shutdown actually left a log that normal repair refuses.
+    set +e
+    xfs_repair -n "$XFS_DIRTY_IMG" > "$WORKDIR/xfs-dirty-proof.log" 2>&1
+    dirty_probe_rc=$?
+    set -e
+    if [ "$dirty_probe_rc" -eq 0 ] || ! grep -Eqi 'log.*(replay|valuable metadata|dirty)|mount.*log' "$WORKDIR/xfs-dirty-proof.log"; then
+        echo "fail: XFS precondition boot did not leave a verifiable dirty log" >&2
+        cat "$WORKDIR/xfs-dirty-proof.log" >&2
+        KEEP=1
+        exit 1
+    fi
+    XFS_DIRTY_HASH_AFTER_CORRUPT=$(sha256sum "$XFS_DIRTY_IMG" | awk '{print $1}')
+fi
+
 qemu_drives=(
     -drive "if=none,id=ext4,file=$EXT4_IMG,format=raw,cache=none"
     -device virtio-blk-pci,drive=ext4
@@ -439,11 +542,6 @@ if [ "$HAVE_XFS" -eq 1 ]; then
         -drive "if=none,id=xfs_dirty,file=$XFS_DIRTY_IMG,format=raw,cache=none"
         -device virtio-blk-pci,drive=xfs_dirty
     )
-fi
-
-accel_args=()
-if [ -w /dev/kvm ] && "$QEMU_BIN" -accel help 2>&1 | grep -q '^kvm$'; then
-    accel_args=(-enable-kvm -cpu host)
 fi
 
 timeout 180 "$QEMU_BIN" \
@@ -476,10 +574,9 @@ if [ "$HAVE_XFS" -eq 1 ]; then
     XFS_DIRTY_HASH_AFTER_REPAIR=$(sha256sum "$XFS_DIRTY_IMG" | awk '{print $1}')
 fi
 
-# Sanity: a successful repair MUST have changed the image bytes for
-# ext4 and vfat. The btrfs smoke test does not corrupt the image
-# (see the btrfs section above for why), so its post-repair hash
-# equals its pre-corrupt hash by design.
+# Sanity: successful repair changes the deliberately damaged images.
+# Btrfs is additionally rechecked on the host to prove the damaged DUP mirror
+# no longer emits a metadata checksum diagnostic.
 if [ "$EXT4_HASH_AFTER_REPAIR" = "$EXT4_HASH_AFTER_CORRUPT" ]; then
     echo "fail: ext4 image unchanged after repair (tool did nothing or refused)" >&2
     KEEP=1
@@ -487,6 +584,21 @@ if [ "$EXT4_HASH_AFTER_REPAIR" = "$EXT4_HASH_AFTER_CORRUPT" ]; then
 fi
 if [ "$VFAT_HASH_AFTER_REPAIR" = "$VFAT_HASH_AFTER_CORRUPT" ]; then
     echo "fail: vfat image unchanged after repair (tool did nothing or refused)" >&2
+    KEEP=1
+    exit 1
+fi
+if [ "$BTRFS_HASH_AFTER_REPAIR" = "$BTRFS_HASH_AFTER_CORRUPT" ]; then
+    echo "fail: Btrfs image unchanged after --repair" >&2
+    KEEP=1
+    exit 1
+fi
+set +e
+btrfs check --readonly "$BTRFS_IMG" > "$WORKDIR/btrfs-after-repair.log" 2>&1
+BTRFS_POSTCHECK_RC=$?
+set -e
+if [ "$BTRFS_POSTCHECK_RC" -ne 0 ] || grep -q 'checksum verify failed' "$WORKDIR/btrfs-after-repair.log"; then
+    echo "fail: Btrfs metadata mirror remained damaged after repair" >&2
+    cat "$WORKDIR/btrfs-after-repair.log" >&2
     KEEP=1
     exit 1
 fi
@@ -536,35 +648,21 @@ print("pass: vfat repair routed to fsck.fat, repaired, verification mount succee
 
 # btrfs
 rc, report = document("REPAIR_BTRFS")
-# The btrfs smoke image is a freshly-mkfs'd filesystem with NO
-# corruption (see the script comments for why reliable damage is
-# fragile without btrfs-corrupt-block). What this test verifies:
-#   * the image routes to `btrfs check --readonly`;
-#   * on a healthy btrfs the read-only check exits clean and the
-#     flow does NOT escalate to --repair (the spec's "Btrfs 只读
-#     检查成功时不运行 --repair" guarantee);
-#   * if a future revision of the script manages to corrupt the
-#     image in a way --readonly detects, the flow MUST escalate to
-#     --repair and the attempt MUST be flagged high-risk. We accept
-#     either shape so the script can grow a real corruption step
-#     later without rewriting the verifier.
 payload = report["payload"]
 assert payload["selected_tool"] == "btrfs_check", payload["selected_tool"]
 attempt_kinds = [(a["kind"], a["high_risk"]) for a in payload["attempts"]]
-if payload["final_outcome"] == "clean":
-    # Healthy fs: only one read-only check; no --repair.
-    assert attempt_kinds == [("readonly_check", False)], attempt_kinds
-    assert rc == 0, f"btrfs clean repair exited {rc}"
-    print("pass: btrfs clean check verified (no --repair escalation)")
-elif payload["final_outcome"] in ("repaired_with_risk", "unrepaired"):
-    # Damaged fs: read-only check fails -> --repair -> read-only recheck.
-    assert ("readonly_check", False) in attempt_kinds, attempt_kinds
-    assert ("high_risk_fallback", True) in attempt_kinds, attempt_kinds
-    assert ("verification_check", False) in attempt_kinds, attempt_kinds
-    assert rc in (0, 5), f"btrfs repair exited unexpected rc {rc}"
-    print(f"pass: btrfs read-only -> --repair -> read-only sequence verified (outcome={payload['final_outcome']})")
-else:
-    raise SystemExit(f"fail: btrfs final_outcome={payload['final_outcome']} not in (clean, repaired_with_risk, unrepaired)")
+assert attempt_kinds == [
+    ("readonly_check", False),
+    ("high_risk_fallback", True),
+    ("verification_check", False),
+], attempt_kinds
+assert payload["final_outcome"] == "repaired_with_risk", payload["final_outcome"]
+assert rc == 0, f"btrfs metadata-DUP repair exited {rc}"
+first_output = payload["attempts"][0]["stdout"] + payload["attempts"][0]["stderr"]
+recheck_output = payload["attempts"][2]["stdout"] + payload["attempts"][2]["stderr"]
+assert "checksum verify failed" in first_output, payload["attempts"][0]
+assert "checksum verify failed" not in recheck_output, payload["attempts"][2]
+print("pass: real Btrfs DUP mirror corruption forced --repair and rechecked clean")
 
 # xfs (optional)
 if have_xfs:
@@ -580,26 +678,15 @@ if have_xfs:
 
     rc, report = document("REPAIR_XFS_DIRTY")
     payload = report["payload"]
-    # The dirty-log image corrupts the log area to try to force the
-    # -L fallback. In practice xfs_repair often zeroes the log
-    # itself during normal repair and returns exit 0, so the -L
-    # fallback is not always reached. The unit tests in
-    # tests/test_repair_contract.rs cover the -L fallback path
-    # deterministically via the injected runner; the smoke test
-    # here only verifies that the dirty image does not crash the
-    # flow and produces a structured outcome.
+    # This image was mounted and written in a first QEMU process that the
+    # host killed without unmounting. Normal xfs_repair must refuse the dirty
+    # journal, after which the authorised -L fallback must be visible.
     high_risk = [a for a in payload["attempts"] if a["high_risk"]]
-    if high_risk:
-        # -L fallback fired: verify the marking and outcome.
-        assert high_risk[0]["kind"] == "high_risk_fallback", high_risk[0]
-        assert payload["final_outcome"] == "repaired_with_risk", payload["final_outcome"]
-        print("pass: xfs dirty-log fallback used -L and flagged repaired_with_risk")
-    else:
-        # xfs_repair zeroed the log itself; normal repair path.
-        # Still spec-compliant: the spec only requires -L when
-        # normal repair CANNOT proceed.
-        assert payload["final_outcome"] in ("clean", "repaired"), payload["final_outcome"]
-        print("pass: xfs dirty-log image handled by normal repair (no -L needed)")
+    assert high_risk, payload["attempts"]
+    assert high_risk[0]["kind"] == "high_risk_fallback", high_risk[0]
+    assert payload["final_outcome"] == "repaired_with_risk", payload["final_outcome"]
+    assert rc == 0, f"xfs dirty-log fallback exited {rc}"
+    print("pass: real unclean XFS log forced -L and was flagged repaired_with_risk")
 else:
     print("skip: xfs tools unavailable on host; xfs repair assertions skipped")
 

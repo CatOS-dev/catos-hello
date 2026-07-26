@@ -91,10 +91,9 @@ pub fn build_report(
     })
 }
 
-/// The repair domains `catos-repair` recognises. Anything else on that
-/// entry point is rejected before any work runs. This stage routes each
-/// domain to a stable "not implemented" result; it does not implement
-/// any repair logic.
+/// The repair domains `catos-repair` recognises. Anything else is rejected
+/// before work starts. Filesystem and mount repair are implemented; boot
+/// remains a stable reserved domain until its provider stage.
 const REPAIR_DOMAINS: &[&str] = &["fs", "mount", "boot"];
 
 /// Run the program. Returns the exit code; `main.rs` forwards it to
@@ -124,6 +123,15 @@ pub fn run(invocation: Invocation, argv: &[String]) -> i32 {
             }
         }
     } else if argv.iter().any(|a| a == "--help" || a == "-h") {
+        if invocation == Invocation::CatosRecovery {
+            if let Some(command) = argv
+                .iter()
+                .find(|argument| !argument.starts_with('-'))
+                .map(String::as_str)
+            {
+                return print_recovery_command_help(command);
+            }
+        }
         return print_help(invocation);
     } else if argv.iter().any(|a| a == "--version" || a == "-V") {
         println!("{invocation} {}", crate::PROGRAM_VERSION);
@@ -555,6 +563,44 @@ fn run_update(argv: &[String]) -> i32 {
     exit_code::ARG_ERROR
 }
 
+fn print_recovery_command_help(command: &str) -> i32 {
+    use std::io::Write;
+    let version = crate::PROGRAM_VERSION;
+    let common_target = "    --root-device /dev/...      Target Btrfs block device (required).\n    --root-subvolume PATH      Current root subvolume (optional; validated against the plan).\n    --json                     Emit stable JSON on stdout.\n    -h, --help                 Show this help message and exit.\n    -V, --version              Print program version and exit.\n";
+    let body = match command {
+        "list" => format!(
+            "catos-recovery {version} - list snapshots and recovery transactions\n\nUSAGE:\n    catos-recovery list --root-device /dev/... [OPTIONS]\n\nOPTIONS:\n{common_target}"
+        ),
+        "inspect" => format!(
+            "catos-recovery {version} - inspect a recovery source read-only\n\nUSAGE:\n    catos-recovery inspect --root-device /dev/... --snapshot-subvolume PATH [OPTIONS]\n\nOPTIONS:\n{common_target}    --snapshot-subvolume PATH  Read-only snapshot to inspect (required).\n"
+        ),
+        "plan" => format!(
+            "catos-recovery {version} - create an immutable recovery plan\n\nUSAGE:\n    catos-recovery plan --root-device /dev/... --snapshot-subvolume PATH [OPTIONS]\n\nOPTIONS:\n{common_target}    --snapshot-subvolume PATH  Read-only snapshot used as the replacement root (required).\n\nOUTPUT:\n    The plan is written to stdout. Save it verbatim and pass the file to `apply --plan-file`.\n"
+        ),
+        "apply" => format!(
+            "catos-recovery {version} - apply a confirmed recovery plan\n\nUSAGE:\n    catos-recovery apply --root-device /dev/... --plan-file PATH --plan-id ID --confirm TOKEN [OPTIONS]\n\nOPTIONS:\n{common_target}    --plan-file PATH            Plan JSON emitted by `catos-recovery plan` (required).\n    --plan-id ID               Expected immutable plan id (required).\n    --confirm TOKEN            Confirmation token embedded in the plan (required).\n"
+        ),
+        "status" => format!(
+            "catos-recovery {version} - inspect and reconcile one transaction\n\nUSAGE:\n    catos-recovery status --root-device /dev/... --transaction ID [OPTIONS]\n\nOPTIONS:\n{common_target}    --transaction ID            Recovery transaction id (required).\n"
+        ),
+        "resume" => format!(
+            "catos-recovery {version} - resume an interrupted transaction\n\nUSAGE:\n    catos-recovery resume --root-device /dev/... --transaction ID [OPTIONS]\n\nOPTIONS:\n{common_target}    --transaction ID            Recovery transaction id (required).\n"
+        ),
+        "revert" => format!(
+            "catos-recovery {version} - restore the pre-recovery root\n\nUSAGE:\n    catos-recovery revert --root-device /dev/... --transaction ID --confirm TOKEN [OPTIONS]\n\nOPTIONS:\n{common_target}    --transaction ID            Recovery transaction id (required).\n    --confirm TOKEN            Revert token emitted by `status` (required).\n"
+        ),
+        _ => {
+            eprintln!(
+                "catos-recovery: argument error: unknown recovery command {command:?}; expected list|inspect|plan|apply|status|resume|revert"
+            );
+            return exit_code::ARG_ERROR;
+        }
+    };
+    print!("{body}");
+    std::io::stdout().flush().ok();
+    exit_code::SUCCESS
+}
+
 /// Print the per-invocation help. Each entry point owns a focused
 /// message describing its own surface rather than the full
 /// `catos-system` parser contract.
@@ -568,9 +614,8 @@ fn print_help(invocation: Invocation) -> i32 {
             );
         }
         Invocation::CatosRepair => {
-            let domain_list = REPAIR_DOMAINS.join("|");
             print!(
-                "catos-repair {version} - CatOS fs/mount/boot repair entry point\n\nUSAGE:\n    catos-repair <DOMAIN> [OPTIONS] [<DEVICE>]\n    catos-repair --help\n    catos-repair --version\n\nREPAIR DOMAINS:\n    fs      Filesystem repair domain (implemented in stage 2).\n            Routes to the matching system fsck tool after safety\n            checks. Supports ext2/ext3/ext4, vfat/fat, f2fs, xfs,\n            and btrfs.\n    mount   Mount-table / fstab / CatOS standard btrfs subvolume\n            layout repair domain (implemented in stage 3).\n            Repairs /etc/fstab entries, recreates missing standard\n            subvolumes when authorised, and creates missing mount-\n            point directories. Does NOT migrate existing data, does\n            NOT run bootloader tools, does NOT touch Snapper config.\n    boot    Bootloader / boot topology repair domain (not implemented).\n\nOPTIONS:\n    --json     Emit a stable JSON report on stdout.\n    -h, --help    Show this help message and exit.\n    -V, --version Print program version and exit.\n\nFS DOMAIN ARGUMENTS:\n    catos-repair fs [--json] [<device>]\n        <device> is an optional positional /dev/... path. When\n        omitted, auto-discovery runs and refuses on ambiguity.\n        ESP, swap, LUKS, LVM PV, mdraid members are never auto-\n        selected; specify them explicitly if you really mean it.\n\nMOUNT DOMAIN ARGUMENTS:\n    catos-repair mount [--json]\n        [--root-device /dev/...] [--root-subvolume PATH]\n        [--esp-device /dev/...]\n        Running `catos-repair mount` itself authorises repair.\n\nNOTES:\n    * Only the three domains above are recognised. Anything else is\n      rejected with ARG_ERROR; in particular `catos-repair` does NOT\n      inherit `catos-system` or `catos-recovery` subcommands\n      (no `catos-repair inspect`, `catos-repair recovery ...`, ...).\n    * `catos-repair fs` always refuses the running root and any\n      target that is already mounted. Repair is best-effort; failures\n      are reported honestly.\n    * `catos-repair mount` may repair the running system's own\n      /etc/fstab; it refuses unsafe confined-path operations.\n    * The `boot` domain ({domain_list} minus `fs` and `mount`)\n      remains a stable \"not implemented\" result.\n",
+                "catos-repair {version} - CatOS fs/mount/boot repair entry point\n\nUSAGE:\n    catos-repair <DOMAIN> [OPTIONS] [<DEVICE>]\n    catos-repair --help\n    catos-repair --version\n\nREPAIR DOMAINS:\n    fs      Filesystem repair through official system fsck tools.\n            Supports ext2/ext3/ext4, vfat/fat, f2fs, xfs, and\n            single-device btrfs after strict safety checks.\n    mount   Transactional fstab and mount-layout repair. Supports\n            CatOS Btrfs standard subvolumes plus plain ext2/3/4,\n            XFS, and F2FS roots; preserves all six /boot/ESP layouts.\n    boot    Boot-provider repair domain (reserved; not implemented).\n\nOPTIONS:\n    --json        Emit a stable JSON report on stdout.\n    -h, --help    Show this help message and exit.\n    -V, --version Print program version and exit.\n\nFS DOMAIN:\n    catos-repair fs [--json] [<device>]\n        The running root and pre-existing mounts are refused. With no\n        device, only one verified high-confidence CatOS root may be\n        selected automatically; ambiguity fails closed.\n\nMOUNT DOMAIN:\n    catos-repair mount [--json]\n        [--root-device /dev/...] [--root-subvolume /@]\n        [--esp-device /dev/...]\n        The command itself authorises repair. It may repair a uniquely\n        verified running CatOS root without unmounting it, or an offline\n        Btrfs/plain root. Existing data is never migrated or overwritten.\n\nNOTES:\n    * Only fs, mount, and boot are recognised. This entry point does\n      not inherit catos-system or catos-recovery commands.\n    * Filesystem repair is best-effort and reports high-risk fallbacks.\n    * Mount repair preserves comments and unrelated fstab entries,\n      validates the complete repaired mount graph, and rolls back\n      newly-created empty resources if verification fails.\n    * Boot remains a stable not-implemented result until stage 4.\n",
             );
         }
         Invocation::CatosUpdate => {
