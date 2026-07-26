@@ -43,7 +43,7 @@ use std::fs::{File, OpenOptions};
 use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
 
-use crate::model::recovery::{RecoveryError, RecoveryErrorKind};
+use crate::shared::model::recovery::{RecoveryError, RecoveryErrorKind};
 use crate::recovery::confined;
 
 /// `flock(LOCK_EX)` = 2. `LOCK_NB` = 4. Combined = 6.

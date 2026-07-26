@@ -42,9 +42,9 @@
 //!   never the trigger.
 //! * Partial success from non-atomic operations (EFI NVRAM writes,
 //!   bootloader installs, signing) MUST surface as
-//!   [`crate::model::boot_repair::BootRepairOutcome::PartiallyRepaired`]
+//!   [`crate::shared::model::boot_repair::BootRepairOutcome::PartiallyRepaired`]
 //!   or
-//!   [`crate::model::boot_repair::BootRepairOutcome::ManualInterventionRequired`].
+//!   [`crate::shared::model::boot_repair::BootRepairOutcome::ManualInterventionRequired`].
 
 pub mod cmdline;
 pub mod detect;
@@ -56,12 +56,12 @@ pub mod target_exec;
 
 use std::path::Path;
 
-use crate::model::boot_repair::{
+use crate::shared::model::boot_repair::{
     BootRepairOutcome, BootRepairReport, BootVerification, FirmwareClass, PlatformFacts,
     SecureBootReport,
 };
-use crate::model::evidence::Evidence;
-use crate::model::mount_repair::{MountRepairCleanup, TargetIdentity};
+use crate::shared::model::evidence::Evidence;
+use crate::shared::model::mount_repair::{MountRepairCleanup, TargetIdentity};
 use crate::repair::boot_repair::cmdline::{build_kernel_cmdline, CmdlineInputs};
 use crate::repair::boot_repair::detect::{detect, DetectionInputs, DetectionVerdict};
 use crate::repair::boot_repair::providers::{build_ctx, build_provider};
@@ -91,7 +91,7 @@ pub fn run_boot_repair(
     detection: &DetectionInputs,
     bios_install_path: Option<&str>,
     installed_packages: &[String],
-    storage_devices: &[crate::model::storage::BlockDevice],
+    storage_devices: &[crate::shared::model::storage::BlockDevice],
 ) -> BootRepairReport {
     // 1. Detect provider from target evidence.
     let verdict = detect(detection, target);
@@ -160,9 +160,9 @@ pub fn run_boot_repair(
                     platform.firmware.as_registry_str(),
                     platform.architecture.as_str(),
                     match platform.partition_table {
-                        crate::model::boot_repair::PartitionTable::Gpt => "gpt",
-                        crate::model::boot_repair::PartitionTable::Msdos => "msdos",
-                        crate::model::boot_repair::PartitionTable::Unknown => "unknown",
+                        crate::shared::model::boot_repair::PartitionTable::Gpt => "gpt",
+                        crate::shared::model::boot_repair::PartitionTable::Msdos => "msdos",
+                        crate::shared::model::boot_repair::PartitionTable::Unknown => "unknown",
                     }
                 ),
             )],
@@ -322,7 +322,7 @@ pub fn run_boot_repair(
                 "rebuild initramfs with the snapshot overlay hook",
             ));
             let success = !result.binary_missing && !result.timed_out && result.exit_code == 0;
-            pre_provider_actions.push(crate::model::boot_repair::BootAction::TargetCommand {
+            pre_provider_actions.push(crate::shared::model::boot_repair::BootAction::TargetCommand {
                 result: result.clone(),
             });
             (!success).then(|| {
@@ -357,8 +357,8 @@ pub fn run_boot_repair(
     actions.extend(exec_result.actions.into_iter().filter(|action| {
         !matches!(
             action,
-            crate::model::boot_repair::BootAction::ConfigWritten { .. }
-                | crate::model::boot_repair::BootAction::ConfigUnchanged { .. }
+            crate::shared::model::boot_repair::BootAction::ConfigWritten { .. }
+                | crate::shared::model::boot_repair::BootAction::ConfigUnchanged { .. }
         )
     }));
     let mut verification = exec_result.verification;
@@ -374,7 +374,7 @@ pub fn run_boot_repair(
 
     let final_outcome = if exec_result.failure.is_some() || snapshot_execution.failure.is_some() {
         if let Err(error) = config_transaction.rollback() {
-            warnings.push(crate::model::inspection::Warning::new(
+            warnings.push(crate::shared::model::inspection::Warning::new(
                 "CONFIG_ROLLBACK_FAILED",
                 error,
             ));
@@ -382,17 +382,17 @@ pub fn run_boot_repair(
         BootRepairOutcome::PartiallyRepaired
     } else {
         // 6. Verify.
-        let mut verify_result = if provider == crate::model::boot_repair::ProviderId::Grub {
+        let mut verify_result = if provider == crate::shared::model::boot_repair::ProviderId::Grub {
             verify_grub_target(target_root, &kernels)
         } else {
             provider_impl.verify(&ctx, &runner)
         };
         if matches!(
             provider,
-            crate::model::boot_repair::ProviderId::Limine
-                | crate::model::boot_repair::ProviderId::SystemdBoot
-                | crate::model::boot_repair::ProviderId::Uki
-                | crate::model::boot_repair::ProviderId::Efistub
+            crate::shared::model::boot_repair::ProviderId::Limine
+                | crate::shared::model::boot_repair::ProviderId::SystemdBoot
+                | crate::shared::model::boot_repair::ProviderId::Uki
+                | crate::shared::model::boot_repair::ProviderId::Efistub
         ) && !target_provider_assets_present(
             provider,
             target_root,
@@ -414,7 +414,7 @@ pub fn run_boot_repair(
         verification = merge_verification(verification, verify_result.verification);
         if !verify_result.verified {
             if let Err(error) = config_transaction.rollback() {
-                warnings.push(crate::model::inspection::Warning::new(
+                warnings.push(crate::shared::model::inspection::Warning::new(
                     "CONFIG_ROLLBACK_FAILED",
                     error,
                 ));
@@ -435,7 +435,7 @@ pub fn run_boot_repair(
             let (report, outcome_override, secureboot_action) =
                 finalize_secure_boot(&runner, &secureboot_inputs);
             if let Some(result) = secureboot_action {
-                actions.push(crate::model::boot_repair::BootAction::TargetCommand { result });
+                actions.push(crate::shared::model::boot_repair::BootAction::TargetCommand { result });
             }
             secureboot_report = Some(report);
             outcome_override.unwrap_or(BootRepairOutcome::Repaired)
@@ -638,22 +638,22 @@ fn run_boot_repair_mounted(
     report
 }
 
-fn detect_target_architecture(root: &Path) -> Option<crate::model::boot_repair::Architecture> {
+fn detect_target_architecture(root: &Path) -> Option<crate::shared::model::boot_repair::Architecture> {
     let executable =
         crate::recovery::confined::read_rooted_file(root, "/usr/lib/systemd/systemd").ok()?;
     let machine = executable.get(18..20)?;
     match u16::from_le_bytes([machine[0], machine[1]]) {
-        62 => Some(crate::model::boot_repair::Architecture::X86_64),
-        183 => Some(crate::model::boot_repair::Architecture::Aarch64),
+        62 => Some(crate::shared::model::boot_repair::Architecture::X86_64),
+        183 => Some(crate::shared::model::boot_repair::Architecture::Aarch64),
         _ => None,
     }
 }
 
 fn detect_partition_table(
     target: &TargetIdentity,
-    devices: &[crate::model::storage::BlockDevice],
-) -> crate::model::boot_repair::PartitionTable {
-    use crate::model::storage::DiskKind;
+    devices: &[crate::shared::model::storage::BlockDevice],
+) -> crate::shared::model::boot_repair::PartitionTable {
+    use crate::shared::model::storage::DiskKind;
 
     let root = devices.iter().find(|device| {
         device
@@ -662,15 +662,15 @@ fn detect_partition_table(
             .is_some_and(|path| path == target.root_device)
     });
     match root.map(|device| device.disk_kind) {
-        Some(DiskKind::Gpt) => crate::model::boot_repair::PartitionTable::Gpt,
-        Some(DiskKind::Mbr) => crate::model::boot_repair::PartitionTable::Msdos,
-        _ => crate::model::boot_repair::PartitionTable::Unknown,
+        Some(DiskKind::Gpt) => crate::shared::model::boot_repair::PartitionTable::Gpt,
+        Some(DiskKind::Mbr) => crate::shared::model::boot_repair::PartitionTable::Msdos,
+        _ => crate::shared::model::boot_repair::PartitionTable::Unknown,
     }
 }
 
 fn derive_bios_install_disk(
     target: &TargetIdentity,
-    devices: &[crate::model::storage::BlockDevice],
+    devices: &[crate::shared::model::storage::BlockDevice],
 ) -> Option<String> {
     let root = devices.iter().find(|device| {
         device
@@ -681,7 +681,7 @@ fn derive_bios_install_disk(
     if root.parent.is_empty() {
         return None;
     }
-    let matches: Vec<&crate::model::storage::BlockDevice> = devices
+    let matches: Vec<&crate::shared::model::storage::BlockDevice> = devices
         .iter()
         .filter(|device| device.name == root.parent)
         .filter(|device| device.parent.is_empty())
@@ -695,7 +695,7 @@ fn derive_bios_install_disk(
 
 fn derive_efi_device(
     target: &TargetIdentity,
-    devices: &[crate::model::storage::BlockDevice],
+    devices: &[crate::shared::model::storage::BlockDevice],
 ) -> Option<(String, u32)> {
     let esp_path = target.esp_device.as_deref()?;
     let esp = devices.iter().find(|device| {
@@ -878,7 +878,7 @@ struct SnapshotRepairState {
 /// snapshots, so it must never cause us to create a new Snapper setup.
 fn snapshot_repair_state(
     target_root: &Path,
-    provider: crate::model::boot_repair::ProviderId,
+    provider: crate::shared::model::boot_repair::ProviderId,
     root_fstype: &str,
     _installed_packages: &[String],
 ) -> SnapshotRepairState {
@@ -914,7 +914,7 @@ fn write_restored_snapper_config(
     transaction: &mut ConfigTransaction,
     target_root: &Path,
     template: &str,
-) -> Result<Vec<crate::model::boot_repair::BootAction>, String> {
+) -> Result<Vec<crate::shared::model::boot_repair::BootAction>, String> {
     let current = read_target_file(target_root, "etc/conf.d/snapper");
     let registration = register_snapper_root(current.as_deref())?;
     Ok(vec![
@@ -963,28 +963,28 @@ fn register_snapper_root(existing: Option<&str>) -> Result<String, String> {
 
 #[derive(Default)]
 struct SnapshotExecution {
-    actions: Vec<crate::model::boot_repair::BootAction>,
+    actions: Vec<crate::shared::model::boot_repair::BootAction>,
     failure: Option<String>,
 }
 
 fn requires_pre_provider_snapshot_initramfs_rebuild(
-    provider: crate::model::boot_repair::ProviderId,
+    provider: crate::shared::model::boot_repair::ProviderId,
     snapshots_enabled: bool,
 ) -> bool {
     snapshots_enabled
         && matches!(
             provider,
-            crate::model::boot_repair::ProviderId::Limine
-                | crate::model::boot_repair::ProviderId::SystemdBoot
+            crate::shared::model::boot_repair::ProviderId::Limine
+                | crate::shared::model::boot_repair::ProviderId::SystemdBoot
         )
 }
 
 fn run_snapshot_repair(
-    provider: crate::model::boot_repair::ProviderId,
+    provider: crate::shared::model::boot_repair::ProviderId,
     target_root: &Path,
     runner: &dyn TargetRunner,
 ) -> SnapshotExecution {
-    use crate::model::boot_repair::ProviderId;
+    use crate::shared::model::boot_repair::ProviderId;
 
     let mut execution = SnapshotExecution::default();
     let target_has_snapshots = target_snapshot_catalog_has_entries(target_root);
@@ -999,7 +999,7 @@ fn run_snapshot_repair(
             && snapshot_generate_reports_zero_deployment(&result);
         execution
             .actions
-            .push(crate::model::boot_repair::BootAction::SnapshotStep {
+            .push(crate::shared::model::boot_repair::BootAction::SnapshotStep {
                 description: description.into(),
                 result: Some(result),
             });
@@ -1119,7 +1119,7 @@ fn target_snapshot_catalog_has_entries(target_root: &Path) -> bool {
 }
 
 fn snapshot_generate_reports_zero_deployment(
-    result: &crate::model::boot_repair::TargetCommandResult,
+    result: &crate::shared::model::boot_repair::TargetCommandResult,
 ) -> bool {
     let output = result
         .stdout
@@ -1167,7 +1167,7 @@ impl ConfigTransaction {
         &mut self,
         target_path: &str,
         contents: &str,
-    ) -> Result<crate::model::boot_repair::BootAction, String> {
+    ) -> Result<crate::shared::model::boot_repair::BootAction, String> {
         let parent = Path::new(target_path)
             .parent()
             .and_then(Path::to_str)
@@ -1176,7 +1176,7 @@ impl ConfigTransaction {
             .map_err(|error| format!("cannot create target config parent {parent}: {error}"))?;
         let existing = crate::recovery::confined::read_rooted_file(&self.root, target_path).ok();
         if existing.as_deref() == Some(contents.as_bytes()) {
-            return Ok(crate::model::boot_repair::BootAction::ConfigUnchanged {
+            return Ok(crate::shared::model::boot_repair::BootAction::ConfigUnchanged {
                 target_path: target_path.to_string(),
             });
         }
@@ -1198,7 +1198,7 @@ impl ConfigTransaction {
             target_path: target_path.to_string(),
             original: existing,
         });
-        Ok(crate::model::boot_repair::BootAction::ConfigWritten {
+        Ok(crate::shared::model::boot_repair::BootAction::ConfigWritten {
             target_path: target_path.to_string(),
             backup_path,
             bytes: contents.len(),
@@ -1233,13 +1233,13 @@ impl ConfigTransaction {
 
 fn write_provider_configs(
     transaction: &mut ConfigTransaction,
-    provider: crate::model::boot_repair::ProviderId,
+    provider: crate::shared::model::boot_repair::ProviderId,
     ctx: &crate::repair::boot_repair::providers::base::ProviderCtx<'_>,
     efi_device: Option<&(String, u32)>,
     mkinitcpio_text: &str,
     mkinitcpio_inputs: &crate::repair::boot_repair::mkinitcpio::MkinitcpioInputs<'_>,
-) -> Result<Vec<crate::model::boot_repair::BootAction>, String> {
-    use crate::model::boot_repair::{FirmwareMethod, ProviderId};
+) -> Result<Vec<crate::shared::model::boot_repair::BootAction>, String> {
+    use crate::shared::model::boot_repair::{FirmwareMethod, ProviderId};
 
     // bootloadu configures mkinitcpio before every provider. Limine and
     // systemd-boot snapshot overlays therefore need the same target config,
@@ -1299,7 +1299,7 @@ fn verify_grub_target(
     target_root: &Path,
     kernels: &[Kernel],
 ) -> crate::repair::boot_repair::providers::base::ProviderRecipeResult {
-    use crate::model::boot_repair::BootVerification;
+    use crate::shared::model::boot_repair::BootVerification;
     use crate::repair::boot_repair::providers::base::ProviderRecipeResult;
 
     let config = read_target_file(target_root, "boot/grub/grub.cfg");
@@ -1342,12 +1342,12 @@ fn grub_config_has_bootable_linux_entry(config: &str) -> bool {
 }
 
 fn target_provider_assets_present(
-    provider: crate::model::boot_repair::ProviderId,
+    provider: crate::shared::model::boot_repair::ProviderId,
     target_root: &Path,
     esp_mount_point: Option<&str>,
     kernels: &[Kernel],
 ) -> bool {
-    use crate::model::boot_repair::ProviderId;
+    use crate::shared::model::boot_repair::ProviderId;
 
     let Some(esp_mount_point) = esp_mount_point else {
         return false;
@@ -1473,7 +1473,7 @@ fn target_signed_catos_efi_present(target_root: &Path, esp_mount_point: Option<&
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::boot_repair::{Architecture, PartitionTable, ProviderId};
+    use crate::shared::model::boot_repair::{Architecture, PartitionTable, ProviderId};
     use crate::repair::boot_repair::target_exec::RecordedTargetRunner;
     use std::fs;
     use std::path::PathBuf;
@@ -1519,10 +1519,10 @@ mod tests {
         name: &str,
         dev_path: Option<&str>,
         parent: &str,
-    ) -> crate::model::storage::BlockDevice {
-        use crate::model::storage::{DeviceClass, DiskKind, PartitionRole};
+    ) -> crate::shared::model::storage::BlockDevice {
+        use crate::shared::model::storage::{DeviceClass, DiskKind, PartitionRole};
 
-        crate::model::storage::BlockDevice {
+        crate::shared::model::storage::BlockDevice {
             name: name.into(),
             dev_path: dev_path.map(PathBuf::from),
             major_minor: None,
@@ -1800,7 +1800,7 @@ mod tests {
         );
         assert!(matches!(
             action,
-            crate::model::boot_repair::BootAction::ConfigWritten { .. }
+            crate::shared::model::boot_repair::BootAction::ConfigWritten { .. }
         ));
     }
 

@@ -8,7 +8,7 @@
 //! (`uki` and `efistub`) differ only in the `method = ...` field of
 //! the configuration file; the same tool drives both.
 
-use crate::model::boot_repair::{BootAction, FirmwareMethod};
+use crate::shared::model::boot_repair::{BootAction, FirmwareMethod};
 use crate::repair::boot_repair::providers::base::{
     record_config_write, record_target_command, BootProvider, ProviderCtx, ProviderRecipeResult,
 };
@@ -120,8 +120,8 @@ pub fn build_firmware_boot_conf(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::boot_repair::{Architecture, ProviderId};
-    use crate::model::mount_repair::TargetIdentity;
+    use crate::shared::model::boot_repair::{Architecture, ProviderId};
+    use crate::shared::model::mount_repair::TargetIdentity;
     use crate::repair::boot_repair::providers::base::ProviderCtx;
     use crate::repair::boot_repair::target_exec::RecordedTargetRunner;
     use std::path::PathBuf;

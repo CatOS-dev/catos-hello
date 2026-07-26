@@ -6,7 +6,7 @@
 //! <VERSION> <IMAGE>` for each discovered kernel. Verification calls
 //! `bootctl --esp-path=<ESP> is-installed`.
 
-use crate::model::boot_repair::BootAction;
+use crate::shared::model::boot_repair::BootAction;
 use crate::repair::boot_repair::mkinitcpio::Kernel;
 use crate::repair::boot_repair::providers::base::{
     record_config_write, record_target_command, BootProvider, ProviderCtx, ProviderRecipeResult,
@@ -113,8 +113,8 @@ pub fn build_install_conf(ctx: &ProviderCtx<'_>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::boot_repair::{Architecture, ProviderId};
-    use crate::model::mount_repair::TargetIdentity;
+    use crate::shared::model::boot_repair::{Architecture, ProviderId};
+    use crate::shared::model::mount_repair::TargetIdentity;
     use crate::repair::boot_repair::providers::base::ProviderCtx;
     use crate::repair::boot_repair::target_exec::RecordedTargetRunner;
     use std::path::PathBuf;

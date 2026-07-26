@@ -6,7 +6,7 @@
 //! `grub.cfg` for a real Linux menuentry with kernel + initrd
 //! lines — not just file presence.
 
-use crate::model::boot_repair::{Architecture, FirmwareClass};
+use crate::shared::model::boot_repair::{Architecture, FirmwareClass};
 use crate::repair::boot_repair::mkinitcpio;
 use crate::repair::boot_repair::providers::base::{
     record_config_write, record_target_command, BootProvider, ProviderCtx, ProviderRecipeResult,
@@ -121,7 +121,7 @@ impl<'a> BootProvider for GrubProvider<'a> {
         // the verify path. For the contract-test layer we record a
         // pending check and let the orchestrator fill in the result.
         ProviderRecipeResult {
-            verification: crate::model::boot_repair::BootVerification {
+            verification: crate::shared::model::boot_repair::BootVerification {
                 passed: false,
                 checks: vec!["GRUB_CFG_LINUX_MENUENTRY".into()],
                 failure_message: None,
@@ -166,8 +166,8 @@ pub fn shell_quote(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::boot_repair::ProviderId;
-    use crate::model::mount_repair::TargetIdentity;
+    use crate::shared::model::boot_repair::ProviderId;
+    use crate::shared::model::mount_repair::TargetIdentity;
     use crate::repair::boot_repair::providers::base::ProviderCtx;
     use crate::repair::boot_repair::target_exec::RecordedTargetRunner;
     use std::path::PathBuf;

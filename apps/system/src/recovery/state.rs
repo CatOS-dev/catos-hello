@@ -20,7 +20,7 @@
 //! The engine consults this module before each transition and refuses
 //! to persist a state the table does not permit.
 
-use crate::model::recovery::{
+use crate::shared::model::recovery::{
     BtrfsSubvolumeIdentity, RecoveryError, RecoveryErrorKind, SubvolumeFacts, TransactionRecord,
     TransactionState,
 };
@@ -252,10 +252,10 @@ impl RecoveryError {
 /// reviews before any further automatic action.
 pub fn reconcile_with_disk_facts(
     persisted: TransactionState,
-    plan: &crate::model::recovery::RecoveryPlan,
-    facts: &crate::model::recovery::DiskFacts,
+    plan: &crate::shared::model::recovery::RecoveryPlan,
+    facts: &crate::shared::model::recovery::DiskFacts,
 ) -> TransactionState {
-    use crate::model::recovery::TransactionState as S;
+    use crate::shared::model::recovery::TransactionState as S;
 
     // Terminal records are checked for later drift by Engine::reconcile_status.
     if persisted.is_terminal() {
@@ -374,7 +374,7 @@ fn exact_identity_matches(
 /// sufficient because an unrelated subvolume can occupy the canonical
 /// transaction path after a crash.
 fn backup_matches_plan(
-    plan: &crate::model::recovery::RecoveryPlan,
+    plan: &crate::shared::model::recovery::RecoveryPlan,
     backup: Option<&SubvolumeFacts>,
 ) -> bool {
     let (Some(backup), Some(root_uuid)) = (backup, plan.current_root.uuid.as_deref()) else {
@@ -392,7 +392,7 @@ fn backup_matches_plan(
 /// A staging root is safe crash progress only when it is a writable
 /// snapshot of the exact source snapshot sealed in the plan.
 fn staging_matches_source(
-    plan: &crate::model::recovery::RecoveryPlan,
+    plan: &crate::shared::model::recovery::RecoveryPlan,
     staging: Option<&SubvolumeFacts>,
 ) -> bool {
     let (Some(staging), Some(source_uuid)) = (staging, plan.source_snapshot.uuid.as_deref()) else {
@@ -436,8 +436,8 @@ fn staging_matches_source(
 /// are missing we still require the subvolume_id axes to agree
 /// unambiguously.
 pub fn swap_appears_done(
-    plan: &crate::model::recovery::RecoveryPlan,
-    facts: &crate::model::recovery::DiskFacts,
+    plan: &crate::shared::model::recovery::RecoveryPlan,
+    facts: &crate::shared::model::recovery::DiskFacts,
 ) -> bool {
     let Some(active) = &facts.active_root else {
         return false;
@@ -520,8 +520,8 @@ pub fn swap_appears_done(
 /// * when observable, the active root's `read_only` is `false`
 ///   (the planned current root was writable).
 pub fn reverse_swap_appears_done(
-    plan: &crate::model::recovery::RecoveryPlan,
-    facts: &crate::model::recovery::DiskFacts,
+    plan: &crate::shared::model::recovery::RecoveryPlan,
+    facts: &crate::shared::model::recovery::DiskFacts,
 ) -> bool {
     if !facts.staging_root_exists {
         return false;
@@ -567,7 +567,7 @@ pub fn reverse_swap_appears_done(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::recovery::{
+    use crate::shared::model::recovery::{
         BtrfsFilesystemIdentity, BtrfsSubvolumeIdentity, DiskFacts, RecoveryPlan, SubvolumeFacts,
         TransactionState as S, RECOVERY_PLAN_SCHEMA_VERSION,
     };
@@ -604,11 +604,11 @@ mod tests {
             target_catos_identity: None,
             boot_layout: Default::default(),
             boot_consistency: crate::recovery::boot::evaluate_readonly_consistency(
-                &crate::model::recovery::BootLayout::default(),
+                &crate::shared::model::recovery::BootLayout::default(),
             ),
             backup_root_path: "/.catos-recovery/backups/p-test/root-before".into(),
             staging_root_path: "/.catos-recovery/staging/p-test/new-root".into(),
-            fstab_root_definition: crate::model::recovery::FstabRootDefinition {
+            fstab_root_definition: crate::shared::model::recovery::FstabRootDefinition {
                 source: "/dev/nvme0n1p2".into(),
                 fstype: "btrfs".into(),
                 options: vec!["subvol=/@".into()],

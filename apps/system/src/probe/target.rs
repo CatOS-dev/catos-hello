@@ -5,10 +5,10 @@
 use std::path::{Path, PathBuf};
 
 use crate::shared::error::FsError;
-use crate::model::capability::CapabilityStatus;
-use crate::model::evidence::Evidence;
-use crate::model::inspection::{OsRelease, Presence, TargetInspection, ToolPath};
-use crate::model::runtime::Detection;
+use crate::shared::model::capability::CapabilityStatus;
+use crate::shared::model::evidence::Evidence;
+use crate::shared::model::inspection::{OsRelease, Presence, TargetInspection, ToolPath};
+use crate::shared::model::runtime::Detection;
 use crate::probe::fs_probe::{FilesystemProbe, MetaData};
 use crate::system_root::SystemRoot;
 

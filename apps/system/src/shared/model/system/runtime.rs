@@ -3,7 +3,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::model::evidence::Evidence;
+use crate::shared::model::evidence::Evidence;
 
 /// Three-state detection. Never collapse to `bool`: `Unknown` is
 /// semantically different from `NotDetected` and must survive serialisation.

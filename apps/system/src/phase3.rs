@@ -19,8 +19,8 @@ use std::path::{Path, PathBuf};
 
 use crate::cli::{RecoveryArgs, RecoverySubcommand};
 use crate::shared::error::{exit_code, Error};
-use crate::model::inspection::Warning;
-use crate::model::recovery::{
+use crate::shared::model::inspection::Warning;
+use crate::shared::model::recovery::{
     BootConsistencyReport, BtrfsFilesystemIdentity, BtrfsSubvolumeIdentity, CleanupSummary,
     DiskFacts, RecoveryError, RecoveryErrorKind, RecoveryInspectReport, RecoveryListReport,
     RecoveryPlan, RecoveryStatusReport, TransactionPaths, TransactionRecord, TransactionState,
@@ -1025,10 +1025,10 @@ struct TargetProbe {
     filesystem: BtrfsFilesystemIdentity,
     current_root: BtrfsSubvolumeIdentity,
     snapshot: BtrfsSubvolumeIdentity,
-    boot_layout: crate::model::recovery::BootLayout,
+    boot_layout: crate::shared::model::recovery::BootLayout,
     boot_consistency: BootConsistencyReport,
-    catos_identity: Option<crate::model::recovery::CatosIdentity>,
-    fstab_root_definition: crate::model::recovery::FstabRootDefinition,
+    catos_identity: Option<crate::shared::model::recovery::CatosIdentity>,
+    fstab_root_definition: crate::shared::model::recovery::FstabRootDefinition,
 }
 
 fn probe_target_readonly(
@@ -1149,7 +1149,7 @@ fn probe_target_readonly(
     result
 }
 
-fn cleanup_summary(report: crate::model::mount::CleanupReport) -> CleanupSummary {
+fn cleanup_summary(report: crate::shared::model::mount::CleanupReport) -> CleanupSummary {
     let mut residual = report
         .residual
         .iter()
@@ -1182,7 +1182,7 @@ fn discover_root_candidates(
 ) -> Result<
     (
         Vec<BtrfsSubvolumeIdentity>,
-        Option<crate::model::recovery::FstabRootDefinition>,
+        Option<crate::shared::model::recovery::FstabRootDefinition>,
     ),
     RecoveryError,
 > {
@@ -1225,7 +1225,7 @@ fn discover_root_candidates(
 }
 
 fn root_definition_matches_candidate(
-    definition: &crate::model::recovery::FstabRootDefinition,
+    definition: &crate::shared::model::recovery::FstabRootDefinition,
     candidate: &BtrfsSubvolumeIdentity,
 ) -> bool {
     let path = definition
@@ -1266,14 +1266,14 @@ fn rooted_join(subvolume: &str, suffix: &str) -> String {
 fn read_catos_identity(
     top_level: &Path,
     subvolume: &str,
-) -> Option<crate::model::recovery::CatosIdentity> {
+) -> Option<crate::shared::model::recovery::CatosIdentity> {
     let body = confined::read_rooted_file(top_level, &rooted_join(subvolume, "/etc/os-release"))
         .or_else(|_| {
             confined::read_rooted_file(top_level, &rooted_join(subvolume, "/usr/lib/os-release"))
         })
         .ok()?;
     let body = String::from_utf8(body).ok()?;
-    let mut out = crate::model::recovery::CatosIdentity::default();
+    let mut out = crate::shared::model::recovery::CatosIdentity::default();
     for line in body.lines() {
         let Some((key, value)) = line.split_once('=') else {
             continue;
@@ -1293,7 +1293,7 @@ fn read_catos_identity(
 fn read_fstab_root(
     top_level: &Path,
     subvolume: &str,
-) -> Result<Option<crate::model::recovery::FstabRootDefinition>, RecoveryError> {
+) -> Result<Option<crate::shared::model::recovery::FstabRootDefinition>, RecoveryError> {
     let path = rooted_join(subvolume, "/etc/fstab");
     let Some(entries) = read_fstab_entries(top_level, subvolume)? else {
         return Ok(None);
@@ -1306,7 +1306,7 @@ fn read_fstab_root(
         0 => Ok(None),
         1 => {
             let root = &roots[0];
-            Ok(Some(crate::model::recovery::FstabRootDefinition {
+            Ok(Some(crate::shared::model::recovery::FstabRootDefinition {
                 source: fstab_source_string(&root.source),
                 fstype: root.fstype.clone(),
                 options: root.options.clone(),
@@ -1357,7 +1357,7 @@ fn fstab_source_string(source: &FstabSource) -> String {
 
 fn select_root_subvolume(
     explicit: Option<&str>,
-    fstab: Option<&crate::model::recovery::FstabRootDefinition>,
+    fstab: Option<&crate::shared::model::recovery::FstabRootDefinition>,
     default_subvolume: Option<&str>,
     high_confidence_candidates: &[BtrfsSubvolumeIdentity],
 ) -> Result<String, RecoveryError> {
@@ -1559,8 +1559,8 @@ fn require_root() -> Result<(), RecoveryError> {
     Ok(())
 }
 
-fn recommend(record: &TransactionRecord) -> crate::model::recovery::RecoveryRecommendation {
-    use crate::model::recovery::{RecoveryRecommendation as R, TransactionState as S};
+fn recommend(record: &TransactionRecord) -> crate::shared::model::recovery::RecoveryRecommendation {
+    use crate::shared::model::recovery::{RecoveryRecommendation as R, TransactionState as S};
     match record.state {
         S::Completed => R::None,
         S::Reverted => R::None,
@@ -1716,7 +1716,7 @@ mod tests {
 
     #[test]
     fn explicit_root_subvolume_wins_over_fstab_and_default() {
-        let fstab = crate::model::recovery::FstabRootDefinition {
+        let fstab = crate::shared::model::recovery::FstabRootDefinition {
             source: "UUID=root".into(),
             fstype: "btrfs".into(),
             options: vec!["subvol=/@".into()],
@@ -1731,7 +1731,7 @@ mod tests {
     #[test]
     fn fstab_subvol_and_subvolid_select_non_default_root() {
         let candidates = vec![candidate("/@", 256), candidate("/@root", 300)];
-        let by_path = crate::model::recovery::FstabRootDefinition {
+        let by_path = crate::shared::model::recovery::FstabRootDefinition {
             source: "UUID=root".into(),
             fstype: "btrfs".into(),
             options: vec!["rw".into(), "subvol=@root".into()],
@@ -1740,7 +1740,7 @@ mod tests {
             select_root_subvolume(None, Some(&by_path), Some("/@"), &candidates).unwrap(),
             "/@root"
         );
-        let by_id = crate::model::recovery::FstabRootDefinition {
+        let by_id = crate::shared::model::recovery::FstabRootDefinition {
             source: "UUID=root".into(),
             fstype: "btrfs".into(),
             options: vec!["subvolid=300".into()],

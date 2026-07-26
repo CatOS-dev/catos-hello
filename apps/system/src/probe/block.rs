@@ -5,9 +5,9 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use crate::model::evidence::Evidence;
-use crate::model::inspection::Warning;
-use crate::model::storage::{BlockDevice, DeviceClass, DiskKind, MountObservation, PartitionRole};
+use crate::shared::model::evidence::Evidence;
+use crate::shared::model::inspection::Warning;
+use crate::shared::model::storage::{BlockDevice, DeviceClass, DiskKind, MountObservation, PartitionRole};
 use crate::parse::{blkid, mountinfo};
 use crate::probe::fs_probe::FilesystemProbe;
 use crate::shared::process::run_trusted_tool;

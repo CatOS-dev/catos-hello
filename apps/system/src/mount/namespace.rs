@@ -23,7 +23,7 @@
 //! [`establish_private_namespace`] returns Ok, all subsequent mounts are
 //! isolated from the host.
 
-use crate::model::mount::NamespaceState;
+use crate::shared::model::mount::NamespaceState;
 use crate::mount::syscall::{self, clone_flags, ms_flags, SyscallError};
 
 /// Outcome of [`establish_private_namespace`]. The caller (session) keeps
@@ -201,7 +201,7 @@ mod tests {
         let error = namespace_verification_error();
         assert_eq!(
             error.classify(),
-            crate::model::mount::MountErrorKind::NamespaceUnavailable
+            crate::shared::model::mount::MountErrorKind::NamespaceUnavailable
         );
     }
 }

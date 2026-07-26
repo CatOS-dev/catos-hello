@@ -1,6 +1,6 @@
 //! Kernel cmdline builder. Port of `providers/base.kernel_cmdline`
 //! from the bootloadu Calamares module, adjusted to use the
-//! [`crate::model::mount_repair::TargetIdentity`] the stage 1–3
+//! [`crate::shared::model::mount_repair::TargetIdentity`] the stage 1–3
 //! discovery already established.
 //!
 //! ## Hard rules
@@ -18,8 +18,8 @@
 //! * Btrfs subvolume flags are added only when the target root is
 //!   Btrfs and a subvolume path is known.
 
-use crate::model::boot_repair::CmdlineConflict;
-use crate::model::mount_repair::TargetIdentity;
+use crate::shared::model::boot_repair::CmdlineConflict;
+use crate::shared::model::mount_repair::TargetIdentity;
 
 /// Inputs to [`build_kernel_cmdline`].
 #[derive(Debug, Clone)]

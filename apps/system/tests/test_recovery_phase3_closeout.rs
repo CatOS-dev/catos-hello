@@ -41,7 +41,7 @@
 use std::path::PathBuf;
 use std::process::Command;
 
-use catos_system::model::recovery::{
+use catos_system::shared::model::recovery::{
     CleanupSummary, RecoveryError, RecoveryErrorKind, TransactionRecord, TransactionState,
     TX_RECORD_SCHEMA_VERSION,
 };
@@ -312,7 +312,7 @@ fn every_phase3_subcommand_rejects_explicit_esp() {
 // ability to triage a dirty recovery environment after the fact.
 
 fn sample_record_with_cleanup(summary: Option<CleanupSummary>) -> TransactionRecord {
-    use catos_system::model::recovery::{
+    use catos_system::shared::model::recovery::{
         BtrfsFilesystemIdentity, BtrfsSubvolumeIdentity, FstabRootDefinition, RecoveryPlan,
         RECOVERY_PLAN_SCHEMA_VERSION,
     };
@@ -555,7 +555,7 @@ fn exit_code_for_completed_apply_with_clean_cleanup_is_success() {
 /// versa).
 #[test]
 fn attach_cleanup_does_not_clear_last_error() {
-    use catos_system::model::recovery::{
+    use catos_system::shared::model::recovery::{
         BtrfsFilesystemIdentity, CompletedStep, RecoveryPlan, RECOVERY_PLAN_SCHEMA_VERSION,
     };
     use catos_system::recovery::engine::{Engine, EngineOptions};
@@ -581,7 +581,7 @@ fn attach_cleanup_does_not_clear_last_error() {
             device_major_minor: "259:0".into(),
             label: None,
         },
-        current_root: catos_system::model::recovery::BtrfsSubvolumeIdentity {
+        current_root: catos_system::shared::model::recovery::BtrfsSubvolumeIdentity {
             path: "/@".into(),
             subvolume_id: 256,
             generation: 10,
@@ -590,7 +590,7 @@ fn attach_cleanup_does_not_clear_last_error() {
             read_only: false,
             evidence: vec![],
         },
-        source_snapshot: catos_system::model::recovery::BtrfsSubvolumeIdentity {
+        source_snapshot: catos_system::shared::model::recovery::BtrfsSubvolumeIdentity {
             path: "/@snapshots/1".into(),
             subvolume_id: 300,
             generation: 8,
@@ -608,7 +608,7 @@ fn attach_cleanup_does_not_clear_last_error() {
             "/.catos-recovery/backups/tx-00000000000000000000000000000009/root-before".into(),
         staging_root_path: "/.catos-recovery/staging/tx-00000000000000000000000000000009/new-root"
             .into(),
-        fstab_root_definition: catos_system::model::recovery::FstabRootDefinition {
+        fstab_root_definition: catos_system::shared::model::recovery::FstabRootDefinition {
             source: "/dev/null".into(),
             fstype: "btrfs".into(),
             options: vec!["subvol=/@".into()],
@@ -649,7 +649,7 @@ fn attach_cleanup_does_not_clear_last_error() {
             top.join(".catos-recovery/transactions/tx-00000000000000000000000000000009/state.json");
         let mut record = catos_system::recovery::store::load_record(&state_path).unwrap();
         record.last_error = Some(injected_error);
-        record.state = catos_system::model::recovery::TransactionState::FailedRecoverable;
+        record.state = catos_system::shared::model::recovery::TransactionState::FailedRecoverable;
         catos_system::recovery::store::persist_record(&state_path, &record).unwrap();
     }
     let mut reloaded_engine = Engine::load(
@@ -802,7 +802,7 @@ fn secure_dir_remove_session_dir_refuses_symlink() {
 
 #[test]
 fn record_mut_last_cleanup_is_inmemory_only_and_attach_cleanup_persists() {
-    use catos_system::model::recovery::{
+    use catos_system::shared::model::recovery::{
         BtrfsFilesystemIdentity, BtrfsSubvolumeIdentity, FstabRootDefinition, RecoveryPlan,
         RECOVERY_PLAN_SCHEMA_VERSION,
     };

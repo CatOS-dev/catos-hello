@@ -21,8 +21,8 @@
 //!   returns [`DetectionVerdict::Ambiguous`] regardless of how many
 //!   corroborating signals exist.
 
-use crate::model::boot_repair::{FirmwareMethod, ProviderEvidence, ProviderId};
-use crate::model::mount_repair::TargetIdentity;
+use crate::shared::model::boot_repair::{FirmwareMethod, ProviderEvidence, ProviderId};
+use crate::shared::model::mount_repair::TargetIdentity;
 
 /// Inputs supplied by the orchestrator. All fields are observed
 /// through the confined target reader; this module does no I/O.

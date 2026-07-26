@@ -14,9 +14,9 @@ use std::path::{Component, Path, PathBuf};
 ///
 /// Phase 2 commands are read-only storage discovery and target mount:
 ///   * `storage scan` — walks sysfs + blkid + mountinfo and emits a
-///     [`crate::model::storage::StorageReport`].
+///     [`crate::shared::model::storage::StorageReport`].
 ///   * `target plan` — reads a target fstab + discovers devices and emits
-///     a [`crate::model::mount::MountPlan`] without executing any mount.
+///     a [`crate::shared::model::mount::MountPlan`] without executing any mount.
 ///   * `target mount` — same as `target plan` then executes the plan in a
 ///     private mount namespace, inspects the target, cleans up, and emits
 ///     the final session/cleanup report.

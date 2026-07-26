@@ -5,9 +5,9 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use crate::model::capability::{Capability, CapabilityStatus};
-use crate::model::evidence::Evidence;
-use crate::model::runtime::{Detection, RuntimeFacts};
+use crate::shared::model::capability::{Capability, CapabilityStatus};
+use crate::shared::model::evidence::Evidence;
+use crate::shared::model::runtime::{Detection, RuntimeFacts};
 
 /// Subset of `/etc/os-release` we extract. `raw_fields` keeps every key=value
 /// pair we successfully parsed so downstream code can look up custom keys

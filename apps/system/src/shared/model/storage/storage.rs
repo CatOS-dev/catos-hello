@@ -17,9 +17,9 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use crate::model::evidence::Evidence;
-use crate::model::inspection::Warning;
-use crate::model::runtime::Detection;
+use crate::shared::model::evidence::Evidence;
+use crate::shared::model::inspection::Warning;
+use crate::shared::model::runtime::Detection;
 
 // ---------------------------------------------------------------------------
 // Devices
@@ -342,12 +342,12 @@ pub enum Presence2 {
     Absent,
 }
 
-impl From<crate::model::inspection::Presence> for Presence2 {
-    fn from(p: crate::model::inspection::Presence) -> Self {
+impl From<crate::shared::model::inspection::Presence> for Presence2 {
+    fn from(p: crate::shared::model::inspection::Presence) -> Self {
         match p {
-            crate::model::inspection::Presence::Present => Presence2::Present,
-            crate::model::inspection::Presence::Absent => Presence2::Absent,
-            crate::model::inspection::Presence::Unknown => Presence2::Unknown,
+            crate::shared::model::inspection::Presence::Present => Presence2::Present,
+            crate::shared::model::inspection::Presence::Absent => Presence2::Absent,
+            crate::shared::model::inspection::Presence::Unknown => Presence2::Unknown,
         }
     }
 }
@@ -508,7 +508,7 @@ mod tests {
     fn presence2_mirrors_inspection_presence() {
         // The two enums must stay semantically aligned so cross-module
         // conversion is lossless.
-        use crate::model::inspection::Presence as P1;
+        use crate::shared::model::inspection::Presence as P1;
         assert_eq!(Presence2::from(P1::Present), Presence2::Present);
         assert_eq!(Presence2::from(P1::Absent), Presence2::Absent);
         assert_eq!(Presence2::from(P1::Unknown), Presence2::Unknown);

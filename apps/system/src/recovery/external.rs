@@ -37,8 +37,8 @@
 use std::path::Path;
 use std::time::Duration;
 
-use crate::model::evidence::Evidence;
-use crate::model::recovery::{
+use crate::shared::model::evidence::Evidence;
+use crate::shared::model::recovery::{
     BtrfsFilesystemIdentity, BtrfsSubvolumeIdentity, RecoveryError, RecoveryErrorKind,
     SubvolumeFacts,
 };

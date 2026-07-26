@@ -34,7 +34,7 @@
 use std::cell::RefCell;
 use std::time::Duration;
 
-use crate::model::repair::ExitInterpretation;
+use crate::shared::model::repair::ExitInterpretation;
 
 /// One captured invocation. The orchestrator builds
 /// [`RepairInvocation`]s to describe what it wants to run; the runner

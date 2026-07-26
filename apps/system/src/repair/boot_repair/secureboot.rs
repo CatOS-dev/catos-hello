@@ -13,9 +13,9 @@
 //!   `catos-secureboot enable --generate-enrollment-password --json`.
 //! * EFI variable writes, MOK enrollment, and signing operations are
 //!   NOT atomic. Partial success MUST surface as
-//!   [`crate::model::boot_repair::BootRepairOutcome::PartiallyRepaired`]
+//!   [`crate::shared::model::boot_repair::BootRepairOutcome::PartiallyRepaired`]
 //!   or
-//!   [`crate::model::boot_repair::BootRepairOutcome::ManualInterventionRequired`],
+//!   [`crate::shared::model::boot_repair::BootRepairOutcome::ManualInterventionRequired`],
 //!   never as `Repaired`.
 //! * Secure Boot finalisation runs AFTER the regular boot files are
 //!   written and cleanup is in a safe state, mirroring bootloadu's
@@ -24,7 +24,7 @@
 //!   `supportedProviders` list omits it. We refuse before invoking
 //!   `catos-secureboot`.
 
-use crate::model::boot_repair::{
+use crate::shared::model::boot_repair::{
     BootRepairOutcome, ProviderId, SecureBootReport, TargetCommandResult,
 };
 use crate::repair::boot_repair::registry;

@@ -9,11 +9,11 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use crate::model::evidence::Evidence;
-use crate::model::fstab::FstabEntry;
-use crate::model::inspection::{TargetInspection, Warning};
-use crate::model::mount::{CleanupReport, MountError, MountErrorKind};
-use crate::model::storage::{
+use crate::shared::model::evidence::Evidence;
+use crate::shared::model::fstab::FstabEntry;
+use crate::shared::model::inspection::{TargetInspection, Warning};
+use crate::shared::model::mount::{CleanupReport, MountError, MountErrorKind};
+use crate::shared::model::storage::{
     BlockDevice, BtrfsSubvolume, BtrfsSubvolumeKind, EspCandidate, RootCandidate,
     RootCandidateConfidence,
 };

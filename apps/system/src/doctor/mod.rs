@@ -31,14 +31,14 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::model::doctor::{
+use crate::shared::model::doctor::{
     issue_code, recommendation_code, DoctorCleanup, DoctorEnvironment, DoctorIssue,
     DoctorLimitation, DoctorOverallStatus, DoctorRecommendation, DoctorReport, DoctorSection,
     DoctorSectionId, DoctorSectionStatus, DoctorSeverity,
 };
-use crate::model::evidence::Evidence;
-use crate::model::mount_repair::{MountProblem, TargetIdentity};
-use crate::model::recovery::TransactionRecord;
+use crate::shared::model::evidence::Evidence;
+use crate::shared::model::mount_repair::{MountProblem, TargetIdentity};
+use crate::shared::model::recovery::TransactionRecord;
 use crate::recovery::store;
 use crate::repair::boot_repair::detect::{detect, DetectionInputs, DetectionVerdict};
 use crate::repair::mount_repair::{MountPointObservation, MountRepairInputs};
@@ -81,7 +81,7 @@ pub fn run_doctor_with<R: CommandRunner + ?Sized>(runner: &R) -> DoctorReport {
 }
 
 fn capture_environment() -> DoctorEnvironment {
-    use crate::model::runtime::DetectionStatus;
+    use crate::shared::model::runtime::DetectionStatus;
     let fs = crate::probe::fs_probe::RealFilesystem;
     let runtime = crate::probe::detect_runtime(&fs);
     let primary_mode = runtime.primary_mode();
@@ -94,8 +94,8 @@ fn capture_environment() -> DoctorEnvironment {
     }
 }
 
-fn primary_mode_label(mode: crate::model::runtime::PrimaryRuntimeMode) -> String {
-    use crate::model::runtime::PrimaryRuntimeMode::*;
+fn primary_mode_label(mode: crate::shared::model::runtime::PrimaryRuntimeMode) -> String {
+    use crate::shared::model::runtime::PrimaryRuntimeMode::*;
     match mode {
         RunningSystem => "running_system",
         Chroot => "chroot",
@@ -107,7 +107,7 @@ fn primary_mode_label(mode: crate::model::runtime::PrimaryRuntimeMode) -> String
 }
 
 fn is_running_root_catos(fs: &crate::probe::fs_probe::RealFilesystem) -> bool {
-    use crate::model::runtime::DetectionStatus;
+    use crate::shared::model::runtime::DetectionStatus;
     let root = match crate::system_root::SystemRoot::from_user_input("/") {
         Ok(r) => r,
         Err(_) => return false,
@@ -478,7 +478,7 @@ fn collect_mount_point_observations(
         return out;
     }
     let root = target_root_path(target);
-    for spec in crate::model::mount_repair::CATOS_STANDARD_SUBVOLS {
+    for spec in crate::shared::model::mount_repair::CATOS_STANDARD_SUBVOLS {
         if spec.mount_point == "/" {
             continue;
         }
@@ -790,25 +790,25 @@ fn collect_detection_inputs(target: &TargetIdentity) -> DetectionInputs {
 
 fn inspect_provider_assets(
     target: &TargetIdentity,
-    provider: crate::model::boot_repair::ProviderId,
+    provider: crate::shared::model::boot_repair::ProviderId,
 ) -> bool {
     let root = target_root_path(target);
     match provider {
-        crate::model::boot_repair::ProviderId::Grub => has_target_path(&root, "boot/grub"),
-        crate::model::boot_repair::ProviderId::Limine => {
+        crate::shared::model::boot_repair::ProviderId::Grub => has_target_path(&root, "boot/grub"),
+        crate::shared::model::boot_repair::ProviderId::Limine => {
             read_target_file(&root, "etc/default/limine").is_some()
         }
-        crate::model::boot_repair::ProviderId::SystemdBoot => {
+        crate::shared::model::boot_repair::ProviderId::SystemdBoot => {
             read_target_file(&root, "etc/kernel/install.conf.d/20-catos-bootloadu.conf").is_some()
         }
-        crate::model::boot_repair::ProviderId::Uki
-        | crate::model::boot_repair::ProviderId::Efistub => {
+        crate::shared::model::boot_repair::ProviderId::Uki
+        | crate::shared::model::boot_repair::ProviderId::Efistub => {
             read_target_file(&root, "etc/catos/firmware-boot.conf").is_some()
         }
     }
 }
 
-fn provider_evidence_to_evidence(ev: crate::model::boot_repair::ProviderEvidence) -> Evidence {
+fn provider_evidence_to_evidence(ev: crate::shared::model::boot_repair::ProviderEvidence) -> Evidence {
     Evidence::new(ev.code, ev.source, ev.message).with_value(format!(
         "provider={} authoritative={}",
         ev.provider.as_str(),
@@ -995,12 +995,12 @@ fn inspect_single_record(
     if record.state.is_terminal() {
         if matches!(
             record.state,
-            crate::model::recovery::TransactionState::Completed
-                | crate::model::recovery::TransactionState::Reverted
+            crate::shared::model::recovery::TransactionState::Completed
+                | crate::shared::model::recovery::TransactionState::Reverted
         ) {
             if matches!(
                 record.state,
-                crate::model::recovery::TransactionState::Completed
+                crate::shared::model::recovery::TransactionState::Completed
             ) {
                 if let Some(cleanup) = record.last_cleanup.as_ref() {
                     if !cleanup.residual.is_empty() {
@@ -1315,7 +1315,7 @@ pub fn aggregate_for_tests(report: &mut DoctorReport) {
 pub mod tests {
     #![allow(clippy::field_reassign_with_default)]
     use super::*;
-    use crate::model::doctor::DoctorTargetKind;
+    use crate::shared::model::doctor::DoctorTargetKind;
 
     pub fn aggregate_public(report: &mut DoctorReport) {
         aggregate(report);

@@ -18,8 +18,8 @@
 //! handle that exposes the confined target root, the target command
 //! runner, and the kernel cmdline.
 
-use crate::model::boot_repair::{BootAction, BootVerification, ProviderId, TargetCommandResult};
-use crate::model::mount_repair::TargetIdentity;
+use crate::shared::model::boot_repair::{BootAction, BootVerification, ProviderId, TargetCommandResult};
+use crate::shared::model::mount_repair::TargetIdentity;
 use crate::repair::boot_repair::target_exec::{TargetRequest, TargetRunner};
 
 /// Shared read-only context every provider receives. Built by the
@@ -39,7 +39,7 @@ pub struct ProviderCtx<'a> {
     /// Required by BIOS GRUB.
     pub bios_install_path: Option<String>,
     /// Detected architecture.
-    pub architecture: crate::model::boot_repair::Architecture,
+    pub architecture: crate::shared::model::boot_repair::Architecture,
     /// Branding name (bootloader label). Mirrors bootloadu
     /// `branding_name`; defaults to "CatOS".
     pub branding_name: String,
@@ -49,7 +49,7 @@ pub struct ProviderCtx<'a> {
 
 /// Result of running one provider recipe. Built by each provider's
 /// `execute` / `verify` methods and folded into the final
-/// [`crate::model::boot_repair::BootRepairReport`] by the
+/// [`crate::shared::model::boot_repair::BootRepairReport`] by the
 /// orchestrator.
 #[derive(Debug, Clone, Default)]
 pub struct ProviderRecipeResult {

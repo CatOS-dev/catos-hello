@@ -11,7 +11,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
-use crate::model::recovery::{
+use crate::shared::model::recovery::{
     BootConsistencyReport, BootConsistencyStatus, BootLayout, BtrfsFilesystemIdentity,
     BtrfsSubvolumeIdentity, CatosIdentity, FstabRootDefinition, RecoveryError, RecoveryPlan,
     RECOVERY_PLAN_SCHEMA_VERSION,
@@ -63,13 +63,13 @@ pub fn build_plan(inputs: PlanInputs) -> Result<RecoveryPlan, RecoveryError> {
 
     if inputs.current_root.path == inputs.source_snapshot.path {
         return Err(RecoveryError::new(
-            crate::model::recovery::RecoveryErrorKind::TargetChanged,
+            crate::shared::model::recovery::RecoveryErrorKind::TargetChanged,
             "current root and source snapshot are the same path",
         ));
     }
     if !inputs.source_snapshot.read_only {
         return Err(RecoveryError::new(
-            crate::model::recovery::RecoveryErrorKind::SnapshotNotReadonly,
+            crate::shared::model::recovery::RecoveryErrorKind::SnapshotNotReadonly,
             "source snapshot is not readonly; refusing to plan",
         ));
     }
@@ -77,7 +77,7 @@ pub fn build_plan(inputs: PlanInputs) -> Result<RecoveryPlan, RecoveryError> {
     crate::recovery::identity::validate_recovery_id(&inputs.plan_id)?;
     if inputs.confirmation_token_entropy.len() != 32 {
         return Err(RecoveryError::new(
-            crate::model::recovery::RecoveryErrorKind::RandomSourceFailed,
+            crate::shared::model::recovery::RecoveryErrorKind::RandomSourceFailed,
             "confirmation nonce must contain exactly 32 random bytes",
         ));
     }
@@ -85,11 +85,11 @@ pub fn build_plan(inputs: PlanInputs) -> Result<RecoveryPlan, RecoveryError> {
     let transaction_id = inputs.plan_id.clone();
     let backup_root_path = format!(
         "{}/{transaction_id}/root-before",
-        crate::model::recovery::TransactionPaths::backups_dir()
+        crate::shared::model::recovery::TransactionPaths::backups_dir()
     );
     let staging_root_path = format!(
         "{}/{transaction_id}/new-root",
-        crate::model::recovery::TransactionPaths::staging_dir()
+        crate::shared::model::recovery::TransactionPaths::staging_dir()
     );
 
     let boot_consistency =
@@ -210,7 +210,7 @@ pub fn effective_plan_digest(plan: &RecoveryPlan) -> Result<String, RecoveryErro
     };
     let bytes = serde_json::to_vec(&canonical).map_err(|error| {
         RecoveryError::new(
-            crate::model::recovery::RecoveryErrorKind::StateRecordCorrupt,
+            crate::shared::model::recovery::RecoveryErrorKind::StateRecordCorrupt,
             format!("cannot serialise canonical recovery plan: {error}"),
         )
     })?;
@@ -272,7 +272,7 @@ pub fn verify_revert_confirmation_token(
         build_revert_confirmation_token(transaction_id, plan_digest, filesystem_fsid, state, nonce);
     if presented != expected {
         return Err(RecoveryError::new(
-            crate::model::recovery::RecoveryErrorKind::ConfirmationTokenMismatch,
+            crate::shared::model::recovery::RecoveryErrorKind::ConfirmationTokenMismatch,
             "revert confirmation token is not bound to the current transaction state",
         ));
     }
@@ -296,7 +296,7 @@ fn hex_encode(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::recovery::{
+    use crate::shared::model::recovery::{
         BtrfsFilesystemIdentity, BtrfsSubvolumeIdentity, FstabRootDefinition, RecoveryErrorKind,
     };
 

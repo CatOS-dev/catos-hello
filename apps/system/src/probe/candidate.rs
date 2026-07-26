@@ -2,11 +2,11 @@
 
 use std::path::Path;
 
-use crate::model::evidence::Evidence;
-use crate::model::fstab::{FstabEntry, FstabEntryKind, FstabSource};
-use crate::model::inspection::{Presence, TargetInspection, Warning};
-use crate::model::runtime::Detection;
-use crate::model::storage::{
+use crate::shared::model::evidence::Evidence;
+use crate::shared::model::fstab::{FstabEntry, FstabEntryKind, FstabSource};
+use crate::shared::model::inspection::{Presence, TargetInspection, Warning};
+use crate::shared::model::runtime::Detection;
+use crate::shared::model::storage::{
     Ambiguity, AmbiguityKind, BlockDevice, DemotionReason, EspCandidate, EspSignals,
     OsLayoutSignals, PartitionRole, Presence2, RootCandidate, RootCandidateConfidence,
 };
@@ -306,7 +306,7 @@ fn classify_root_confidence(
     let has_fstab = inspection.has_fstab == Presence::Present;
     let strong_layout = has_usr && (has_package_db || has_fstab);
 
-    if inspection.is_catos_target.status == crate::model::runtime::DetectionStatus::Detected
+    if inspection.is_catos_target.status == crate::shared::model::runtime::DetectionStatus::Detected
         && has_os_release
         && strong_layout
     {
@@ -317,7 +317,7 @@ fn classify_root_confidence(
     if !has_os_release {
         reasons.push(DemotionReason::NoOsRelease);
     } else if inspection.is_catos_target.status
-        == crate::model::runtime::DetectionStatus::NotDetected
+        == crate::shared::model::runtime::DetectionStatus::NotDetected
     {
         reasons.push(DemotionReason::NotCatOs);
     }
@@ -427,7 +427,7 @@ mod tests {
     use std::path::PathBuf;
 
     use super::*;
-    use crate::model::storage::{DeviceClass, DiskKind};
+    use crate::shared::model::storage::{DeviceClass, DiskKind};
 
     fn device(name: &str, filesystem: Option<&str>) -> BlockDevice {
         BlockDevice {
@@ -613,7 +613,7 @@ mod tests {
         assert_eq!(roots[0].confidence, RootCandidateConfidence::High);
         assert_eq!(
             roots[0].is_catos.status,
-            crate::model::runtime::DetectionStatus::Detected
+            crate::shared::model::runtime::DetectionStatus::Detected
         );
         assert_eq!(roots[0].signals.has_usr, Presence2::Present);
         let _ = std::fs::remove_dir_all(base);

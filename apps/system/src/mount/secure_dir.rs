@@ -25,7 +25,7 @@
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
-use crate::model::recovery::{RecoveryError, RecoveryErrorKind};
+use crate::shared::model::recovery::{RecoveryError, RecoveryErrorKind};
 
 pub const SESSION_ROOT_PARENT: &str = "/run/catos-system/sessions";
 

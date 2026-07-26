@@ -20,7 +20,7 @@
 //! would force the orchestrator to re-derive "did it work?" from
 //! the same data — duplication that drifts.
 
-use crate::model::repair::{AttemptKind, ExitInterpretation, RepairAttempt, RepairTool};
+use crate::shared::model::repair::{AttemptKind, ExitInterpretation, RepairAttempt, RepairTool};
 use crate::repair::runner::{CommandRunner, RepairInvocation, RepairRunnerError, ToolResult};
 use std::time::Duration;
 

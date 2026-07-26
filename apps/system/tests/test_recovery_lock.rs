@@ -28,7 +28,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use catos_system::model::recovery::{
+use catos_system::shared::model::recovery::{
     BootLayout, BtrfsFilesystemIdentity, BtrfsSubvolumeIdentity, CompletedStep, DiskFacts,
     FstabRootDefinition, RecoveryError, RecoveryErrorKind, RecoveryPlan, SubvolumeFacts,
     TransactionPaths, TransactionRecord, TransactionState, RECOVERY_PLAN_SCHEMA_VERSION,

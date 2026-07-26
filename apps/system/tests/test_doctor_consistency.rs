@@ -10,8 +10,8 @@
 
 #![allow(clippy::field_reassign_with_default)]
 
-use catos_system::model::boot_repair::ProviderId;
-use catos_system::model::mount_repair::{MountProblem, TargetIdentity};
+use catos_system::shared::model::boot_repair::ProviderId;
+use catos_system::shared::model::mount_repair::{MountProblem, TargetIdentity};
 use catos_system::repair::boot_repair::detect::{detect, DetectionInputs, DetectionVerdict};
 use catos_system::repair::mount_repair::{diagnose as mount_diagnose, MountRepairInputs};
 use catos_system::repair::subvol_decision::CatosConfirmation;

@@ -1,6 +1,6 @@
 //! Mount plan construction.
 //!
-//! Given a [`crate::model::mount::MountPlan`] skeleton (target root, fstab
+//! Given a [`crate::shared::model::mount::MountPlan`] skeleton (target root, fstab
 //! entries, discovered devices) produce the final ordered list of
 //! [`MountStep`]s with per-fstype read-only safety options applied.
 //!
@@ -40,10 +40,10 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use crate::model::evidence::Evidence;
-use crate::model::fstab::{FstabEntry, FstabEntryKind, FstabSource};
-use crate::model::mount::{MountError, MountErrorKind, MountPlan, MountStep, NamespaceState};
-use crate::model::storage::BlockDevice;
+use crate::shared::model::evidence::Evidence;
+use crate::shared::model::fstab::{FstabEntry, FstabEntryKind, FstabSource};
+use crate::shared::model::mount::{MountError, MountErrorKind, MountPlan, MountStep, NamespaceState};
+use crate::shared::model::storage::BlockDevice;
 
 // ---------------------------------------------------------------------------
 // Per-fstype option table
@@ -703,7 +703,7 @@ fn unsafe_target_error(target: &str, message: &str) -> MountError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::storage::{DeviceClass, DiskKind, PartitionRole};
+    use crate::shared::model::storage::{DeviceClass, DiskKind, PartitionRole};
 
     fn ext4_root_device() -> BlockDevice {
         BlockDevice {

@@ -10,7 +10,7 @@
 use std::io::Write;
 
 use crate::shared::error::Error;
-use crate::model::doctor::{
+use crate::shared::model::doctor::{
     DoctorIssue, DoctorOverallStatus, DoctorRecommendation, DoctorReport, DoctorSection,
     DoctorSeverity, DoctorTargetKind,
 };
@@ -219,12 +219,12 @@ pub fn overall_status_label(status: DoctorOverallStatus) -> &'static str {
 mod tests {
     #![allow(clippy::field_reassign_with_default)]
     use super::*;
-    use crate::model::doctor::{
+    use crate::shared::model::doctor::{
         DoctorCleanup, DoctorEnvironment, DoctorIssue, DoctorLimitation, DoctorOverallStatus,
         DoctorRecommendation, DoctorSection, DoctorSectionId, DoctorSectionStatus, DoctorSeverity,
         DoctorTarget, DoctorTargetKind, DOCTOR_SCHEMA_VERSION,
     };
-    use crate::model::evidence::Evidence;
+    use crate::shared::model::evidence::Evidence;
 
     fn sample_report() -> DoctorReport {
         let mut report = DoctorReport {

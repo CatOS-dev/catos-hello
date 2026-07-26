@@ -6,7 +6,7 @@ use serde::{Serialize, Serializer};
 
 use crate::cli::View;
 use crate::shared::error::Error;
-use crate::model::inspection::InspectionReport;
+use crate::shared::model::inspection::InspectionReport;
 
 /// Serialise the report to a pretty-printed JSON string under the given
 /// view. Errors are converted to [`Error::SerializeFailed`].
@@ -59,10 +59,10 @@ impl<'a> Serialize for ReportViewSerializer<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::capability::{Capability, CapabilityKind, CapabilityStatus};
-    use crate::model::evidence::Evidence;
-    use crate::model::inspection::{TargetInspection, Warning};
-    use crate::model::runtime::{Detection, DetectionStatus, PrimaryRuntimeMode, RuntimeFacts};
+    use crate::shared::model::capability::{Capability, CapabilityKind, CapabilityStatus};
+    use crate::shared::model::evidence::Evidence;
+    use crate::shared::model::inspection::{TargetInspection, Warning};
+    use crate::shared::model::runtime::{Detection, DetectionStatus, PrimaryRuntimeMode, RuntimeFacts};
     use crate::SCHEMA_VERSION;
     use std::path::PathBuf;
 
@@ -88,13 +88,13 @@ mod tests {
             target: TargetInspection {
                 root: PathBuf::from("/"),
                 os_release: None,
-                has_fstab: crate::model::Presence::Present,
-                has_crypttab: crate::model::Presence::Absent,
-                has_pacman_db: crate::model::Presence::Present,
-                has_usr: crate::model::Presence::Present,
-                has_boot: crate::model::Presence::Present,
-                has_efi: crate::model::Presence::Absent,
-                has_boot_efi: crate::model::Presence::Absent,
+                has_fstab: crate::shared::model::Presence::Present,
+                has_crypttab: crate::shared::model::Presence::Absent,
+                has_pacman_db: crate::shared::model::Presence::Present,
+                has_usr: crate::shared::model::Presence::Present,
+                has_boot: crate::shared::model::Presence::Present,
+                has_efi: crate::shared::model::Presence::Absent,
+                has_boot_efi: crate::shared::model::Presence::Absent,
                 is_catos_target: Detection::unknown(vec![]),
                 tool_paths: vec![],
             },
@@ -228,7 +228,7 @@ mod tests {
     #[test]
     fn presence_unknown_not_serialised_as_bool() {
         let mut r = sample_report();
-        r.target.has_boot = crate::model::Presence::Unknown;
+        r.target.has_boot = crate::shared::model::Presence::Unknown;
         let j = render_json(&r, full_view()).unwrap();
         let v: serde_json::Value = serde_json::from_str(&j).unwrap();
         assert_eq!(v["target"]["has_boot"], "unknown");
@@ -290,15 +290,15 @@ mod tests {
             "\"not_detected\""
         );
         assert_eq!(
-            serde_json::to_string(&crate::model::Presence::Present).unwrap(),
+            serde_json::to_string(&crate::shared::model::Presence::Present).unwrap(),
             "\"present\""
         );
         assert_eq!(
-            serde_json::to_string(&crate::model::Presence::Absent).unwrap(),
+            serde_json::to_string(&crate::shared::model::Presence::Absent).unwrap(),
             "\"absent\""
         );
         assert_eq!(
-            serde_json::to_string(&crate::model::Presence::Unknown).unwrap(),
+            serde_json::to_string(&crate::shared::model::Presence::Unknown).unwrap(),
             "\"unknown\""
         );
     }

@@ -13,8 +13,8 @@
 //! We never fall back to "the first plausible device". The spec is
 //! explicit: 不因为 `/dev/sda2` 排在最前就选择它.
 
-use crate::model::doctor::{DoctorTarget, DoctorTargetKind};
-use crate::model::mount_repair::{
+use crate::shared::model::doctor::{DoctorTarget, DoctorTargetKind};
+use crate::shared::model::mount_repair::{
     BootMountLayout, MountRepairOutcome, MountRepairReport, TargetIdentity,
 };
 use crate::repair::mount_repair::run_mount_repair_via_cli;
@@ -107,8 +107,8 @@ fn collect_candidate_descriptions(report: &MountRepairReport) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::evidence::Evidence;
-    use crate::model::mount_repair::MountRepairCleanup;
+    use crate::shared::model::evidence::Evidence;
+    use crate::shared::model::mount_repair::MountRepairCleanup;
     use std::path::PathBuf;
 
     fn sample_target() -> TargetIdentity {

@@ -16,7 +16,7 @@ use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use crate::model::recovery::{RecoveryError, RecoveryErrorKind};
+use crate::shared::model::recovery::{RecoveryError, RecoveryErrorKind};
 
 const RESOLVE_NO_MAGICLINKS: u64 = 0x02;
 const RESOLVE_NO_SYMLINKS: u64 = 0x04;

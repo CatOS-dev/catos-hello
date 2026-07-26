@@ -32,7 +32,7 @@
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::model::recovery::{
+use crate::shared::model::recovery::{
     BtrfsFilesystemIdentity, CompletedStep, DiskFacts, RecoveryError, RecoveryErrorKind,
     RecoveryPlan, SubvolumeFacts, TransactionPaths, TransactionRecord, TransactionState,
     TX_RECORD_SCHEMA_VERSION,
@@ -251,7 +251,7 @@ impl Engine {
     ///   cleanup actually happened.
     pub fn attach_cleanup(
         &mut self,
-        summary: crate::model::recovery::CleanupSummary,
+        summary: crate::shared::model::recovery::CleanupSummary,
     ) -> Result<(), RecoveryError> {
         self.record.last_cleanup = Some(summary);
         self.record.last_updated_unix = now_unix();

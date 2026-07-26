@@ -6,7 +6,7 @@
 use std::io::Write;
 
 use crate::shared::error::Error;
-use crate::model::recovery::{
+use crate::shared::model::recovery::{
     RecoveryError, RecoveryInspectReport, RecoveryListReport, RecoveryPlan, RecoveryStatusReport,
     TransactionRecord,
 };
@@ -272,7 +272,7 @@ fn render_plan<W: Write>(out: &mut W, plan: &RecoveryPlan) -> std::io::Result<()
 
 fn render_boot_consistency<W: Write>(
     out: &mut W,
-    report: &crate::model::recovery::BootConsistencyReport,
+    report: &crate::shared::model::recovery::BootConsistencyReport,
 ) -> std::io::Result<()> {
     writeln!(out, "  boot consistency : {:?}", report.status)?;
     writeln!(
@@ -373,7 +373,7 @@ fn render_error<W: Write>(out: &mut W, error: &RecoveryError) -> std::io::Result
 
 fn render_warnings<W: Write>(
     out: &mut W,
-    warnings: &[crate::model::inspection::Warning],
+    warnings: &[crate::shared::model::inspection::Warning],
 ) -> std::io::Result<()> {
     if warnings.is_empty() {
         return Ok(());
@@ -404,7 +404,7 @@ fn json_envelope(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::recovery::{
+    use crate::shared::model::recovery::{
         BootLayout, BtrfsFilesystemIdentity, BtrfsSubvolumeIdentity, CatosIdentity, CompletedStep,
         DiskFacts, FstabRootDefinition, RecoveryRecommendation, RecoveryStatusReport,
         SubvolumeFacts, TransactionState, RECOVERY_PLAN_SCHEMA_VERSION, TX_RECORD_SCHEMA_VERSION,
@@ -478,7 +478,7 @@ mod tests {
     #[test]
     fn json_error_envelope_carries_structured_fields() {
         let error = RecoveryError::new(
-            crate::model::recovery::RecoveryErrorKind::StalePlan,
+            crate::shared::model::recovery::RecoveryErrorKind::StalePlan,
             "fsid drifted",
         );
         let outcome = Phase3Outcome::Error(Box::new(error));
@@ -561,7 +561,7 @@ mod tests {
                 source_snapshot: None,
             },
             recommendation: RecoveryRecommendation::None,
-            mount_cleanup: Some(crate::model::recovery::CleanupSummary {
+            mount_cleanup: Some(crate::shared::model::recovery::CleanupSummary {
                 unmounted: vec!["/run/catos-system/sessions/status/root".into()],
                 residual: vec![],
                 all_clean: true,

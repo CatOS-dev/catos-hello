@@ -5,8 +5,8 @@
 
 use std::path::Path;
 
-use crate::model::capability::{Capability, CapabilityKind, CapabilityStatus};
-use crate::model::evidence::Evidence;
+use crate::shared::model::capability::{Capability, CapabilityKind, CapabilityStatus};
+use crate::shared::model::evidence::Evidence;
 use crate::probe::fs_probe::FilesystemProbe;
 use crate::probe::target::{
     host_efivars_path, host_tool_exists, probe_target_tool, target_read_to_string,
@@ -585,7 +585,7 @@ mod tests {
     //! nothing depends on the host's actual privilege state.
 
     use super::*;
-    use crate::model::capability::CapabilityStatus;
+    use crate::shared::model::capability::CapabilityStatus;
     use crate::probe::fs_probe::{FixtureFilesystem, MetaData};
     use crate::system_root::SystemRoot;
 

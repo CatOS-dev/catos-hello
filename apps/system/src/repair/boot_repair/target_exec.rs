@@ -32,7 +32,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 
-use crate::model::boot_repair::{TargetCommand, TargetCommandResult};
+use crate::shared::model::boot_repair::{TargetCommand, TargetCommandResult};
 
 /// The fixed allow-list of binaries the boot-repair orchestrator may
 /// spawn. Mirrors exactly the commands bootloadu invokes through

@@ -39,9 +39,9 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
-use crate::model::evidence::Evidence;
-use crate::model::inspection::Warning;
-use crate::model::mount::{
+use crate::shared::model::evidence::Evidence;
+use crate::shared::model::inspection::Warning;
+use crate::shared::model::mount::{
     CleanupReport, MountError, MountErrorKind, MountPlan, MountSession, MountSessionState,
     MountedResource, NamespaceState, ResidualMount,
 };
@@ -177,7 +177,7 @@ impl Session {
     /// Execute one step. Only the empty root mountpoint may be created.
     /// Nested mountpoints must already exist as real directories in the
     /// read-only target and may not contain symlink components.
-    fn execute_step(&mut self, step: &crate::model::mount::MountStep) -> Result<(), SyscallError> {
+    fn execute_step(&mut self, step: &crate::shared::model::mount::MountStep) -> Result<(), SyscallError> {
         if let Err(msg) = prepare_mount_target(&self.target_root, &step.target) {
             return Err(SyscallError {
                 syscall: "mkdir",

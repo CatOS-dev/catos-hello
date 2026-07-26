@@ -5,8 +5,8 @@
 use std::path::Path;
 
 use crate::shared::error::FsError;
-use crate::model::evidence::Evidence;
-use crate::model::runtime::{Detection, RuntimeFacts};
+use crate::shared::model::evidence::Evidence;
+use crate::shared::model::runtime::{Detection, RuntimeFacts};
 use crate::probe::fs_probe::FilesystemProbe;
 
 /// Top-level entry: run every detector and assemble the facts.
@@ -470,7 +470,7 @@ fn parse_root_mount(mountinfo: &str) -> Option<RootMount> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::runtime::DetectionStatus;
+    use crate::shared::model::runtime::DetectionStatus;
     use crate::probe::fs_probe::{FixtureFilesystem, MetaData};
 
     fn dir_meta() -> MetaData {

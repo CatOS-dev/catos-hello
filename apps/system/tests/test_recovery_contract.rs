@@ -19,8 +19,8 @@
 //! The QEMU crash-resume test in scripts/recovery-qemu-smoke.sh
 //! exercises the same invariants under real SIGKILL.
 
-use catos_system::model::recovery::TransactionState as S;
-use catos_system::model::recovery::{
+use catos_system::shared::model::recovery::TransactionState as S;
+use catos_system::shared::model::recovery::{
     BootLayout, BtrfsFilesystemIdentity, BtrfsSubvolumeIdentity, CatosIdentity, CompletedStep,
     DiskFacts, FstabRootDefinition, RecoveryErrorKind, RecoveryPlan, SubvolumeFacts,
     TransactionPaths, TransactionRecord, TransactionState, RECOVERY_PLAN_SCHEMA_VERSION,

@@ -19,7 +19,7 @@
 use std::ffi::CString;
 use std::path::Path;
 
-use crate::model::mount::MountErrorKind;
+use crate::shared::model::mount::MountErrorKind;
 
 // ---------------------------------------------------------------------------
 // Kernel constants (x86_64; identical on all Linux arches we target).

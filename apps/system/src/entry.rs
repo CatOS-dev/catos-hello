@@ -64,8 +64,8 @@ impl fmt::Display for Invocation {
 pub fn build_report(
     invocation: Invocation,
     target_root: &crate::system_root::SystemRoot,
-) -> Result<crate::model::inspection::InspectionReport, Error> {
-    use crate::model::inspection::Warning;
+) -> Result<crate::shared::model::inspection::InspectionReport, Error> {
+    use crate::shared::model::inspection::Warning;
     use crate::probe::fs_probe::RealFilesystem;
     use crate::probe::{detect_capabilities, detect_runtime, inspect_target};
     use crate::SCHEMA_VERSION;
@@ -82,7 +82,7 @@ pub fn build_report(
         .map(|m| Warning::new("PROBE_WARNING", m))
         .collect();
 
-    Ok(crate::model::inspection::InspectionReport {
+    Ok(crate::shared::model::inspection::InspectionReport {
         schema_version: SCHEMA_VERSION,
         program_version: crate::PROGRAM_VERSION.to_string(),
         invocation: invocation.as_str().to_string(),
@@ -377,8 +377,8 @@ fn run_repair_fs(argv: &[String]) -> i32 {
 ///   "missing argument" and "you must disambiguate" are the same
 ///   user-facing class.
 /// * `5` for Unknown (defensive; should never appear in practice).
-fn outcome_exit_code(outcome: crate::model::repair::FsRepairOutcome) -> i32 {
-    use crate::model::repair::FsRepairOutcome;
+fn outcome_exit_code(outcome: crate::shared::model::repair::FsRepairOutcome) -> i32 {
+    use crate::shared::model::repair::FsRepairOutcome;
     match outcome {
         FsRepairOutcome::Clean | FsRepairOutcome::Repaired | FsRepairOutcome::RepairedWithRisk => {
             exit_code::SUCCESS
@@ -526,8 +526,8 @@ fn run_repair_mount(argv: &[String]) -> i32 {
     }
 }
 
-fn mount_outcome_exit_code(outcome: crate::model::mount_repair::MountRepairOutcome) -> i32 {
-    use crate::model::mount_repair::MountRepairOutcome as O;
+fn mount_outcome_exit_code(outcome: crate::shared::model::mount_repair::MountRepairOutcome) -> i32 {
+    use crate::shared::model::mount_repair::MountRepairOutcome as O;
     match outcome {
         O::Clean | O::Repaired | O::PartiallyRepaired => exit_code::SUCCESS,
         O::AmbiguousTarget
@@ -675,8 +675,8 @@ fn run_repair_boot(argv: &[String]) -> i32 {
     }
 }
 
-fn boot_outcome_exit_code(outcome: crate::model::boot_repair::BootRepairOutcome) -> i32 {
-    use crate::model::boot_repair::BootRepairOutcome as O;
+fn boot_outcome_exit_code(outcome: crate::shared::model::boot_repair::BootRepairOutcome) -> i32 {
+    use crate::shared::model::boot_repair::BootRepairOutcome as O;
     match outcome {
         O::Clean | O::Repaired => exit_code::SUCCESS,
         O::AmbiguousTarget | O::AmbiguousProvider | O::Unsupported => exit_code::ARG_ERROR,
@@ -969,7 +969,7 @@ fn write_json_stdout(json: &str) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::boot_repair::BootRepairOutcome;
+    use crate::shared::model::boot_repair::BootRepairOutcome;
 
     #[test]
     fn partially_repaired_boot_is_not_a_success_exit() {

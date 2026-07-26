@@ -26,7 +26,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::model::evidence::Evidence;
+use crate::shared::model::evidence::Evidence;
 
 /// Schema version for the Doctor report. Bumped only on a
 /// backward-incompatible change to the top-level shape.
@@ -407,7 +407,7 @@ impl DoctorCleanup {
 }
 
 /// Identity of the selected diagnosis target. Mirrors the relevant
-/// subset of [`crate::model::mount_repair::TargetIdentity`] so Doctor
+/// subset of [`crate::shared::model::mount_repair::TargetIdentity`] so Doctor
 /// output is self-contained without dragging in the full plan-bound
 /// shape.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

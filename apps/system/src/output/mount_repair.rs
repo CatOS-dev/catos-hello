@@ -6,7 +6,7 @@
 use std::io::Write;
 
 use crate::shared::error::Error;
-use crate::model::mount_repair::MountRepairReport;
+use crate::shared::model::mount_repair::MountRepairReport;
 
 pub fn render_mount_repair_json(
     report: &MountRepairReport,
@@ -93,34 +93,34 @@ pub fn render_mount_repair_human<W: Write>(
         writeln!(out, "  Actions")?;
         for action in &report.actions {
             match action {
-                crate::model::mount_repair::AppliedAction::FstabEdited { edit } => {
+                crate::shared::model::mount_repair::AppliedAction::FstabEdited { edit } => {
                     writeln!(out, "    fstab-edit: {}", edit_reason(edit))?;
                 }
-                crate::model::mount_repair::AppliedAction::FstabEditSkipped { edit, reason } => {
+                crate::shared::model::mount_repair::AppliedAction::FstabEditSkipped { edit, reason } => {
                     writeln!(out, "    fstab-skip: {} ({reason})", edit_reason(edit))?;
                 }
-                crate::model::mount_repair::AppliedAction::SubvolumeCreated { subvol } => {
+                crate::shared::model::mount_repair::AppliedAction::SubvolumeCreated { subvol } => {
                     writeln!(out, "    subvol-create: {subvol}")?;
                 }
-                crate::model::mount_repair::AppliedAction::SubvolumeSkipped { subvol, reason } => {
+                crate::shared::model::mount_repair::AppliedAction::SubvolumeSkipped { subvol, reason } => {
                     writeln!(out, "    subvol-skip: {subvol} ({reason})")?;
                 }
-                crate::model::mount_repair::AppliedAction::SubvolumeRolledBack { subvol } => {
+                crate::shared::model::mount_repair::AppliedAction::SubvolumeRolledBack { subvol } => {
                     writeln!(out, "    subvol-rollback: {subvol}")?;
                 }
-                crate::model::mount_repair::AppliedAction::DirectoryCreated { mount_point } => {
+                crate::shared::model::mount_repair::AppliedAction::DirectoryCreated { mount_point } => {
                     writeln!(out, "    mkdir: {mount_point}")?;
                 }
-                crate::model::mount_repair::AppliedAction::DirectorySkipped {
+                crate::shared::model::mount_repair::AppliedAction::DirectorySkipped {
                     mount_point,
                     reason,
                 } => {
                     writeln!(out, "    mkdir-skip: {mount_point} ({reason})")?;
                 }
-                crate::model::mount_repair::AppliedAction::DirectoryRolledBack { mount_point } => {
+                crate::shared::model::mount_repair::AppliedAction::DirectoryRolledBack { mount_point } => {
                     writeln!(out, "    mkdir-rollback: {mount_point}")?;
                 }
-                crate::model::mount_repair::AppliedAction::RollbackResidual {
+                crate::shared::model::mount_repair::AppliedAction::RollbackResidual {
                     resource,
                     reason,
                 } => {
@@ -207,19 +207,19 @@ pub fn render_mount_repair_human<W: Write>(
     Ok(())
 }
 
-fn edit_reason(edit: &crate::model::mount_repair::PlannedFstabEdit) -> &str {
+fn edit_reason(edit: &crate::shared::model::mount_repair::PlannedFstabEdit) -> &str {
     match edit {
-        crate::model::mount_repair::PlannedFstabEdit::ReplaceSource { reason, .. }
-        | crate::model::mount_repair::PlannedFstabEdit::ReplaceEntry { reason, .. }
-        | crate::model::mount_repair::PlannedFstabEdit::AppendEntry { reason, .. }
-        | crate::model::mount_repair::PlannedFstabEdit::DropDuplicate { reason, .. } => reason,
+        crate::shared::model::mount_repair::PlannedFstabEdit::ReplaceSource { reason, .. }
+        | crate::shared::model::mount_repair::PlannedFstabEdit::ReplaceEntry { reason, .. }
+        | crate::shared::model::mount_repair::PlannedFstabEdit::AppendEntry { reason, .. }
+        | crate::shared::model::mount_repair::PlannedFstabEdit::DropDuplicate { reason, .. } => reason,
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::mount_repair::{
+    use crate::shared::model::mount_repair::{
         AppliedAction, FstabTransaction, MountProblem, MountRepairCleanup, MountRepairOutcome,
         MountRepairPlan, MountVerification, PlannedFstabEdit, PlannedSubvolume, TargetIdentity,
     };

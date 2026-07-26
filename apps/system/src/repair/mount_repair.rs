@@ -40,17 +40,17 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use crate::model::evidence::Evidence;
-use crate::model::fstab::FstabSource;
-use crate::model::inspection::Warning;
-use crate::model::mount_repair::{
+use crate::shared::model::evidence::Evidence;
+use crate::shared::model::fstab::FstabSource;
+use crate::shared::model::inspection::Warning;
+use crate::shared::model::mount_repair::{
     default_mount_options, AppliedAction, BootMountLayout, FstabDigest, FstabTransaction,
     MountProblem, MountRepairCleanup, MountRepairOutcome, MountRepairPlan, MountRepairReport,
     MountVerification, PlannedDirectory, PlannedFstabEdit, PlannedSubvolume, TargetIdentity,
 };
-use crate::model::recovery::{CleanupSummary, RecoveryError, RecoveryErrorKind};
-use crate::model::runtime::DetectionStatus;
-use crate::model::storage::{
+use crate::shared::model::recovery::{CleanupSummary, RecoveryError, RecoveryErrorKind};
+use crate::shared::model::runtime::DetectionStatus;
+use crate::shared::model::storage::{
     BlockDevice, DeviceClass, EspCandidate, PartitionRole, RootCandidateConfidence,
 };
 use crate::mount::namespace;
@@ -399,7 +399,7 @@ pub fn diagnose(inputs: &MountRepairInputs) -> Vec<MountProblem> {
 
     // Standard CatOS entries exist only on Btrfs installations.
     if inputs.target.root_fstype == "btrfs" {
-        for spec in crate::model::mount_repair::CATOS_STANDARD_SUBVOLS {
+        for spec in crate::shared::model::mount_repair::CATOS_STANDARD_SUBVOLS {
             if spec.mount_point == "/" {
                 continue;
             }
@@ -494,7 +494,7 @@ pub fn diagnose(inputs: &MountRepairInputs) -> Vec<MountProblem> {
         // mount point. We do NOT diagnose "missing /home" on a random
         // non-Catos target whose fstab never mentioned /home.
         let history = history_from_entries(&entries);
-        for spec in crate::model::mount_repair::CATOS_STANDARD_SUBVOLS {
+        for spec in crate::shared::model::mount_repair::CATOS_STANDARD_SUBVOLS {
             // `/` is the target root itself; if we are running diagnosis
             // on it, it exists. We never create `/` via mkdir, so do not
             // flag it as missing.
@@ -671,7 +671,7 @@ fn build_fstab_edits(
     // source, non-subvolume options, dump and pass fields.
     for (entry, line) in &entries_with_lines {
         let Some(expected) =
-            crate::model::mount_repair::standard_subvol_for_mount_point(&entry.target)
+            crate::shared::model::mount_repair::standard_subvol_for_mount_point(&entry.target)
         else {
             continue;
         };
@@ -695,7 +695,7 @@ fn build_fstab_edits(
     }
 
     // Missing standard entries: append.
-    for spec in crate::model::mount_repair::CATOS_STANDARD_SUBVOLS {
+    for spec in crate::shared::model::mount_repair::CATOS_STANDARD_SUBVOLS {
         if spec.mount_point == "/" {
             continue;
         }
@@ -853,7 +853,7 @@ fn build_subvol_plan(entries: &[FstabEntry], inputs: &MountRepairInputs) -> Vec<
 fn build_directory_plan(inputs: &MountRepairInputs) -> Vec<PlannedDirectory> {
     let mut out = Vec::new();
     if inputs.target.root_fstype == "btrfs" {
-        for spec in crate::model::mount_repair::CATOS_STANDARD_SUBVOLS {
+        for spec in crate::shared::model::mount_repair::CATOS_STANDARD_SUBVOLS {
             if spec.mount_point == "/" {
                 continue;
             }
@@ -1661,8 +1661,8 @@ pub fn run_mount_repair_via_cli(
     // system is inspected through `/`; an offline target is mounted read-only.
     // Both paths feed the same fstab/layout logic.
     let selected_probe_result = if running_root {
-        inspect_running_root().map_err(|message| crate::model::mount::MountError {
-            kind: crate::model::mount::MountErrorKind::MountFailed,
+        inspect_running_root().map_err(|message| crate::shared::model::mount::MountError {
+            kind: crate::shared::model::mount::MountErrorKind::MountFailed,
             message,
             device_or_path: Some("/".into()),
             errno: None,
@@ -1955,7 +1955,7 @@ fn inspect_running_root() -> Result<SelectedTargetProbe, String> {
     Ok(SelectedTargetProbe {
         fstab,
         inspection,
-        cleanup: crate::model::mount::CleanupReport {
+        cleanup: crate::shared::model::mount::CleanupReport {
             all_clean: true,
             ..Default::default()
         },
@@ -2053,7 +2053,7 @@ fn observe_target_inputs(
     let mut subvol_facts = SubvolFacts::default();
     let mut mount_point_observations = HashMap::new();
     if target.root_fstype == "btrfs" {
-        for spec in crate::model::mount_repair::CATOS_STANDARD_SUBVOLS {
+        for spec in crate::shared::model::mount_repair::CATOS_STANDARD_SUBVOLS {
             let exists_as_subvol = listed.iter().any(|item| item.path == spec.subvol);
             let top_path = top.join(spec.subvol.trim_start_matches('/'));
             let (exists_as_directory, exists_as_other) = match std::fs::symlink_metadata(&top_path)
@@ -3101,7 +3101,7 @@ fn cleanup_plain_verification_mounts(mounted: &mut Vec<(PathBuf, String)>) -> Op
 }
 
 fn cleanup_into_mount_repair(
-    cleanup: crate::model::recovery::CleanupSummary,
+    cleanup: crate::shared::model::recovery::CleanupSummary,
 ) -> MountRepairCleanup {
     MountRepairCleanup {
         unmounted: cleanup.unmounted,
@@ -3152,7 +3152,7 @@ mod tests {
     }
 
     fn all_standard_present() -> Vec<SubvolObservation> {
-        crate::model::mount_repair::CATOS_STANDARD_SUBVOLS
+        crate::shared::model::mount_repair::CATOS_STANDARD_SUBVOLS
             .iter()
             .map(|s| observation_present(s.subvol))
             .collect()
@@ -3169,7 +3169,7 @@ mod tests {
             major_minor: Some("8:2".into()),
             parent: "sda".into(),
             class: DeviceClass::Partition,
-            disk_kind: crate::model::storage::DiskKind::Gpt,
+            disk_kind: crate::shared::model::storage::DiskKind::Gpt,
             partition_role: PartitionRole::LinuxFilesystem,
             partition_number: Some(2),
             size_sectors: Some(1_000_000),
@@ -3183,7 +3183,7 @@ mod tests {
             mount_point: mount_point.map(PathBuf::from),
             mounts: mount_point
                 .map(|point| {
-                    vec![crate::model::storage::MountObservation {
+                    vec![crate::shared::model::storage::MountObservation {
                         mount_point: PathBuf::from(point),
                         root: PathBuf::from("/"),
                         fstype: "ext4".into(),

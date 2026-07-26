@@ -28,7 +28,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use catos_system::model::mount_repair::{
+use catos_system::shared::model::mount_repair::{
     AppliedAction, MountProblem, MountRepairOutcome, MountRepairReport, PlannedFstabEdit,
     TargetIdentity, CATOS_STANDARD_SUBVOLS,
 };
@@ -533,7 +533,7 @@ fn detect_drift_flags_fstab_change() {
         ..Default::default()
     };
     let plan = build_plan(&inputs);
-    let new_digest = catos_system::model::mount_repair::FstabDigest {
+    let new_digest = catos_system::shared::model::mount_repair::FstabDigest {
         sha256: "different".into(),
         byte_len: 1,
     };
@@ -801,9 +801,9 @@ fn topology_device(
     path: &str,
     fstype: &str,
     uuid: &str,
-    role: catos_system::model::storage::PartitionRole,
-) -> catos_system::model::storage::BlockDevice {
-    use catos_system::model::storage::{BlockDevice, DeviceClass, DiskKind};
+    role: catos_system::shared::model::storage::PartitionRole,
+) -> catos_system::shared::model::storage::BlockDevice {
+    use catos_system::shared::model::storage::{BlockDevice, DeviceClass, DiskKind};
     BlockDevice {
         name: name.into(),
         dev_path: Some(PathBuf::from(path)),
@@ -835,14 +835,14 @@ fn topology_device(
     }
 }
 
-fn topology_fstab(body: &str) -> Vec<catos_system::model::fstab::FstabEntry> {
+fn topology_fstab(body: &str) -> Vec<catos_system::shared::model::fstab::FstabEntry> {
     catos_system::parse::fstab::parse_all_with_diagnostics(body).0
 }
 
 #[test]
 fn detects_all_six_boot_and_esp_layouts() {
-    use catos_system::model::mount_repair::BootMountLayout;
-    use catos_system::model::storage::PartitionRole;
+    use catos_system::shared::model::mount_repair::BootMountLayout;
+    use catos_system::shared::model::storage::PartitionRole;
     use catos_system::repair::mount_repair::detect_boot_mount_layout;
 
     let root = topology_device(
@@ -915,7 +915,7 @@ fn detects_all_six_boot_and_esp_layouts() {
 
 #[test]
 fn separate_boot_entry_is_not_rewritten_as_the_esp() {
-    use catos_system::model::mount_repair::BootMountLayout;
+    use catos_system::shared::model::mount_repair::BootMountLayout;
 
     let fstab = "UUID=root-uuid / btrfs defaults,subvol=/@ 0 0\n\
                  UUID=boot-uuid /boot ext4 defaults 0 2\n\

@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use catos_system::model::recovery::{
+use catos_system::shared::model::recovery::{
     BootLayout, BtrfsFilesystemIdentity, BtrfsSubvolumeIdentity, CompletedStep, DiskFacts,
     FstabRootDefinition, RecoveryError, RecoveryErrorKind, RecoveryPlan, SubvolumeFacts,
     TransactionRecord, TransactionState, RECOVERY_PLAN_SCHEMA_VERSION, TX_RECORD_SCHEMA_VERSION,
@@ -159,7 +159,7 @@ fn resume_cannot_exit_success_with_a_failure_state() {
     let outcome = Phase3Outcome::Resume {
         record,
         final_state: TransactionState::FailedRecoverable,
-        cleanup: catos_system::model::recovery::CleanupSummary {
+        cleanup: catos_system::shared::model::recovery::CleanupSummary {
             unmounted: Vec::new(),
             residual: Vec::new(),
             all_clean: true,

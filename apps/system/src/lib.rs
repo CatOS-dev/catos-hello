@@ -18,7 +18,6 @@ pub mod chroot;
 pub mod cli;
 pub mod doctor;
 pub mod entry;
-pub mod model;
 pub mod mount;
 pub mod output;
 pub mod parse;

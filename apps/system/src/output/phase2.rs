@@ -5,8 +5,8 @@
 use std::io::Write;
 
 use crate::shared::error::Error;
-use crate::model::mount::{CleanupReport, MountPlan, MountSession};
-use crate::model::storage::StorageReport;
+use crate::shared::model::mount::{CleanupReport, MountPlan, MountSession};
+use crate::shared::model::storage::StorageReport;
 use crate::phase2::Phase2Outcome;
 
 /// Render a phase-2 outcome as JSON. Wraps every variant in a top-level
@@ -292,7 +292,7 @@ fn render_mount_session<W: Write>(out: &mut W, session: &MountSession) -> std::i
 
 fn render_target_inspection<W: Write>(
     out: &mut W,
-    inspection: &crate::model::inspection::TargetInspection,
+    inspection: &crate::shared::model::inspection::TargetInspection,
 ) -> std::io::Result<()> {
     writeln!(out, "Target inspection")?;
     writeln!(
@@ -330,7 +330,7 @@ fn render_cleanup_report<W: Write>(out: &mut W, cleanup: &CleanupReport) -> std:
 
 fn render_warnings<W: Write>(
     out: &mut W,
-    warnings: &[crate::model::inspection::Warning],
+    warnings: &[crate::shared::model::inspection::Warning],
 ) -> std::io::Result<()> {
     if warnings.is_empty() {
         return Ok(());
@@ -345,7 +345,7 @@ fn render_warnings<W: Write>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::storage::StorageReport;
+    use crate::shared::model::storage::StorageReport;
 
     #[test]
     fn human_phase2_output_has_no_ansi_escapes() {
@@ -368,8 +368,8 @@ mod tests {
 
     #[test]
     fn mount_failure_json_preserves_structured_fields() {
-        let error = Error::MountFailed(crate::model::mount::MountError {
-            kind: crate::model::mount::MountErrorKind::DeviceNotFound,
+        let error = Error::MountFailed(crate::shared::model::mount::MountError {
+            kind: crate::shared::model::mount::MountErrorKind::DeviceNotFound,
             message: "missing device".into(),
             device_or_path: Some("/dev/missing".into()),
             errno: Some(2),

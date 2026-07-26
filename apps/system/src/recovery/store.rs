@@ -29,7 +29,7 @@ use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
-use crate::model::recovery::{
+use crate::shared::model::recovery::{
     RecoveryError, RecoveryErrorKind, TransactionRecord, RECOVERY_PLAN_SCHEMA_VERSION,
     TX_RECORD_SCHEMA_VERSION,
 };
@@ -201,7 +201,7 @@ pub fn remove_record(path: &Path) -> Result<(), RecoveryError> {
 /// plan` before any transaction exists).
 pub fn persist_plan(
     path: &Path,
-    plan: &crate::model::recovery::RecoveryPlan,
+    plan: &crate::shared::model::recovery::RecoveryPlan,
 ) -> Result<(), RecoveryError> {
     validate_plan_shape(plan)?;
     let expected_suffix = PathBuf::from(".catos-recovery")
@@ -225,7 +225,7 @@ pub fn persist_plan(
     confined::atomic_write(path, &json, 0o600)
 }
 
-pub fn load_plan(path: &Path) -> Result<crate::model::recovery::RecoveryPlan, RecoveryError> {
+pub fn load_plan(path: &Path) -> Result<crate::shared::model::recovery::RecoveryPlan, RecoveryError> {
     let body = if confined::is_confined_recovery_path(path) {
         confined::read_file(path)?
     } else {
@@ -277,7 +277,7 @@ pub fn load_plan(path: &Path) -> Result<crate::model::recovery::RecoveryPlan, Re
             ),
         ));
     }
-    let plan: crate::model::recovery::RecoveryPlan =
+    let plan: crate::shared::model::recovery::RecoveryPlan =
         match serde_json::from_value(plan_value.clone()) {
             Ok(plan) => plan,
             Err(error) => {
@@ -298,7 +298,7 @@ pub fn load_plan(path: &Path) -> Result<crate::model::recovery::RecoveryPlan, Re
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::recovery::{
+    use crate::shared::model::recovery::{
         BootLayout, BtrfsFilesystemIdentity, BtrfsSubvolumeIdentity, CompletedStep, DiskFacts,
         FstabRootDefinition, RecoveryPlan, TransactionPaths, TransactionState,
     };

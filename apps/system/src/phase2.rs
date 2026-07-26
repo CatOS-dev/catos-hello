@@ -17,10 +17,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::cli::TargetSelection;
 use crate::shared::error::{exit_code, Error};
-use crate::model::fstab::{FstabEntry, FstabEntryKind, FstabSource};
-use crate::model::inspection::{TargetInspection, Warning};
-use crate::model::mount::{MountError, MountPlan, MountSession};
-use crate::model::storage::StorageReport;
+use crate::shared::model::fstab::{FstabEntry, FstabEntryKind, FstabSource};
+use crate::shared::model::inspection::{TargetInspection, Warning};
+use crate::shared::model::mount::{MountError, MountPlan, MountSession};
+use crate::shared::model::storage::StorageReport;
 use crate::mount::plan::{build_plan, PlanInputs};
 use crate::mount::probe::{inspect_selected_root, probe_unmounted_candidates};
 use crate::mount::session::{Session, SESSION_ROOT_PARENT};
@@ -43,13 +43,13 @@ pub enum Phase2Outcome {
     TargetMount {
         session: MountSession,
         inspection: Box<TargetInspection>,
-        cleanup: crate::model::mount::CleanupReport,
+        cleanup: crate::shared::model::mount::CleanupReport,
         warnings: Vec<Warning>,
     },
 }
 
 struct TargetInputs {
-    devices: Vec<crate::model::storage::BlockDevice>,
+    devices: Vec<crate::shared::model::storage::BlockDevice>,
     fstab: Vec<FstabEntry>,
     warnings: Vec<Warning>,
 }
@@ -223,7 +223,7 @@ fn prepare_target_inputs(
     let mut fstab = probe.fstab;
     replace_root_entry(&mut fstab, root_device, selection.root_subvolume.as_deref())?;
 
-    if probe.inspection.is_catos_target.status != crate::model::runtime::DetectionStatus::Detected {
+    if probe.inspection.is_catos_target.status != crate::shared::model::runtime::DetectionStatus::Detected {
         warnings.push(Warning::new(
             "SELECTED_ROOT_NOT_CONFIRMED_CATOS",
             format!(
@@ -234,7 +234,7 @@ fn prepare_target_inputs(
     }
     if !probe.cleanup.all_clean {
         return Err(Error::MountFailed(MountError {
-            kind: crate::model::mount::MountErrorKind::CleanupIncomplete,
+            kind: crate::shared::model::mount::MountErrorKind::CleanupIncomplete,
             message: "selected-root discovery probe did not clean up completely".into(),
             device_or_path: Some(root_path.display().to_string()),
             errno: None,
@@ -262,15 +262,15 @@ fn prepare_target_inputs(
 }
 
 fn find_selected_device<'a>(
-    devices: &'a [crate::model::storage::BlockDevice],
+    devices: &'a [crate::shared::model::storage::BlockDevice],
     path: &Path,
-) -> Result<&'a crate::model::storage::BlockDevice, Error> {
+) -> Result<&'a crate::shared::model::storage::BlockDevice, Error> {
     devices
         .iter()
         .find(|device| device.dev_path.as_deref() == Some(path))
         .ok_or_else(|| {
             Error::MountFailed(MountError {
-                kind: crate::model::mount::MountErrorKind::DeviceNotFound,
+                kind: crate::shared::model::mount::MountErrorKind::DeviceNotFound,
                 message: "explicitly selected block device was not discovered".into(),
                 device_or_path: Some(path.display().to_string()),
                 errno: None,
@@ -283,7 +283,7 @@ fn find_selected_device<'a>(
 
 fn replace_root_entry(
     fstab: &mut Vec<FstabEntry>,
-    device: &crate::model::storage::BlockDevice,
+    device: &crate::shared::model::storage::BlockDevice,
     subvolume: Option<&str>,
 ) -> Result<(), Error> {
     let source = device
@@ -295,7 +295,7 @@ fn replace_root_entry(
         })?;
     let fstype = device.filesystem.clone().ok_or_else(|| {
         Error::MountFailed(MountError {
-            kind: crate::model::mount::MountErrorKind::UnsupportedFilesystem,
+            kind: crate::shared::model::mount::MountErrorKind::UnsupportedFilesystem,
             message: "selected root filesystem type is unknown".into(),
             device_or_path: Some(source.to_string()),
             errno: None,
@@ -324,7 +324,7 @@ fn replace_root_entry(
 
 fn replace_esp_entry(
     fstab: &mut Vec<FstabEntry>,
-    device: &crate::model::storage::BlockDevice,
+    device: &crate::shared::model::storage::BlockDevice,
 ) -> Result<(), Error> {
     let source = device
         .dev_path
@@ -335,7 +335,7 @@ fn replace_esp_entry(
         })?;
     let fstype = device.filesystem.as_deref().ok_or_else(|| {
         Error::MountFailed(MountError {
-            kind: crate::model::mount::MountErrorKind::UnsupportedFilesystem,
+            kind: crate::shared::model::mount::MountErrorKind::UnsupportedFilesystem,
             message: "selected ESP filesystem type is unknown".into(),
             device_or_path: Some(source.to_string()),
             errno: None,
@@ -346,7 +346,7 @@ fn replace_esp_entry(
     })?;
     if !matches!(fstype, "vfat" | "fat" | "fat32" | "fat16" | "fat12") {
         return Err(Error::MountFailed(MountError {
-            kind: crate::model::mount::MountErrorKind::WrongFilesystemType,
+            kind: crate::shared::model::mount::MountErrorKind::WrongFilesystemType,
             message: "selected ESP is not a FAT filesystem".into(),
             device_or_path: Some(source.to_string()),
             errno: None,
@@ -514,15 +514,15 @@ mod tests {
         let outcome = Phase2Outcome::TargetMount {
             session: MountSession {
                 id: "test".into(),
-                state: crate::model::mount::MountSessionState::Active,
-                namespace: crate::model::mount::NamespaceState::PrivateNamespace,
+                state: crate::shared::model::mount::MountSessionState::Active,
+                namespace: crate::shared::model::mount::NamespaceState::PrivateNamespace,
                 session_root: PathBuf::from("/tmp/x"),
                 target_root: PathBuf::from("/tmp/x/target"),
                 mounts: vec![],
                 warnings: vec![],
             },
             inspection: Box::new(TargetInspection::default()),
-            cleanup: crate::model::mount::CleanupReport::default(),
+            cleanup: crate::shared::model::mount::CleanupReport::default(),
             warnings: vec![],
         };
         assert_eq!(exit_code_for(&outcome), exit_code::SUCCESS);
@@ -534,17 +534,17 @@ mod tests {
         let outcome = Phase2Outcome::TargetMount {
             session: MountSession {
                 id: "test".into(),
-                state: crate::model::mount::MountSessionState::CleanupIncomplete,
-                namespace: crate::model::mount::NamespaceState::PrivateNamespace,
+                state: crate::shared::model::mount::MountSessionState::CleanupIncomplete,
+                namespace: crate::shared::model::mount::NamespaceState::PrivateNamespace,
                 session_root: PathBuf::from("/tmp/x"),
                 target_root: PathBuf::from("/tmp/x/target"),
                 mounts: vec![],
                 warnings: vec![],
             },
             inspection: Box::new(TargetInspection::default()),
-            cleanup: crate::model::mount::CleanupReport {
-                residual: vec![crate::model::mount::ResidualMount {
-                    resource: crate::model::mount::MountedResource {
+            cleanup: crate::shared::model::mount::CleanupReport {
+                residual: vec![crate::shared::model::mount::ResidualMount {
+                    resource: crate::shared::model::mount::MountedResource {
                         order: 1,
                         source: "/dev/sda1".into(),
                         target: PathBuf::from("/tmp/x/target"),

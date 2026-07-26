@@ -5,7 +5,7 @@
 use std::os::unix::fs::{FileTypeExt, MetadataExt};
 use std::path::{Component, Path, PathBuf};
 
-use crate::model::recovery::{
+use crate::shared::model::recovery::{
     BtrfsFilesystemIdentity, BtrfsSubvolumeIdentity, RecoveryError, RecoveryErrorKind,
     RecoveryPlan, RECOVERY_PLAN_SCHEMA_VERSION,
 };
@@ -484,12 +484,12 @@ pub fn validate_plan_shape(plan: &RecoveryPlan) -> Result<(), RecoveryError> {
     ensure_supported_snapshot_layout(&plan.current_root.path, &plan.source_snapshot.path)?;
     let expected_backup = format!(
         "{}/{}/root-before",
-        crate::model::recovery::TransactionPaths::backups_dir(),
+        crate::shared::model::recovery::TransactionPaths::backups_dir(),
         plan.plan_id
     );
     let expected_staging = format!(
         "{}/{}/new-root",
-        crate::model::recovery::TransactionPaths::staging_dir(),
+        crate::shared::model::recovery::TransactionPaths::staging_dir(),
         plan.plan_id
     );
     if plan.backup_root_path != expected_backup || plan.staging_root_path != expected_staging {
@@ -710,7 +710,7 @@ pub fn target_is_running_root(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::recovery::{BootLayout, CatosIdentity, FstabRootDefinition};
+    use crate::shared::model::recovery::{BootLayout, CatosIdentity, FstabRootDefinition};
     use crate::recovery::plan::{build_confirmation_token, effective_plan_digest};
 
     const PLAN_ID: &str = "tx-00000000000000000000000000000001";
@@ -918,7 +918,7 @@ mod tests {
     #[test]
     fn validate_plan_shape_rejects_forged_boot_consistency() {
         let mut plan = sample_plan();
-        plan.boot_consistency.status = crate::model::recovery::BootConsistencyStatus::Consistent;
+        plan.boot_consistency.status = crate::shared::model::recovery::BootConsistencyStatus::Consistent;
         plan.boot_consistency.root_switch_covers_all_boot_resources = true;
         let err = validate_plan_shape(&plan).unwrap_err();
         assert_eq!(err.kind, RecoveryErrorKind::BootConsistencyInconsistent);

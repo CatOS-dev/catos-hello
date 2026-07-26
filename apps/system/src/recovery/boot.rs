@@ -20,8 +20,8 @@
 
 use std::path::Path;
 
-use crate::model::fstab::{FstabEntry, FstabSource};
-use crate::model::recovery::{
+use crate::shared::model::fstab::{FstabEntry, FstabSource};
+use crate::shared::model::recovery::{
     BootConsistencyReport, BootConsistencyStatus, BootLayout, RecoveryError, RecoveryErrorKind,
 };
 
@@ -281,7 +281,7 @@ fn has_initramfs_files(root: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::fstab::{FstabEntry, FstabEntryKind, FstabSource};
+    use crate::shared::model::fstab::{FstabEntry, FstabEntryKind, FstabSource};
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -378,7 +378,7 @@ mod tests {
         });
         assert_eq!(
             report.status,
-            crate::model::recovery::BootConsistencyStatus::Consistent
+            crate::shared::model::recovery::BootConsistencyStatus::Consistent
         );
         assert!(report.checked_read_only);
         assert!(report.root_switch_covers_all_boot_resources);
@@ -406,12 +406,12 @@ mod tests {
             let report = evaluate_readonly_consistency(&layout);
             assert_eq!(
                 report.status,
-                crate::model::recovery::BootConsistencyStatus::Unsupported
+                crate::shared::model::recovery::BootConsistencyStatus::Unsupported
             );
             let error = require_boot_consistency(&report).unwrap_err();
             assert_eq!(
                 error.kind,
-                crate::model::recovery::RecoveryErrorKind::UnsupportedExternalBootLayout
+                crate::shared::model::recovery::RecoveryErrorKind::UnsupportedExternalBootLayout
             );
         }
     }
@@ -421,12 +421,12 @@ mod tests {
         let report = evaluate_readonly_consistency(&BootLayout::default());
         assert_eq!(
             report.status,
-            crate::model::recovery::BootConsistencyStatus::Unknown
+            crate::shared::model::recovery::BootConsistencyStatus::Unknown
         );
         let error = require_boot_consistency(&report).unwrap_err();
         assert_eq!(
             error.kind,
-            crate::model::recovery::RecoveryErrorKind::BootConsistencyUnknown
+            crate::shared::model::recovery::RecoveryErrorKind::BootConsistencyUnknown
         );
     }
 }

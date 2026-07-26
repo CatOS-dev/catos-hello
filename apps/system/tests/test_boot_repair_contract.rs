@@ -23,10 +23,10 @@
 
 use std::process::Command;
 
-use catos_system::model::boot_repair::{
+use catos_system::shared::model::boot_repair::{
     Architecture, BootRepairOutcome, FirmwareClass, FirmwareMethod, PartitionTable, ProviderId,
 };
-use catos_system::model::mount_repair::TargetIdentity;
+use catos_system::shared::model::mount_repair::TargetIdentity;
 use catos_system::repair::boot_repair::cmdline::{build_kernel_cmdline, CmdlineInputs};
 use catos_system::repair::boot_repair::detect::{detect, DetectionInputs, DetectionVerdict};
 use catos_system::repair::boot_repair::mkinitcpio;
@@ -752,7 +752,7 @@ fn cmdline_conflicting_root_value_surfaces_conflict() {
         luks_root: None,
     });
     assert!(conflicts.iter().any(|c| matches!(c,
-        catos_system::model::boot_repair::CmdlineConflict::ConflictingValue { key, .. } if key == "root"
+        catos_system::shared::model::boot_repair::CmdlineConflict::ConflictingValue { key, .. } if key == "root"
     )));
 }
 

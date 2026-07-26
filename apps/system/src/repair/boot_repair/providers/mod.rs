@@ -7,15 +7,15 @@ pub mod grub;
 pub mod limine;
 pub mod systemd_boot;
 
-use crate::model::boot_repair::{FirmwareMethod, ProviderId};
-use crate::model::mount_repair::TargetIdentity;
+use crate::shared::model::boot_repair::{FirmwareMethod, ProviderId};
+use crate::shared::model::mount_repair::TargetIdentity;
 use crate::repair::boot_repair::mkinitcpio::{self, Kernel};
 use crate::repair::boot_repair::providers::base::{BootProvider, ProviderCtx};
 
 /// Inputs the orchestrator passes when constructing the provider.
 #[derive(Debug, Clone, Default)]
 pub struct ProviderInputs<'a> {
-    pub firmware: crate::model::boot_repair::FirmwareClass,
+    pub firmware: crate::shared::model::boot_repair::FirmwareClass,
     pub mkinitcpio_text: &'a str,
     pub mkinitcpio_inputs: mkinitcpio::MkinitcpioInputs<'a>,
     pub kernels: &'a [Kernel],
@@ -59,7 +59,7 @@ pub fn build_ctx<'a>(
     cmdline: String,
     esp_mount_point: Option<String>,
     bios_install_path: Option<String>,
-    architecture: crate::model::boot_repair::Architecture,
+    architecture: crate::shared::model::boot_repair::Architecture,
     branding_name: String,
     root_is_btrfs: bool,
 ) -> ProviderCtx<'a> {

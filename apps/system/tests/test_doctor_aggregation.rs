@@ -6,7 +6,7 @@
 #![allow(clippy::field_reassign_with_default)]
 
 use catos_system::doctor;
-use catos_system::model::doctor::{
+use catos_system::shared::model::doctor::{
     issue_code, recommendation_code, DoctorIssue, DoctorLimitation, DoctorOverallStatus,
     DoctorRecommendation, DoctorReport, DoctorSection, DoctorSectionId, DoctorSectionStatus,
     DoctorSeverity,

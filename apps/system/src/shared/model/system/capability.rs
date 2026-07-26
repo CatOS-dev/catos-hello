@@ -3,7 +3,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::model::evidence::Evidence;
+use crate::shared::model::evidence::Evidence;
 
 /// Three-state capability. `Unknown` means we could not gather enough
 /// evidence to decide; it must not collapse to `Unavailable` in JSON.

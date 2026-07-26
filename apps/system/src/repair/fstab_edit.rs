@@ -45,7 +45,7 @@
 //! * The editor does NOT invent new entries by itself. The plan
 //!   builder decides what to add; the editor only applies.
 
-use crate::model::mount_repair::PlannedFstabEdit;
+use crate::shared::model::mount_repair::PlannedFstabEdit;
 
 /// Error returned when an edit cannot be applied safely.
 #[derive(Debug, Clone, PartialEq, Eq)]

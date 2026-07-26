@@ -46,8 +46,8 @@
 
 use std::path::PathBuf;
 
-use catos_system::model::repair::{AttemptKind, FsRepairOutcome, RepairTool};
-use catos_system::model::storage::{BlockDevice, DeviceClass, DiskKind, PartitionRole};
+use catos_system::shared::model::repair::{AttemptKind, FsRepairOutcome, RepairTool};
+use catos_system::shared::model::storage::{BlockDevice, DeviceClass, DiskKind, PartitionRole};
 use catos_system::repair::runner::{RecordedRunner, ToolResult};
 use catos_system::repair::fs_flows::{
     btrfs_flow, e2fsck_flow, f2fs_flow, fat_flow, supports_filesystem, xfs_flow, FlowOutcome,
@@ -554,7 +554,7 @@ fn cleanup_residuals_flip_repaired_to_verification_failed_at_outcome_level() {
     // mount; we cannot exercise it without root. So we test the
     // invariant at the model level: a report with cleanup residuals
     // MUST NOT be Clean/Repaired.
-    use catos_system::model::repair::{
+    use catos_system::shared::model::repair::{
         AttemptKind, ExitInterpretation, FsRepairReport, RepairAttempt, RepairCleanup,
         VerificationMount,
     };

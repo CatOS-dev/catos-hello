@@ -34,9 +34,9 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::model::evidence::Evidence;
-use crate::model::mount::{CleanupReport, MountError, MountPlan};
-use crate::model::repair::VerificationMount;
+use crate::shared::model::evidence::Evidence;
+use crate::shared::model::mount::{CleanupReport, MountError, MountPlan};
+use crate::shared::model::repair::VerificationMount;
 use crate::mount::plan::build_probe_plan;
 use crate::mount::session::{Session, SESSION_ROOT_PARENT};
 use crate::parse::mountinfo;

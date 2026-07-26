@@ -1,8 +1,8 @@
 //! Boot-provider repair data model. Pure data + serde, no I/O.
 //!
 //! This is the structured result of `catos-repair boot`. It is NOT a
-//! [`crate::model::mount_repair::MountRepairReport`] and NOT a
-//! [`crate::model::recovery::RecoveryPlan`]; boot repair is the
+//! [`crate::shared::model::mount_repair::MountRepairReport`] and NOT a
+//! [`crate::shared::model::recovery::RecoveryPlan`]; boot repair is the
 //! re-application of an existing bootloader provider recipe, not a
 //! generic bootloader-transaction framework.
 //!
@@ -20,8 +20,8 @@
 //!   [`BootRepairOutcome::PartiallyRepaired`] or
 //!   [`BootRepairOutcome::ManualInterventionRequired`], never as
 //!   `Repaired`.
-//! * The model reuses [`crate::model::mount_repair::TargetIdentity`]
-//!   and [`crate::model::mount_repair::MountRepairCleanup`] so the
+//! * The model reuses [`crate::shared::model::mount_repair::TargetIdentity`]
+//!   and [`crate::shared::model::mount_repair::MountRepairCleanup`] so the
 //!   stage 1–3 device-lock, mount-session, and cleanup contracts
 //!   remain the single source for those concerns.
 
@@ -29,9 +29,9 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use crate::model::evidence::Evidence;
-use crate::model::inspection::Warning;
-use crate::model::mount_repair::{MountRepairCleanup, TargetIdentity};
+use crate::shared::model::evidence::Evidence;
+use crate::shared::model::inspection::Warning;
+use crate::shared::model::mount_repair::{MountRepairCleanup, TargetIdentity};
 
 // ---------------------------------------------------------------------------
 // Provider identity
@@ -197,7 +197,7 @@ pub struct PlatformFacts {
 /// Single source of truth for "what happened" during a boot repair.
 ///
 /// Where a variant has the same meaning as
-/// [`crate::model::mount_repair::MountRepairOutcome`], the snake_case
+/// [`crate::shared::model::mount_repair::MountRepairOutcome`], the snake_case
 /// code is identical so consumers can reuse rendering logic.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]

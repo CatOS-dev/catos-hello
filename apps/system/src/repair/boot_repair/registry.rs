@@ -16,7 +16,7 @@
 //! * Adding a provider is a backward-compatible change here; removing
 //!   one is not (the public [`ProviderId`] enum would shrink).
 
-use crate::model::boot_repair::{
+use crate::shared::model::boot_repair::{
     Architecture, FirmwareClass, FirmwareMethod, PartitionTable, ProviderId,
 };
 
@@ -165,7 +165,7 @@ pub const SECURE_BOOT: SecureBootProfile = SecureBootProfile {
 /// Default provider id when no target evidence is available. Matches
 /// the bootloadu `defaultProvider` field. **Only used by install
 /// time**; repair never falls back to this — it refuses with
-/// [`crate::model::boot_repair::BootRepairOutcome::AmbiguousProvider`]
+/// [`crate::shared::model::boot_repair::BootRepairOutcome::AmbiguousProvider`]
 /// instead.
 pub const DEFAULT_PROVIDER: ProviderId = ProviderId::Grub;
 
@@ -220,7 +220,7 @@ pub fn target_platform_supported(
 /// providers the registry marks as unsupported (EFI Stub), so the
 /// caller can refuse with [`BootRepairOutcome::Unsupported`].
 ///
-/// [`BootRepairOutcome`]: crate::model::boot_repair::BootRepairOutcome
+/// [`BootRepairOutcome`]: crate::shared::model::boot_repair::BootRepairOutcome
 pub fn secure_boot_supported(provider: ProviderId) -> bool {
     SECURE_BOOT.supported_providers.contains(&provider)
 }

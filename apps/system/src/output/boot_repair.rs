@@ -6,7 +6,7 @@
 use std::io::Write;
 
 use crate::shared::error::Error;
-use crate::model::boot_repair::BootRepairReport;
+use crate::shared::model::boot_repair::BootRepairReport;
 
 pub fn render_boot_repair_json(
     report: &BootRepairReport,
@@ -52,9 +52,9 @@ pub fn render_boot_repair_human<W: Write>(
             platform.firmware.as_registry_str(),
             platform.architecture.as_str(),
             match platform.partition_table {
-                crate::model::boot_repair::PartitionTable::Gpt => "gpt",
-                crate::model::boot_repair::PartitionTable::Msdos => "msdos",
-                crate::model::boot_repair::PartitionTable::Unknown => "unknown",
+                crate::shared::model::boot_repair::PartitionTable::Gpt => "gpt",
+                crate::shared::model::boot_repair::PartitionTable::Msdos => "msdos",
+                crate::shared::model::boot_repair::PartitionTable::Unknown => "unknown",
             }
         )?;
     }
@@ -78,7 +78,7 @@ pub fn render_boot_repair_human<W: Write>(
         writeln!(out, "Cmdline conflicts")?;
         for conflict in &report.cmdline_conflicts {
             match conflict {
-                crate::model::boot_repair::CmdlineConflict::ConflictingValue {
+                crate::shared::model::boot_repair::CmdlineConflict::ConflictingValue {
                     key,
                     existing,
                     proposed,
@@ -155,10 +155,10 @@ pub fn render_boot_repair_human<W: Write>(
 
 fn render_action_human<W: Write>(
     out: &mut W,
-    action: &crate::model::boot_repair::BootAction,
+    action: &crate::shared::model::boot_repair::BootAction,
 ) -> std::io::Result<()> {
     match action {
-        crate::model::boot_repair::BootAction::ConfigWritten {
+        crate::shared::model::boot_repair::BootAction::ConfigWritten {
             target_path,
             backup_path,
             bytes,
@@ -172,10 +172,10 @@ fn render_action_human<W: Write>(
                 writeln!(out, "  config written     : {target_path} ({bytes} bytes)")?;
             }
         }
-        crate::model::boot_repair::BootAction::ConfigUnchanged { target_path } => {
+        crate::shared::model::boot_repair::BootAction::ConfigUnchanged { target_path } => {
             writeln!(out, "  config unchanged   : {target_path}")?;
         }
-        crate::model::boot_repair::BootAction::TargetCommand { result } => {
+        crate::shared::model::boot_repair::BootAction::TargetCommand { result } => {
             writeln!(
                 out,
                 "  command            : {} {} (exit={})",
@@ -197,14 +197,14 @@ fn render_action_human<W: Write>(
                 )?;
             }
         }
-        crate::model::boot_repair::BootAction::TargetCommandSkipped { command, reason } => {
+        crate::shared::model::boot_repair::BootAction::TargetCommandSkipped { command, reason } => {
             writeln!(
                 out,
                 "  command skipped    : {} ({})",
                 command.binary, reason
             )?;
         }
-        crate::model::boot_repair::BootAction::SnapshotStep {
+        crate::shared::model::boot_repair::BootAction::SnapshotStep {
             description,
             result,
         } => {

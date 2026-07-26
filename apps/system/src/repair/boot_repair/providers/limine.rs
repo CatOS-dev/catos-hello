@@ -76,7 +76,7 @@ impl BootProvider for LimineProvider {
         }
         result
             .actions
-            .push(crate::model::boot_repair::BootAction::TargetCommand { result: cmd_result });
+            .push(crate::shared::model::boot_repair::BootAction::TargetCommand { result: cmd_result });
         result
     }
 }
@@ -101,8 +101,8 @@ pub fn build_limine_defaults(ctx: &ProviderCtx<'_>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::boot_repair::{Architecture, ProviderId};
-    use crate::model::mount_repair::TargetIdentity;
+    use crate::shared::model::boot_repair::{Architecture, ProviderId};
+    use crate::shared::model::mount_repair::TargetIdentity;
     use crate::repair::boot_repair::providers::base::ProviderCtx;
     use crate::repair::boot_repair::target_exec::RecordedTargetRunner;
     use std::path::PathBuf;

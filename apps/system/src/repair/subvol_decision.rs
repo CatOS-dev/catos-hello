@@ -39,7 +39,7 @@
 //! * It does not move, copy, or rsync data from a mount-point
 //!   directory into a freshly created subvolume.
 
-use crate::model::mount_repair::{
+use crate::shared::model::mount_repair::{
     standard_mount_point_for_subvol, standard_subvol_for_mount_point, MountProblem,
     PlannedSubvolume,
 };
@@ -200,7 +200,7 @@ pub fn decide_all(
     facts: &SubvolFacts,
     catos: CatosConfirmation,
 ) -> Vec<SubvolDecision> {
-    crate::model::mount_repair::CATOS_STANDARD_SUBVOLS
+    crate::shared::model::mount_repair::CATOS_STANDARD_SUBVOLS
         .iter()
         .map(|row| decide_one(row.subvol, history, facts, catos))
         .collect()

@@ -37,11 +37,11 @@
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
-use crate::model::evidence::Evidence;
-use crate::model::inspection::Warning;
-use crate::model::repair::{FsRepairOutcome, FsRepairReport, RepairCleanup, RepairTool};
-use crate::model::runtime::DetectionStatus;
-use crate::model::storage::{BlockDevice, DeviceClass, PartitionRole, RootCandidateConfidence};
+use crate::shared::model::evidence::Evidence;
+use crate::shared::model::inspection::Warning;
+use crate::shared::model::repair::{FsRepairOutcome, FsRepairReport, RepairCleanup, RepairTool};
+use crate::shared::model::runtime::DetectionStatus;
+use crate::shared::model::storage::{BlockDevice, DeviceClass, PartitionRole, RootCandidateConfidence};
 use crate::mount::probe::probe_unmounted_candidates;
 use crate::probe::discover_devices;
 use crate::probe::fs_probe::RealFilesystem;
@@ -206,7 +206,7 @@ pub fn run_fs_repair_with<R: CommandRunner + ?Sized>(
 
 fn auto_select_catos_root(
     devices: &[BlockDevice],
-    roots: &[crate::model::storage::RootCandidate],
+    roots: &[crate::shared::model::storage::RootCandidate],
 ) -> Result<PathBuf, Vec<String>> {
     let candidates: Vec<PathBuf> = roots
         .iter()
