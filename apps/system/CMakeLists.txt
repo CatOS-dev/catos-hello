@@ -144,6 +144,9 @@ if(BUILD_TESTS)
     option(CATOS_SYSTEM_BOOT_REPAIR_SMOKE
            "Enable real boot-repair QEMU test matrix (opt-in; needs qemu + kernel + busybox + provider tools + OVMF for UEFI scenarios)"
            OFF)
+    option(CATOS_SYSTEM_DOCTOR_SMOKE
+           "Enable real catos-doctor QEMU acceptance (opt-in; needs qemu + kernel + busybox + mkfs.btrfs). Verifies byte-for-byte no-write guarantee."
+           OFF)
     if(CATOS_SYSTEM_INITRAMFS_SMOKE)
         # Two test variants:
         #   * bare:         no initramfs markers; verifies binary starts
@@ -286,6 +289,26 @@ if(BUILD_TESTS)
             TIMEOUT 600
             SKIP_RETURN_CODE 77
             LABELS "rust;integration;qemu;boot-repair"
+        )
+    endif()
+    if(CATOS_SYSTEM_DOCTOR_SMOKE)
+        # Stage-5 Doctor acceptance. Real CatOS btrfs target images
+        # (healthy, fs-corrupt, mount-break, ambiguous, doctor-fail).
+        # Each scenario asserts exit code 0 per scheme B (except
+        # doctor-fail, which must be non-zero) AND verifies by
+        # sha256 byte-hash that the target image is unchanged before
+        # vs. after the catos-doctor run. Skips with exit 77 when
+        # qemu, busybox, or the kernel image is unavailable.
+        add_test(
+            NAME catos-system-doctor-qemu-smoke
+            COMMAND "${BASH_CMD}"
+                    "${CMAKE_CURRENT_SOURCE_DIR}/scripts/doctor-qemu-smoke.sh"
+                    --bin "${CATOS_SYSTEM_BIN}"
+        )
+        set_tests_properties(catos-system-doctor-qemu-smoke PROPERTIES
+            TIMEOUT 480
+            SKIP_RETURN_CODE 77
+            LABELS "rust;integration;qemu;doctor"
         )
     endif()
 endif()
