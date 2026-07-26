@@ -9,7 +9,7 @@ use crate::shared::model::capability::CapabilityStatus;
 use crate::shared::model::evidence::Evidence;
 use crate::shared::model::inspection::{OsRelease, Presence, TargetInspection, ToolPath};
 use crate::shared::model::runtime::Detection;
-use crate::probe::fs_probe::{FilesystemProbe, MetaData};
+use crate::shared::probe::fs_probe::{FilesystemProbe, MetaData};
 use crate::system_root::SystemRoot;
 
 pub fn inspect_target(

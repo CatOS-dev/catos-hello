@@ -327,7 +327,7 @@ pub fn decisions_to_problems(decisions: &[SubvolDecision]) -> Vec<MountProblem> 
 /// orchestrator does not duplicate the matching logic.
 pub fn history_from_entries<'a, I>(entries: I) -> FstabHistory
 where
-    I: IntoIterator<Item = &'a crate::parse::fstab::FstabEntry>,
+    I: IntoIterator<Item = &'a crate::shared::parse::fstab::FstabEntry>,
 {
     let mut history = FstabHistory::default();
     for entry in entries {
@@ -356,7 +356,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::parse::fstab::FstabEntry;
+    use crate::shared::parse::fstab::FstabEntry;
 
     fn obs(subvol: &str) -> SubvolObservation {
         SubvolObservation {
@@ -373,7 +373,7 @@ mod tests {
         // option. We use the real parser to make sure the shape is
         // correct.
         let line = format!("UUID=root  {target}  btrfs  defaults,subvol={subvol}  0 0");
-        crate::parse::fstab::parse_line(&line).unwrap().unwrap()
+        crate::shared::parse::fstab::parse_line(&line).unwrap().unwrap()
     }
 
     // ---- Spec § 十一 非特权测试 → 标准子卷决策 ----

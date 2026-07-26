@@ -26,12 +26,12 @@ use crate::shared::model::recovery::{
     RecoveryPlan, RecoveryStatusReport, TransactionPaths, TransactionRecord, TransactionState,
     TransactionSummary,
 };
-use crate::mount::namespace;
-use crate::mount::plan::build_probe_plan;
-use crate::mount::secure_dir::{create_session_dir, remove_session_dir, SESSION_ROOT_PARENT};
-use crate::mount::session::Session;
-use crate::mount::syscall::{self, mnt_flags, ms_flags};
-use crate::parse::fstab::{self, FstabEntry, FstabEntryKind, FstabSource};
+use crate::shared::mount::namespace;
+use crate::shared::mount::plan::build_probe_plan;
+use crate::shared::mount::secure_dir::{create_session_dir, remove_session_dir, SESSION_ROOT_PARENT};
+use crate::shared::mount::session::Session;
+use crate::shared::mount::syscall::{self, mnt_flags, ms_flags};
+use crate::shared::parse::fstab::{self, FstabEntry, FstabEntryKind, FstabSource};
 use crate::recovery::confined;
 use crate::recovery::engine::{Engine, EngineOptions};
 use crate::recovery::external as btrfs;
@@ -779,7 +779,7 @@ fn run_revert(
 /// A private mount namespace with the btrfs top-level mounted
 /// read-write at a session directory created under
 /// `/run/catos-system/sessions/`. The session directory is created
-/// with the shared [`crate::mount::secure_dir`] primitives so that
+/// with the shared [`crate::shared::mount::secure_dir`] primitives so that
 /// phase 2 and phase 3 apply identical security semantics.
 ///
 /// Lifecycle contract:

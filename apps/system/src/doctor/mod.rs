@@ -82,8 +82,8 @@ pub fn run_doctor_with<R: CommandRunner + ?Sized>(runner: &R) -> DoctorReport {
 
 fn capture_environment() -> DoctorEnvironment {
     use crate::shared::model::runtime::DetectionStatus;
-    let fs = crate::probe::fs_probe::RealFilesystem;
-    let runtime = crate::probe::detect_runtime(&fs);
+    let fs = crate::shared::probe::fs_probe::RealFilesystem;
+    let runtime = crate::shared::probe::detect_runtime(&fs);
     let primary_mode = runtime.primary_mode();
     let running_root_is_catos =
         matches!(runtime.is_snapshot_boot.status, DetectionStatus::Detected)
@@ -106,14 +106,14 @@ fn primary_mode_label(mode: crate::shared::model::runtime::PrimaryRuntimeMode) -
     .to_string()
 }
 
-fn is_running_root_catos(fs: &crate::probe::fs_probe::RealFilesystem) -> bool {
+fn is_running_root_catos(fs: &crate::shared::probe::fs_probe::RealFilesystem) -> bool {
     use crate::shared::model::runtime::DetectionStatus;
     let root = match crate::system_root::SystemRoot::from_user_input("/") {
         Ok(r) => r,
         Err(_) => return false,
     };
     let mut warnings = Vec::new();
-    let inspection = crate::probe::inspect_target(fs, &root, &mut warnings);
+    let inspection = crate::shared::probe::inspect_target(fs, &root, &mut warnings);
     inspection.is_catos_target.status == DetectionStatus::Detected
 }
 
@@ -1123,9 +1123,9 @@ fn enumerate_recovery_records(device: &str) -> Result<Vec<TransactionRecord>, St
 }
 
 fn mount_btrfs_top_level_ro(device: &str) -> Result<Option<PathBuf>, String> {
-    use crate::mount::namespace::establish_private_namespace;
-    use crate::mount::secure_dir::{create_session_dir, SESSION_ROOT_PARENT};
-    use crate::mount::syscall::{self, ms_flags};
+    use crate::shared::mount::namespace::establish_private_namespace;
+    use crate::shared::mount::secure_dir::{create_session_dir, SESSION_ROOT_PARENT};
+    use crate::shared::mount::syscall::{self, ms_flags};
 
     if establish_private_namespace().is_err() {
         return Ok(None);
@@ -1143,7 +1143,7 @@ fn mount_btrfs_top_level_ro(device: &str) -> Result<Option<PathBuf>, String> {
     );
     if let Err(e) = result {
         let _ = syscall::umount2(&mount_root, 0);
-        let _ = crate::mount::secure_dir::remove_session_dir(
+        let _ = crate::shared::mount::secure_dir::remove_session_dir(
             Path::new(SESSION_ROOT_PARENT),
             &session_dir,
         );
@@ -1157,7 +1157,7 @@ fn is_device_mounted_rw(device: &Path) -> bool {
         Ok(s) => s,
         Err(_) => return false,
     };
-    let mounts = crate::parse::mountinfo::parse_all(&body);
+    let mounts = crate::shared::parse::mountinfo::parse_all(&body);
     let dev_str = match device.to_str() {
         Some(s) => s,
         None => return false,

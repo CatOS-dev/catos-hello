@@ -66,8 +66,8 @@ pub fn build_report(
     target_root: &crate::system_root::SystemRoot,
 ) -> Result<crate::shared::model::inspection::InspectionReport, Error> {
     use crate::shared::model::inspection::Warning;
-    use crate::probe::fs_probe::RealFilesystem;
-    use crate::probe::{detect_capabilities, detect_runtime, inspect_target};
+    use crate::shared::probe::fs_probe::RealFilesystem;
+    use crate::shared::probe::{detect_capabilities, detect_runtime, inspect_target};
     use crate::SCHEMA_VERSION;
 
     let fs = RealFilesystem;
@@ -181,9 +181,9 @@ fn run_doctor() -> i32 {
     use std::io::Write;
 
     let report = crate::doctor::run_doctor();
-    let exit = crate::output::doctor_exit_code_for(&report);
+    let exit = crate::shared::output::doctor_exit_code_for(&report);
     let mut out = std::io::stdout();
-    if let Err(e) = crate::output::render_doctor_human(&report, &mut out) {
+    if let Err(e) = crate::shared::output::render_doctor_human(&report, &mut out) {
         eprintln!("catos-doctor: {e}");
         return e.exit_code();
     }
@@ -339,14 +339,14 @@ fn run_repair_fs(argv: &[String]) -> i32 {
     let exit = outcome_exit_code(report.final_outcome);
 
     let render_result = if json {
-        crate::output::render_repair_json(&report, "catos-repair", std::path::Path::new("/"))
+        crate::shared::output::render_repair_json(&report, "catos-repair", std::path::Path::new("/"))
             .and_then(|s| {
                 write_json_stdout(&s)
                     .map_err(|e| Error::SerializeFailed(format!("stdout write: {e}")))
             })
     } else {
         let mut out = std::io::stdout();
-        crate::output::render_repair_human(&report, &mut out)
+        crate::shared::output::render_repair_human(&report, &mut out)
             .and_then(|_| out.flush())
             .map_err(|e| Error::SerializeFailed(format!("stdout write: {e}")))
     };
@@ -506,14 +506,14 @@ fn run_repair_mount(argv: &[String]) -> i32 {
     let exit = mount_outcome_exit_code(report.final_outcome);
 
     let render_result = if json {
-        crate::output::render_mount_repair_json(&report, "catos-repair", std::path::Path::new("/"))
+        crate::shared::output::render_mount_repair_json(&report, "catos-repair", std::path::Path::new("/"))
             .and_then(|s| {
                 write_json_stdout(&s)
                     .map_err(|e| Error::SerializeFailed(format!("stdout write: {e}")))
             })
     } else {
         let mut out = std::io::stdout();
-        crate::output::render_mount_repair_human(&report, &mut out)
+        crate::shared::output::render_mount_repair_human(&report, &mut out)
             .and_then(|_| out.flush())
             .map_err(|e| Error::SerializeFailed(format!("stdout write: {e}")))
     };
@@ -655,14 +655,14 @@ fn run_repair_boot(argv: &[String]) -> i32 {
     let exit = boot_outcome_exit_code(report.final_outcome);
 
     let render_result = if json {
-        crate::output::render_boot_repair_json(&report, "catos-repair", std::path::Path::new("/"))
+        crate::shared::output::render_boot_repair_json(&report, "catos-repair", std::path::Path::new("/"))
             .and_then(|s| {
                 write_json_stdout(&s)
                     .map_err(|e| Error::SerializeFailed(format!("stdout write: {e}")))
             })
     } else {
         let mut out = std::io::stdout();
-        crate::output::render_boot_repair_human(&report, &mut out)
+        crate::shared::output::render_boot_repair_human(&report, &mut out)
             .and_then(|_| out.flush())
             .map_err(|e| Error::SerializeFailed(format!("stdout write: {e}")))
     };
@@ -818,13 +818,13 @@ fn run_phase1(invocation: Invocation, args: crate::cli::CliArgs) -> i32 {
     match build_report(invocation, &args.root) {
         Ok(report) => {
             let result = if args.json {
-                crate::output::render_json(&report, view).and_then(|s| {
+                crate::shared::output::render_json(&report, view).and_then(|s| {
                     write_json_stdout(&s)
                         .map_err(|e| Error::SerializeFailed(format!("stdout write: {e}")))
                 })
             } else {
                 let mut out = std::io::stdout();
-                crate::output::render_human(&report, view, &mut out)
+                crate::shared::output::render_human(&report, view, &mut out)
                     .and_then(|_| out.flush())
                     .map_err(|e| Error::SerializeFailed(format!("stdout write: {e}")))
             };
@@ -861,7 +861,7 @@ fn run_phase2(invocation: Invocation, args: crate::cli::CliArgs) -> i32 {
     match outcome_result {
         Ok(outcome) => {
             let result = if args.json {
-                crate::output::render_phase2_json(
+                crate::shared::output::render_phase2_json(
                     &outcome,
                     invocation.as_str(),
                     args.root.as_path(),
@@ -872,7 +872,7 @@ fn run_phase2(invocation: Invocation, args: crate::cli::CliArgs) -> i32 {
                 })
             } else {
                 let mut out = std::io::stdout();
-                crate::output::render_phase2_human(&outcome, &mut out)
+                crate::shared::output::render_phase2_human(&outcome, &mut out)
                     .and_then(|_| out.flush())
                     .map_err(|e| Error::SerializeFailed(format!("stdout write: {e}")))
             };
@@ -887,7 +887,7 @@ fn run_phase2(invocation: Invocation, args: crate::cli::CliArgs) -> i32 {
         Err(e) => {
             let exit = e.exit_code();
             if args.json {
-                match crate::output::render_phase2_error_json(
+                match crate::shared::output::render_phase2_error_json(
                     &e,
                     invocation.as_str(),
                     args.root.as_path(),
@@ -923,14 +923,14 @@ fn run_phase3(invocation: Invocation, args: crate::cli::CliArgs) -> i32 {
     };
     let outcome = crate::phase3::run_recovery(recovery_args);
     let result = if args.json {
-        crate::output::render_phase3_json(&outcome, invocation.as_str(), args.root.as_path())
+        crate::shared::output::render_phase3_json(&outcome, invocation.as_str(), args.root.as_path())
             .and_then(|s| {
                 write_json_stdout(&s)
                     .map_err(|e| Error::SerializeFailed(format!("stdout write: {e}")))
             })
     } else {
         let mut out = std::io::stdout();
-        crate::output::render_phase3_human(&outcome, &mut out)
+        crate::shared::output::render_phase3_human(&outcome, &mut out)
             .and_then(|_| out.flush())
             .map_err(|e| Error::SerializeFailed(format!("stdout write: {e}")))
     };

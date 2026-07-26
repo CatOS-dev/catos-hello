@@ -710,7 +710,7 @@ fn attach_cleanup_does_not_clear_last_error() {
 /// reuse; the helper MUST incorporate kernel randomness.
 #[test]
 fn secure_dir_fresh_session_name_includes_randomness() {
-    use catos_system::mount::secure_dir::fresh_session_name;
+    use catos_system::shared::mount::secure_dir::fresh_session_name;
     let a = fresh_session_name("recovery-rw").unwrap();
     let b = fresh_session_name("recovery-rw").unwrap();
     assert!(a.starts_with("recovery-rw-"));
@@ -727,7 +727,7 @@ fn secure_dir_fresh_session_name_includes_randomness() {
 /// could be tricked into removing `/etc` if a caller passed it.
 #[test]
 fn secure_dir_remove_session_dir_refuses_outside_parent() {
-    use catos_system::mount::secure_dir::remove_session_dir;
+    use catos_system::shared::mount::secure_dir::remove_session_dir;
     let parent = std::env::temp_dir().join(format!(
         "catos-remove-parent-{}",
         std::time::SystemTime::now()
@@ -757,7 +757,7 @@ fn secure_dir_remove_session_dir_refuses_outside_parent() {
 /// `/etc` during cleanup.
 #[test]
 fn secure_dir_remove_session_dir_refuses_symlink() {
-    use catos_system::mount::secure_dir::remove_session_dir;
+    use catos_system::shared::mount::secure_dir::remove_session_dir;
     use std::os::unix::fs::symlink;
     let parent = std::env::temp_dir().join(format!(
         "catos-remove-symlink-{}",

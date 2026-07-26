@@ -742,7 +742,7 @@ fn history_from_entries_classifies_correct_and_wrong_subvol() {
         "UUID=root  /data  btrfs  defaults,subvol=/@data  0 0",
     ]
     .into_iter()
-    .map(|l| catos_system::parse::fstab::parse_line(l).unwrap().unwrap())
+    .map(|l| catos_system::shared::parse::fstab::parse_line(l).unwrap().unwrap())
     .collect();
     let history = history_from_entries(&entries);
     assert!(history.has_correct_entry("/home"));
@@ -836,7 +836,7 @@ fn topology_device(
 }
 
 fn topology_fstab(body: &str) -> Vec<catos_system::shared::model::fstab::FstabEntry> {
-    catos_system::parse::fstab::parse_all_with_diagnostics(body).0
+    catos_system::shared::parse::fstab::parse_all_with_diagnostics(body).0
 }
 
 #[test]

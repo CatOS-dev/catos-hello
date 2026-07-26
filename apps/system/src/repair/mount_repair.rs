@@ -53,15 +53,15 @@ use crate::shared::model::runtime::DetectionStatus;
 use crate::shared::model::storage::{
     BlockDevice, DeviceClass, EspCandidate, PartitionRole, RootCandidateConfidence,
 };
-use crate::mount::namespace;
-use crate::mount::plan::{build_plan as build_mount_plan, PlanInputs};
-use crate::mount::probe::{inspect_selected_root, probe_unmounted_candidates, SelectedTargetProbe};
-use crate::mount::session::Session;
-use crate::mount::syscall::{self, ms_flags};
-use crate::parse::fstab::{parse_all_with_diagnostics, FstabEntry, FstabEntryKind};
-use crate::probe::candidate::device_matches_fstab_source;
-use crate::probe::discover_devices;
-use crate::probe::fs_probe::{FilesystemProbe, RealFilesystem};
+use crate::shared::mount::namespace;
+use crate::shared::mount::plan::{build_plan as build_mount_plan, PlanInputs};
+use crate::shared::mount::probe::{inspect_selected_root, probe_unmounted_candidates, SelectedTargetProbe};
+use crate::shared::mount::session::Session;
+use crate::shared::mount::syscall::{self, ms_flags};
+use crate::shared::parse::fstab::{parse_all_with_diagnostics, FstabEntry, FstabEntryKind};
+use crate::shared::probe::candidate::device_matches_fstab_source;
+use crate::shared::probe::discover_devices;
+use crate::shared::probe::fs_probe::{FilesystemProbe, RealFilesystem};
 use crate::recovery::confined;
 use crate::recovery::external as btrfs;
 use crate::recovery::lock::DeviceLock;
@@ -809,7 +809,7 @@ fn source_column_string(source: &FstabSource) -> String {
 fn parse_with_lines(fstab_text: &str) -> Vec<(FstabEntry, usize)> {
     let mut out = Vec::new();
     for (idx, line) in fstab_text.lines().enumerate() {
-        if let Ok(Some(entry)) = crate::parse::fstab::parse_line(line) {
+        if let Ok(Some(entry)) = crate::shared::parse::fstab::parse_line(line) {
             out.push((entry, idx + 1));
         }
     }
@@ -1228,7 +1228,7 @@ impl BootRepairTargetSession {
                 Err(error) => {
                     let detach = syscall::umount2(
                         &mount_point,
-                        crate::mount::syscall::mnt_flags::MNT_DETACH,
+                        crate::shared::mount::syscall::mnt_flags::MNT_DETACH,
                     );
                     cleanup.all_clean = false;
                     cleanup.residual.push(match detach {
@@ -1531,8 +1531,8 @@ impl PlainRwSession {
                 format!("cannot establish private mount namespace: {error}"),
             )
         })?;
-        let session_dir = crate::mount::secure_dir::create_session_dir(
-            Path::new(crate::mount::secure_dir::SESSION_ROOT_PARENT),
+        let session_dir = crate::shared::mount::secure_dir::create_session_dir(
+            Path::new(crate::shared::mount::secure_dir::SESSION_ROOT_PARENT),
             "mount-repair-rw",
         )?;
         let mount_root = session_dir.join("root");
@@ -1555,8 +1555,8 @@ impl PlainRwSession {
             ms_flags::MS_NOSUID | ms_flags::MS_NODEV,
             None,
         ) {
-            let _ = crate::mount::secure_dir::remove_session_dir(
-                Path::new(crate::mount::secure_dir::SESSION_ROOT_PARENT),
+            let _ = crate::shared::mount::secure_dir::remove_session_dir(
+                Path::new(crate::shared::mount::secure_dir::SESSION_ROOT_PARENT),
                 &session_dir,
             );
             return Err(RecoveryError::new(
@@ -1588,7 +1588,7 @@ impl PlainRwSession {
                 Err(error) => {
                     let _ = syscall::umount2(
                         &self.mount_root,
-                        crate::mount::syscall::mnt_flags::MNT_DETACH,
+                        crate::shared::mount::syscall::mnt_flags::MNT_DETACH,
                     );
                     summary
                         .residual
@@ -1598,8 +1598,8 @@ impl PlainRwSession {
             }
         }
         if !self.mounted {
-            if let Err(error) = crate::mount::secure_dir::remove_session_dir(
-                Path::new(crate::mount::secure_dir::SESSION_ROOT_PARENT),
+            if let Err(error) = crate::shared::mount::secure_dir::remove_session_dir(
+                Path::new(crate::shared::mount::secure_dir::SESSION_ROOT_PARENT),
                 &self.session_dir,
             ) {
                 summary.residual.push(error.message.to_string());
@@ -1934,7 +1934,7 @@ fn inspect_running_root() -> Result<SelectedTargetProbe, String> {
         .map_err(|error| format!("cannot read running-system fstab: {error}"))?;
     let (fstab, diagnostics) = parse_all_with_diagnostics(&fstab_text);
     let mut warning_strings = Vec::new();
-    let inspection = crate::probe::inspect_target(&fs, &root, &mut warning_strings);
+    let inspection = crate::shared::probe::inspect_target(&fs, &root, &mut warning_strings);
     let mut warnings = diagnostics
         .into_iter()
         .map(|diagnostic| {
@@ -2595,8 +2595,8 @@ fn rollback_nested_esp_mountpoint(
             let source = boot_device
                 .to_str()
                 .ok_or_else(|| "separate /boot device path is not UTF-8".to_string())?;
-            let session_dir = crate::mount::secure_dir::create_session_dir(
-                Path::new(crate::mount::secure_dir::SESSION_ROOT_PARENT),
+            let session_dir = crate::shared::mount::secure_dir::create_session_dir(
+                Path::new(crate::shared::mount::secure_dir::SESSION_ROOT_PARENT),
                 "mount-repair-boot-rollback",
             )
             .map_err(|error| error.message.to_string())?;
@@ -2615,8 +2615,8 @@ fn rollback_nested_esp_mountpoint(
                 .map_err(|error| error.message.to_string());
             let unmount_result = syscall::umount2(&mount_point, 0)
                 .map_err(|error| format!("cannot unmount rollback /boot: {error}"));
-            let session_remove = crate::mount::secure_dir::remove_session_dir(
-                Path::new(crate::mount::secure_dir::SESSION_ROOT_PARENT),
+            let session_remove = crate::shared::mount::secure_dir::remove_session_dir(
+                Path::new(crate::shared::mount::secure_dir::SESSION_ROOT_PARENT),
                 &session_dir,
             )
             .map_err(|error| error.message.to_string());
@@ -2644,7 +2644,7 @@ fn mountpoint_matches_device(mount_point: &Path, device: &BlockDevice) -> bool {
     std::fs::read_to_string("/proc/self/mountinfo")
         .ok()
         .and_then(|body| {
-            crate::parse::mountinfo::parse_all(&body)
+            crate::shared::parse::mountinfo::parse_all(&body)
                 .into_iter()
                 .find(|mount| mount.mount_point == mount_point)
         })
@@ -2703,8 +2703,8 @@ fn ensure_nested_esp_mountpoint(
                 }
                 return Ok((!existed).then(|| "/boot/efi".to_string()));
             }
-            let session_dir = crate::mount::secure_dir::create_session_dir(
-                Path::new(crate::mount::secure_dir::SESSION_ROOT_PARENT),
+            let session_dir = crate::shared::mount::secure_dir::create_session_dir(
+                Path::new(crate::shared::mount::secure_dir::SESSION_ROOT_PARENT),
                 "mount-repair-boot-parent",
             )
             .map_err(|error| error.message.to_string())?;
@@ -2718,8 +2718,8 @@ fn ensure_nested_esp_mountpoint(
                 ms_flags::MS_NOSUID | ms_flags::MS_NODEV,
                 None,
             ) {
-                let _ = crate::mount::secure_dir::remove_session_dir(
-                    Path::new(crate::mount::secure_dir::SESSION_ROOT_PARENT),
+                let _ = crate::shared::mount::secure_dir::remove_session_dir(
+                    Path::new(crate::shared::mount::secure_dir::SESSION_ROOT_PARENT),
                     &session_dir,
                 );
                 return Err(format!("cannot mount separate /boot read-write: {error}"));
@@ -2745,8 +2745,8 @@ fn ensure_nested_esp_mountpoint(
             };
             let unmount_result = syscall::umount2(&mount_point, 0)
                 .map_err(|error| format!("cannot unmount temporary separate /boot: {error}"));
-            let remove_result = crate::mount::secure_dir::remove_session_dir(
-                Path::new(crate::mount::secure_dir::SESSION_ROOT_PARENT),
+            let remove_result = crate::shared::mount::secure_dir::remove_session_dir(
+                Path::new(crate::shared::mount::secure_dir::SESSION_ROOT_PARENT),
                 &session_dir,
             )
             .map_err(|error| error.message.to_string());
@@ -2806,7 +2806,7 @@ fn verify_fresh_written_target(
             failure_message: Some("rewritten fstab did not parse cleanly".into()),
         };
     }
-    let session_name = match crate::mount::secure_dir::fresh_session_name("mount-repair-verify") {
+    let session_name = match crate::shared::mount::secure_dir::fresh_session_name("mount-repair-verify") {
         Ok(name) => name,
         Err(error) => {
             return MountVerification {
@@ -2817,7 +2817,7 @@ fn verify_fresh_written_target(
             };
         }
     };
-    let session_root = Path::new(crate::mount::session::SESSION_ROOT_PARENT).join(&session_name);
+    let session_root = Path::new(crate::shared::mount::session::SESSION_ROOT_PARENT).join(&session_name);
     let plan = match build_mount_plan(PlanInputs {
         session_root,
         devices,
@@ -2933,7 +2933,7 @@ fn verify_plain_written_target(
     let observed_root_fstype = std::fs::read_to_string("/proc/self/mountinfo")
         .ok()
         .and_then(|body| {
-            crate::parse::mountinfo::parse_all(&body)
+            crate::shared::parse::mountinfo::parse_all(&body)
                 .into_iter()
                 .find(|mount| mount.mount_point == existing_root)
                 .map(|mount| mount.fstype)
@@ -2988,7 +2988,7 @@ fn verify_plain_written_target(
         let pre_existing = std::fs::read_to_string("/proc/self/mountinfo")
             .ok()
             .and_then(|body| {
-                crate::parse::mountinfo::parse_all(&body)
+                crate::shared::parse::mountinfo::parse_all(&body)
                     .into_iter()
                     .find(|mount| mount.mount_point == actual_target)
             });
@@ -3086,7 +3086,7 @@ fn cleanup_plain_verification_mounts(mounted: &mut Vec<(PathBuf, String)>) -> Op
     let mut residual = Vec::new();
     while let Some((target, logical)) = mounted.pop() {
         if let Err(error) = syscall::umount2(&target, 0) {
-            let detach = syscall::umount2(&target, crate::mount::syscall::mnt_flags::MNT_DETACH);
+            let detach = syscall::umount2(&target, crate::shared::mount::syscall::mnt_flags::MNT_DETACH);
             residual.push(match detach {
                 Ok(()) => format!(
                     "verification mount {logical} required lazy detach after {error}"

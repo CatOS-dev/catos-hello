@@ -24,7 +24,7 @@
 //! isolated from the host.
 
 use crate::shared::model::mount::NamespaceState;
-use crate::mount::syscall::{self, clone_flags, ms_flags, SyscallError};
+use crate::shared::mount::syscall::{self, clone_flags, ms_flags, SyscallError};
 
 /// Outcome of [`establish_private_namespace`]. The caller (session) keeps
 /// this for diagnostics; the actual mount tree mutation has already
@@ -108,7 +108,7 @@ pub fn establish_private_namespace() -> Result<NamespaceSetup, SyscallError> {
 ///     fails closed and refuses all target mounts.
 fn verify_root_is_private() -> Result<bool, String> {
     let body = std::fs::read_to_string("/proc/self/mountinfo").map_err(|e| e.to_string())?;
-    let mounts = crate::parse::mountinfo::parse_all(&body);
+    let mounts = crate::shared::parse::mountinfo::parse_all(&body);
     let root_mount = mounts
         .iter()
         .find(|m| m.mount_point == std::path::Path::new("/"))
@@ -163,7 +163,7 @@ mod tests {
     #[test]
     fn detect_shared_token_in_optional_fields() {
         let body = "1 0 0:1 / / rw,nosuid,nodev shared:2 - sysfs sysfs rw\n";
-        let parsed = crate::parse::mountinfo::parse_all(body);
+        let parsed = crate::shared::parse::mountinfo::parse_all(body);
         let root = parsed.first().unwrap();
         assert!(root
             .optional_fields
@@ -176,7 +176,7 @@ mod tests {
     #[test]
     fn detect_private_root_in_optional_fields() {
         let body = "1 0 0:1 / / rw,nosuid,nodev - sysfs sysfs rw\n";
-        let parsed = crate::parse::mountinfo::parse_all(body);
+        let parsed = crate::shared::parse::mountinfo::parse_all(body);
         let root = parsed.first().unwrap();
         assert!(!root
             .optional_fields
@@ -189,7 +189,7 @@ mod tests {
     #[test]
     fn verify_root_handles_missing_root_mount() {
         let body = "1 0 0:1 / /proc rw - proc proc rw\n";
-        let mounts = crate::parse::mountinfo::parse_all(body);
+        let mounts = crate::shared::parse::mountinfo::parse_all(body);
         let root_mount = mounts
             .iter()
             .find(|m| m.mount_point == std::path::Path::new("/"));

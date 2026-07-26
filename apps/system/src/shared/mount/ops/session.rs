@@ -45,16 +45,16 @@ use crate::shared::model::mount::{
     CleanupReport, MountError, MountErrorKind, MountPlan, MountSession, MountSessionState,
     MountedResource, NamespaceState, ResidualMount,
 };
-use crate::mount::namespace::{self, NamespaceSetup};
-use crate::mount::syscall::{self, mnt_flags, ms_flags, SyscallError};
-use crate::parse::mountinfo;
+use crate::shared::mount::namespace::{self, NamespaceSetup};
+use crate::shared::mount::syscall::{self, mnt_flags, ms_flags, SyscallError};
+use crate::shared::parse::mountinfo;
 
 /// Default session-root parent. Per-session subdirs are `<id>` under here.
 ///
-/// Re-exported from [`crate::mount::secure_dir`] so phase 2 and phase 3
+/// Re-exported from [`crate::shared::mount::secure_dir`] so phase 2 and phase 3
 /// share the same trusted root path. The constant value is part of the
 /// public contract.
-pub use crate::mount::secure_dir::SESSION_ROOT_PARENT;
+pub use crate::shared::mount::secure_dir::SESSION_ROOT_PARENT;
 
 /// A live mount session. Owns the namespace setup result and the list of
 /// mounts it has created so far. The JSON-shaped [`MountSession`] is

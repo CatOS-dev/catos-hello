@@ -17,13 +17,13 @@ use crate::shared::model::storage::{
     BlockDevice, BtrfsSubvolume, BtrfsSubvolumeKind, EspCandidate, RootCandidate,
     RootCandidateConfidence,
 };
-use crate::mount::plan::build_probe_plan;
-use crate::mount::session::{Session, SESSION_ROOT_PARENT};
-use crate::parse::fstab::parse_all_with_diagnostics;
-use crate::probe::candidate::identify_candidates;
-use crate::probe::capability::ProcCaps;
-use crate::probe::fs_probe::{FilesystemProbe, RealFilesystem};
-use crate::probe::inspect_target;
+use crate::shared::mount::plan::build_probe_plan;
+use crate::shared::mount::session::{Session, SESSION_ROOT_PARENT};
+use crate::shared::parse::fstab::parse_all_with_diagnostics;
+use crate::shared::probe::candidate::identify_candidates;
+use crate::shared::probe::capability::ProcCaps;
+use crate::shared::probe::fs_probe::{FilesystemProbe, RealFilesystem};
+use crate::shared::probe::inspect_target;
 use crate::shared::process::run_trusted_tool;
 use crate::system_root::SystemRoot;
 
@@ -117,7 +117,7 @@ pub fn inspect_selected_root(
     let fs = RealFilesystem;
     let fstab_result = fs.rooted_read_to_string(target.canonical_path(), Path::new("etc/fstab"));
     let (fstab, diagnostics) = match fstab_result {
-        Ok(body) => crate::parse::fstab::parse_all_with_diagnostics(&body),
+        Ok(body) => crate::shared::parse::fstab::parse_all_with_diagnostics(&body),
         Err(crate::shared::error::FsError::NotFound) => (Vec::new(), Vec::new()),
         Err(error) => {
             let cleanup = session.cleanup();

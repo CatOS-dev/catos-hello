@@ -21,13 +21,13 @@ use crate::shared::model::fstab::{FstabEntry, FstabEntryKind, FstabSource};
 use crate::shared::model::inspection::{TargetInspection, Warning};
 use crate::shared::model::mount::{MountError, MountPlan, MountSession};
 use crate::shared::model::storage::StorageReport;
-use crate::mount::plan::{build_plan, PlanInputs};
-use crate::mount::probe::{inspect_selected_root, probe_unmounted_candidates};
-use crate::mount::session::{Session, SESSION_ROOT_PARENT};
-use crate::parse::fstab::parse_all_with_diagnostics;
-use crate::probe::candidate::candidate_ambiguities;
-use crate::probe::fs_probe::{FilesystemProbe, RealFilesystem};
-use crate::probe::{discover_devices, identify_candidates};
+use crate::shared::mount::plan::{build_plan, PlanInputs};
+use crate::shared::mount::probe::{inspect_selected_root, probe_unmounted_candidates};
+use crate::shared::mount::session::{Session, SESSION_ROOT_PARENT};
+use crate::shared::parse::fstab::parse_all_with_diagnostics;
+use crate::shared::probe::candidate::candidate_ambiguities;
+use crate::shared::probe::fs_probe::{FilesystemProbe, RealFilesystem};
+use crate::shared::probe::{discover_devices, identify_candidates};
 use crate::system_root::SystemRoot;
 
 static SESSION_SEQUENCE: AtomicU64 = AtomicU64::new(1);
@@ -167,7 +167,7 @@ pub fn run_target_mount(
                     }
                 })?)?;
             let mut inspection_warnings = Vec::new();
-            let inspection = crate::probe::inspect_target(
+            let inspection = crate::shared::probe::inspect_target(
                 &RealFilesystem,
                 &target_root,
                 &mut inspection_warnings,

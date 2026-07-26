@@ -7,8 +7,8 @@ use std::path::Path;
 
 use crate::shared::model::capability::{Capability, CapabilityKind, CapabilityStatus};
 use crate::shared::model::evidence::Evidence;
-use crate::probe::fs_probe::FilesystemProbe;
-use crate::probe::target::{
+use crate::shared::probe::fs_probe::FilesystemProbe;
+use crate::shared::probe::target::{
     host_efivars_path, host_tool_exists, probe_target_tool, target_read_to_string,
 };
 use crate::system_root::SystemRoot;
@@ -586,7 +586,7 @@ mod tests {
 
     use super::*;
     use crate::shared::model::capability::CapabilityStatus;
-    use crate::probe::fs_probe::{FixtureFilesystem, MetaData};
+    use crate::shared::probe::fs_probe::{FixtureFilesystem, MetaData};
     use crate::system_root::SystemRoot;
 
     fn root() -> SystemRoot {

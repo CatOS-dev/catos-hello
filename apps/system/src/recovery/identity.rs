@@ -9,7 +9,7 @@ use crate::shared::model::recovery::{
     BtrfsFilesystemIdentity, BtrfsSubvolumeIdentity, RecoveryError, RecoveryErrorKind,
     RecoveryPlan, RECOVERY_PLAN_SCHEMA_VERSION,
 };
-use crate::parse::mountinfo;
+use crate::shared::parse::mountinfo;
 use crate::recovery::external as btrfs;
 
 pub const RECOVERY_ID_HEX_LEN: usize = 32;

@@ -1,6 +1,6 @@
 //! Structure-preserving `/etc/fstab` editor.
 //!
-//! The phase-2 fstab parser ([`crate::parse::fstab`]) correctly drops
+//! The phase-2 fstab parser ([`crate::shared::parse::fstab`]) correctly drops
 //! comments and blank lines because phase-2 only needs to *understand*
 //! a fstab. The mount-repair flow needs to *edit* one without
 //! destroying the user's comments, blank-line groupings, or unknown

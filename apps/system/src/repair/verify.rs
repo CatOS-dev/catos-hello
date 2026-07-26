@@ -37,9 +37,9 @@ use std::path::{Path, PathBuf};
 use crate::shared::model::evidence::Evidence;
 use crate::shared::model::mount::{CleanupReport, MountError, MountPlan};
 use crate::shared::model::repair::VerificationMount;
-use crate::mount::plan::build_probe_plan;
-use crate::mount::session::{Session, SESSION_ROOT_PARENT};
-use crate::parse::mountinfo;
+use crate::shared::mount::plan::build_probe_plan;
+use crate::shared::mount::session::{Session, SESSION_ROOT_PARENT};
+use crate::shared::parse::mountinfo;
 
 /// Outcome of the verification mount. Distinct from
 /// [`VerificationMount`] (the model) because the orchestrator needs

@@ -13,7 +13,7 @@
 //!
 //! The real target-root confinement uses Linux `openat2(2)` with
 //! `RESOLVE_IN_ROOT` and `RESOLVE_NO_MAGICLINKS` (see
-//! [`crate::probe::fs_probe`]). That primitive is only available
+//! [`crate::shared::probe::fs_probe`]). That primitive is only available
 //! when we actually have a target root to open; in this module we
 //! provide the pure-function *policy* layer that:
 //!

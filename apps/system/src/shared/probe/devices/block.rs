@@ -8,8 +8,8 @@ use std::time::Duration;
 use crate::shared::model::evidence::Evidence;
 use crate::shared::model::inspection::Warning;
 use crate::shared::model::storage::{BlockDevice, DeviceClass, DiskKind, MountObservation, PartitionRole};
-use crate::parse::{blkid, mountinfo};
-use crate::probe::fs_probe::FilesystemProbe;
+use crate::shared::parse::{blkid, mountinfo};
+use crate::shared::probe::fs_probe::FilesystemProbe;
 use crate::shared::process::run_trusted_tool;
 
 const BLOCK_ROOT: &str = "/sys/class/block";
@@ -468,7 +468,7 @@ fn read_relation_names(fs: &dyn FilesystemProbe, path: &Path) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::probe::fs_probe::FixtureFilesystem;
+    use crate::shared::probe::fs_probe::FixtureFilesystem;
 
     fn block(fs: FixtureFilesystem, name: &str, uevent: &str) -> FixtureFilesystem {
         fs.dir(BLOCK_ROOT)

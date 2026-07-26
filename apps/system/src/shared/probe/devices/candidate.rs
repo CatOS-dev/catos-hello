@@ -10,8 +10,8 @@ use crate::shared::model::storage::{
     Ambiguity, AmbiguityKind, BlockDevice, DemotionReason, EspCandidate, EspSignals,
     OsLayoutSignals, PartitionRole, Presence2, RootCandidate, RootCandidateConfidence,
 };
-use crate::probe::fs_probe::{FilesystemProbe, RealFilesystem};
-use crate::probe::inspect_target;
+use crate::shared::probe::fs_probe::{FilesystemProbe, RealFilesystem};
+use crate::shared::probe::inspect_target;
 use crate::system_root::SystemRoot;
 
 const ESP_MIN_BYTES: u64 = 32 * 1024 * 1024;
