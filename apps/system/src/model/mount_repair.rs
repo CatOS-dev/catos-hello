@@ -492,13 +492,23 @@ pub struct MountVerification {
 
 /// Cleanup summary. Mirrors the repair-fs shape so consumers can
 /// reuse rendering logic.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MountRepairCleanup {
     #[serde(default)]
     pub unmounted: Vec<String>,
     #[serde(default)]
     pub residual: Vec<String>,
     pub all_clean: bool,
+}
+
+impl Default for MountRepairCleanup {
+    fn default() -> Self {
+        Self {
+            unmounted: Vec::new(),
+            residual: Vec::new(),
+            all_clean: true,
+        }
+    }
 }
 
 /// Final result of `catos-repair mount`. This struct is the contract:
@@ -656,6 +666,7 @@ mod tests {
         );
         assert!(r.requires_human_action);
         assert!(!r.fully_complete);
+        assert!(r.cleanup.all_clean);
     }
 
     #[test]

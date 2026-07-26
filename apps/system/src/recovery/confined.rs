@@ -26,6 +26,7 @@ const MAX_RECOVERY_FILE_BYTES: u64 = 16 * 1024 * 1024;
 const BTRFS_SUBVOL_RDONLY: u64 = 1 << 1;
 const BTRFS_SUBVOL_NAME_MAX: usize = 4039;
 const BTRFS_IOC_SNAP_CREATE_V2: u64 = 0x5000_9417;
+const BTRFS_IOC_SUBVOL_CREATE_V2: u64 = 0x5000_9418;
 const RENAME_EXCHANGE: libc::c_uint = 1 << 1;
 
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -245,6 +246,76 @@ pub fn atomic_write(path: &Path, bytes: &[u8], mode: u32) -> Result<(), Recovery
     fsync_fd(parent.as_raw_fd(), path, "fsync recovery parent directory")
 }
 
+/// Atomically replace a regular file below a mounted filesystem top level.
+///
+/// This is deliberately separate from [`atomic_write`]: recovery records are
+/// confined to `.catos-recovery`, while mount repair needs to update the
+/// target system's own files. The rooted path is still resolved entirely by
+/// pinned dirfds, with no symlink followed in any component.
+pub fn atomic_write_rooted(
+    top_level: &Path,
+    rooted_path: &str,
+    bytes: &[u8],
+    mode: u32,
+) -> Result<(), RecoveryError> {
+    let entry = open_rooted_parent(top_level, rooted_path, false)?;
+    reject_existing_non_regular_or_symlink(entry.parent.as_raw_fd(), &entry.name, &entry.display)?;
+
+    let (temp_name, temp_fd) = create_temp_file(
+        entry.parent.as_raw_fd(),
+        &entry.name,
+        &entry.display,
+        mode,
+    )?;
+    let mut temp = File::from(temp_fd);
+    let write_result = (|| {
+        temp.write_all(bytes)
+            .map_err(|error| io_error(&entry.display, "write rooted temp file", error))?;
+        temp.flush()
+            .map_err(|error| io_error(&entry.display, "flush rooted temp file", error))?;
+        temp.sync_all()
+            .map_err(|error| io_error(&entry.display, "fsync rooted temp file", error))?;
+        Ok::<(), RecoveryError>(())
+    })();
+    drop(temp);
+    if let Err(error) = write_result {
+        let _ = unlinkat_name(entry.parent.as_raw_fd(), &temp_name);
+        return Err(error);
+    }
+
+    let temp_c = cstring(&temp_name, &entry.display)?;
+    let final_c = cstring(&entry.name, &entry.display)?;
+    let rc = unsafe {
+        libc::renameat(
+            entry.parent.as_raw_fd(),
+            temp_c.as_ptr(),
+            entry.parent.as_raw_fd(),
+            final_c.as_ptr(),
+        )
+    };
+    if rc != 0 {
+        let error = std::io::Error::last_os_error();
+        let _ = unlinkat_name(entry.parent.as_raw_fd(), &temp_name);
+        return Err(map_path_error(
+            &entry.display,
+            "atomically rename rooted file",
+            error,
+            false,
+        ));
+    }
+    fsync_fd(
+        entry.parent.as_raw_fd(),
+        &entry.display,
+        "fsync rooted parent directory",
+    )
+}
+
+/// Create a directory path below a mounted filesystem top level without
+/// traversing a symlink. Existing components must be directories.
+pub fn create_rooted_directory(top_level: &Path, rooted_path: &str) -> Result<(), RecoveryError> {
+    open_rooted_directory(top_level, rooted_path, true).map(|_| ())
+}
+
 pub fn remove_file(path: &Path) -> Result<(), RecoveryError> {
     let confined = ConfinedPath::parse(path)?;
     let (parent, name) = confined.open_parent(false)?;
@@ -427,6 +498,82 @@ pub fn create_btrfs_snapshot(
         destination.parent.as_raw_fd(),
         &destination.display,
         "fsync snapshot destination parent",
+    )
+}
+
+/// Create an empty Btrfs subvolume below a pinned parent directory fd.
+///
+/// The kernel receives the destination parent fd and leaf name directly, so
+/// a target-controlled symlink can never redirect this write outside the
+/// mounted filesystem.
+pub fn create_btrfs_subvolume(top_level: &Path, rooted_path: &str) -> Result<(), RecoveryError> {
+    let destination = open_rooted_parent(top_level, rooted_path, false)?;
+    match entry_type(
+        destination.parent.as_raw_fd(),
+        &destination.name,
+        &destination.display,
+    )? {
+        None => {}
+        Some(libc::S_IFLNK) => {
+            return Err(unsafe_path(
+                &destination.display,
+                "subvolume destination is a symlink",
+            ));
+        }
+        Some(_) => {
+            return Err(RecoveryError::new(
+                RecoveryErrorKind::RootSwitchConflict,
+                format!(
+                    "subvolume destination {} already exists",
+                    destination.display.display()
+                ),
+            ));
+        }
+    }
+
+    let name = destination.name.as_bytes();
+    if name.is_empty() || name.len() > BTRFS_SUBVOL_NAME_MAX || name.contains(&0) {
+        return Err(unsafe_path(
+            &destination.display,
+            "invalid btrfs subvolume destination name",
+        ));
+    }
+    let mut arguments = BtrfsIoctlVolArgsV2 {
+        fd: 0,
+        transid: 0,
+        flags: 0,
+        unused: [0; 4],
+        name: [0; BTRFS_SUBVOL_NAME_MAX + 1],
+    };
+    arguments.name[..name.len()].copy_from_slice(name);
+    let result = unsafe {
+        libc::syscall(
+            libc::SYS_ioctl,
+            destination.parent.as_raw_fd(),
+            BTRFS_IOC_SUBVOL_CREATE_V2 as libc::c_ulong,
+            &mut arguments,
+        )
+    };
+    if result != 0 {
+        let error = std::io::Error::last_os_error();
+        let mut recovery_error = RecoveryError::new(
+            if error.raw_os_error() == Some(libc::EEXIST) {
+                RecoveryErrorKind::RootSwitchConflict
+            } else {
+                RecoveryErrorKind::SyscallFailed
+            },
+            format!(
+                "BTRFS_IOC_SUBVOL_CREATE_V2 {} failed: {error}",
+                destination.display.display()
+            ),
+        );
+        recovery_error.errno = error.raw_os_error();
+        return Err(recovery_error);
+    }
+    fsync_fd(
+        destination.parent.as_raw_fd(),
+        &destination.display,
+        "fsync subvolume destination parent",
     )
 }
 
@@ -947,6 +1094,29 @@ mod tests {
         assert_eq!(error.kind, RecoveryErrorKind::UnsafeRecoveryPath);
         assert!(top.join("@").is_dir());
         assert!(outside.join("new-root").is_dir());
+        let _ = std::fs::remove_dir_all(top);
+        let _ = std::fs::remove_dir_all(outside);
+    }
+
+    #[test]
+    fn rooted_atomic_write_replaces_target_file_and_rejects_parent_symlink() {
+        let top = scratch("rooted-write");
+        let outside = scratch("rooted-write-outside");
+        std::fs::create_dir_all(top.join("@/etc")).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(top.join("@/etc/fstab"), "old\n").unwrap();
+
+        atomic_write_rooted(&top, "/@/etc/fstab", b"new\n", 0o644).unwrap();
+        assert_eq!(std::fs::read_to_string(top.join("@/etc/fstab")).unwrap(), "new\n");
+
+        std::fs::remove_file(top.join("@/etc/fstab")).unwrap();
+        std::fs::remove_dir(top.join("@/etc")).unwrap();
+        symlink(&outside, top.join("@/etc")).unwrap();
+        let error = atomic_write_rooted(&top, "/@/etc/fstab", b"blocked\n", 0o644)
+            .unwrap_err();
+        assert_eq!(error.kind, RecoveryErrorKind::UnsafeRecoveryPath);
+        assert!(!outside.join("fstab").exists());
+
         let _ = std::fs::remove_dir_all(top);
         let _ = std::fs::remove_dir_all(outside);
     }
