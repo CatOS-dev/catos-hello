@@ -34,7 +34,7 @@ only and never grants permission.
 |---|---|---|
 | 1 | Environment, device and CatOS target discovery | Implemented; read-only |
 | 2 | Safe read-only target mount planning and temporary mount sessions | Implemented; read-only |
-| 3 | Transactional mount-configuration repair | Not implemented |
+| 3 | Transactional mount-configuration repair | Implemented (in-memory diagnosis + plan); privileged disk-write apply layer pending |
 | 4 | Transactional Btrfs root-snapshot recovery | Implemented, with final layout/integration closeout remaining |
 | 5 | Boot topology inspection and immutable repair planning | Not implemented |
 | 6 | Transactional boot repair and Live/Polkit/GUI integration | Not implemented |
@@ -117,6 +117,11 @@ catos-system recovery resume            [--json]
     --snapshot-subvolume PATH --transaction ID
 catos-system recovery revert            [--json]
     --root-device /dev/... --transaction ID --confirm TOKEN
+
+# Stage 3 — mount-config repair (fstab + standard subvolume layout)
+catos-repair mount [--json]
+    [--root-device /dev/...] [--root-subvolume PATH]
+    [--esp-device /dev/...]
 
 catos-system --version
 catos-system --help
@@ -263,6 +268,8 @@ src/
     storage.rs         phase 2: devices, mount observations, Btrfs subvolumes, candidates
     mount.rs           phase 2: MountError taxonomy, MountPlan, MountSession, CleanupReport
     recovery.rs        phase 3: RecoveryPlan, TransactionState, RecoveryErrorKind, DiskFacts
+    repair.rs          phase 2: FsRepairReport, FsRepairOutcome, attempts, exit interpretation
+    mount_repair.rs    phase 3: MountRepairReport, MountRepairPlan, TargetIdentity, FstabDigest
     fstab.rs           re-exports of parse::fstab types
   parse/             pure parsers; no I/O
     fstab.rs           /etc/fstab parser + malformed-line diagnostics
@@ -291,11 +298,23 @@ src/
     external.rs        trusted read-only btrfs-progs wrapper with bounded execution
     boot.rs            read-only BootConsistencyReport and external boot-resource gate
     engine.rs          begin/load/drive/revert, state persistence and fault injection
+  repair/            stage-2 fsck orchestration + stage-3 mount-config repair
+    safety.rs          stage-2 target selection + safety refusals (RunningRoot / Mounted / Ambiguous)
+    runner.rs          CommandRunner trait (TrustedRunner + RecordedRunner for tests)
+    runners.rs         per-fstype flows (e2fsck / fsck.fat / fsck.f2fs / xfs_repair / btrfs)
+    orchestrator.rs    stage-2 fsck orchestrator
+    verify.rs          stage-2 post-repair verification mount
+    fstab_edit.rs      stage-3 structure-preserving /etc/fstab line editor
+    subvol_decision.rs stage-3 CatOS standard subvolume rebuild authorisation
+    path_safety.rs     stage-3 mount-point path safety policy (pure)
+    mount_repair.rs    stage-3 mount-config orchestrator + diagnosis
   output/            renders model
     human.rs           plain ASCII human output (phase 1)
     json.rs            serde_json wrapper (phase 1, single source of JSON contract)
     phase2.rs          phase 2: human + JSON for StorageReport / MountPlan / MountSession
     recovery.rs        phase 3: human + JSON for RecoveryPlan / TransactionRecord / RecoveryError
+    repair.rs          stage 2: human + JSON for FsRepairReport
+    mount_repair.rs    stage 3: human + JSON for MountRepairReport
 ```
 
 Layering rules:
@@ -401,7 +420,7 @@ The following surfaces are wired into CTest when `-DBUILD_TESTS=ON`:
 
 | Test                              | What it guards against                                |
 |-----------------------------------|-------------------------------------------------------|
-| `catos-system-cargo-test`         | Rust unit + integration tests. Includes runtime/capability fixtures, target-root confinement, mount policy, fstab diagnostics, candidate evidence, Btrfs parsing, structured errors, CLI and multicall contracts, phase-3 recovery state machine, transaction durability, SHA-256 plan/token binding, confined path attacks, boot-consistency gating, and crash-resumable transaction flow. |
+| `catos-system-cargo-test`         | Rust unit + integration tests. Includes runtime/capability fixtures, target-root confinement, mount policy, fstab diagnostics, candidate evidence, Btrfs parsing, structured errors, CLI and multicall contracts, phase-3 recovery state machine, transaction durability, SHA-256 plan/token binding, confined path attacks, boot-consistency gating, crash-resumable transaction flow, stage-3 mount-repair fstab-editor preservation, subvolume-rebuild authorisation rules, path-safety refusals, and identity/drift detection. |
 | `catos-system-cargo-clippy`       | All Rust targets and features remain warning-free at the declared MSRV contract. |
 | `catos-system-static-check`       | The musl binary silently regressing to dynamic linking (would break initramfs and recovery use). |
 | `catos-system-initramfs-smoke-bare` | The static binary refusing to start in a minimal Linux user space without systemd, dbus, network, or `/usr`. |
@@ -481,9 +500,183 @@ reporting, and JSON + human renderers for all snapshot-recovery outcomes. Static
 size is checked by `verify-static.sh` against the 4 MiB warning
 threshold; the exact binary size depends on the current toolchain.
 
+## `catos-repair mount` (stage 3)
+
+`catos-repair mount` repairs the CatOS standard mount configuration
+of a target root: `/etc/fstab`, the CatOS standard Btrfs subvolume
+layout, `/boot` and ESP mount entries, and missing mount-point
+directories.
+
+It is NOT a general-purpose filesystem repair tool. It does not run
+`fsck`, does not modify bootloader configuration, does not migrate
+boot providers, and does not perform the snapshot-recovery root
+exchange.
+
+### CatOS standard Btrfs layout (single source of truth)
+
+The CatOS Calamares configuration defines these subvolumes:
+
+```text
+/            → /@
+/home        → /@home
+/root        → /@root
+/srv         → /@srv
+/var/cache   → /@cache
+/var/tmp     → /@tmp
+/var/log     → /@log
+/.snapshots  → /@snapshots
+```
+
+Default mount options per filesystem type:
+
+```text
+btrfs:     defaults,noatime,compress=zstd,commit=120
+ext4:      defaults,noatime,commit=60
+xfs:       defaults,lazytime,noatime,attr2,inode64,logbsize=256k,noquota
+f2fs:      defaults,compress_algorithm=lz4,compress_chksum,gc_merge,lazytime
+vfat/ESP:  defaults,umask=0077
+```
+
+### CLI
+
+```text
+catos-repair mount [--json]
+    [--root-device /dev/...] [--root-subvolume PATH]
+    [--esp-device /dev/...]
+```
+
+Running `catos-repair mount` itself expresses user authorisation to
+apply the repair (spec § 一). There is intentionally no `mount
+inspect`, `mount plan`, `mount apply`, `mount status`, or `mount
+resume` subcommand.
+
+### fstab editor (structure-preserving)
+
+The editor never re-serialises the parsed fstab AST. It edits the
+**verbatim original text** by line-oriented rewriting so that:
+
+- comments and blank lines are preserved byte-for-byte;
+- unknown entries (network filesystems, bind mounts, custom mounts)
+  are preserved;
+- `noauto`, `nofail`, and `x-systemd.*` options on unrelated entries
+  are preserved;
+- only explicitly-named lines are modified;
+- swap entries are never touched unless the plan names them.
+
+### Standard subvolume rebuild
+
+A missing CatOS standard subvolume is recreated only when ALL of the
+following hold:
+
+1. The root btrfs filesystem is uniquely identified.
+2. The fstab references the standard mount point (history evidence)
+   OR the target is confirmed CatOS via `/etc/os-release`.
+3. The missing subvolume is one of the eight CatOS standard
+   subvolumes.
+4. No filesystem object already exists at the subvolume's path.
+5. The mount-point directory either does not exist or is empty.
+
+If the mount-point directory already contains data, the repair
+creates the missing subvolume and fixes fstab, but DOES NOT migrate
+the directory data. The final report surfaces `partially_repaired`
+with `requires_human_action: true` and the data is left in place.
+
+`@snapshots` rebuild never runs `snapper create-config` and never
+modifies existing snapshot content. Snapper configuration problems
+are reported for Doctor to handle.
+
+### Mount-point directory creation
+
+Missing mount-point directories are created through the same confined
+`openat2(2)`-based path policy as the rest of the target-root
+access. The pure-policy layer rejects:
+
+- relative paths;
+- `..` components;
+- `/proc`, `/sys`, `/dev/fd`, and other magic-link roots;
+- non-directory objects at the target path;
+- symlinks at the target path (even if they point to a directory).
+
+The kernel `openat2` with `RESOLVE_IN_ROOT` and
+`RESOLVE_NO_MAGICLINKS` provides the authoritative enforcement; the
+pure policy is defence in depth.
+
+### ESP and `/boot`
+
+The mount repair distinguishes the six common ESP layouts:
+
+1. ESP mounted at `/boot/efi`.
+2. ESP mounted at `/efi`.
+3. ESP mounted directly at `/boot`.
+4. Independent plain `/boot` plus an independent ESP.
+5. `/boot` as an independent Btrfs subvolume.
+6. `/boot` inside the root filesystem.
+
+The repair fixes only mount relationships; it never runs
+`grub-install`, `limine-install`, `bootctl install`,
+`kernel-install`, `catos-firmware-boot-update`, `catos-secureboot`,
+or `efibootmgr`. Those are stage 5+.
+
+### Transaction semantics (in-memory, this stage)
+
+The plan binds to:
+
+- the target root identity (so apply can detect device drift);
+- the SHA-256 digest of the original fstab (so apply can detect
+  fstab drift);
+- the immutable diagnosis.
+
+Any drift detected at apply time aborts the plan and surfaces
+`device_changed` or `fstab_changed`.
+
+The disk-write path (atomic fstab replace, fsync, btrfs subvolume
+creation, private-namespace verification mount, target-exclusive
+per-FSID lock compatible with `catos-recovery`) is the privileged
+apply layer. In this stage the CLI runs diagnosis + in-memory plan
++ structure-preserving fstab edit against the running system's
+`/etc/fstab`, but downgrades any `repaired` outcome to
+`partially_repaired` with an explicit `PRIVILEGED_APPLY_PENDING`
+evidence note so the report never claims success it did not earn.
+The real disk-write path is wired in a follow-up stage.
+
+### Lock semantics
+
+The privileged apply layer (when wired) takes the same per-FSID
+lock as `catos-recovery`, preventing concurrent mount repair and
+recovery transactions against the same btrfs filesystem. The lock
+binds to filesystem identity (FSID), not to a transaction id.
+
+### Cleanup semantics
+
+Mounts the tool itself creates are unmounted in reverse order
+before returning. Pre-existing mounts are NEVER unmounted. If
+cleanup fails, the final outcome surfaces `cleanup_incomplete` and
+the residual mounts are listed verbatim in the report; the tool
+never claims a clean success on a dirty namespace.
+
+### What this stage does NOT do
+
+- run `fsck`, format devices, or edit partition tables;
+- open LUKS containers, assemble LVM or mdraid;
+- migrate data from a populated mount-point directory into a new
+  subvolume;
+- delete user data, delete unknown subvolumes, or modify snapshot
+  contents;
+- rebuild Snapper configuration;
+- repair bootloaders or run `grub-install` / `limine-install` /
+  `bootctl`;
+- modify Secure Boot state;
+- design `catos-update`;
+- add daemons, GUIs, or TUIs;
+- perform unrelated refactors.
+
 ## What is not implemented yet
 
-- Transactional repair of `/etc/fstab` and the CatOS Btrfs mount layout.
+- The privileged disk-write apply layer for `catos-repair mount`
+  (atomic fstab replace, fsync, btrfs subvolume creation, private-
+  namespace verification mount). The in-memory plan, diagnosis, and
+  structure-preserving fstab edit are implemented and tested; the
+  CLI surfaces them with an honest `partially_repaired` outcome.
 - Bootloader repair of any kind (GRUB, Limine, UKI, sd-boot). Recovery
   swaps the root subvolume only; it does NOT call any bootloader tool
   and does NOT write to the ESP. A read-only `BootConsistencyReport`
