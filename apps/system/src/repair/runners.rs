@@ -21,7 +21,8 @@
 //! the same data — duplication that drifts.
 
 use crate::model::repair::{AttemptKind, ExitInterpretation, RepairAttempt, RepairTool};
-use crate::repair::runner::{CommandRunner, RepairInvocation, ToolResult};
+use crate::repair::runner::{CommandRunner, RepairInvocation, RepairRunnerError, ToolResult};
+use std::time::Duration;
 
 /// Repair-level outcome returned by each per-fstype flow. This is
 /// NOT the final `FsRepairOutcome`: the orchestrator still has to
@@ -469,6 +470,43 @@ pub fn decode_xfs_exit(result: &ToolResult, high_risk: bool) -> ExitInterpretati
 // ---------------------------------------------------------------------------
 // btrfs check
 // ---------------------------------------------------------------------------
+
+/// Topology reported by `btrfs filesystem show DEVICE`. A repair flow
+/// supports only a single-device filesystem; unknown topology is refused
+/// just as conservatively as a known multi-device filesystem.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BtrfsTopology {
+    SingleDevice,
+    MultiDevice,
+    Unknown,
+}
+
+pub fn btrfs_topology<R: CommandRunner + ?Sized>(
+    runner: &R,
+    device: &str,
+) -> Result<BtrfsTopology, RepairRunnerError> {
+    let invocation = RepairInvocation::new(
+        RepairTool::BtrfsCheck.binary_name(),
+        vec!["filesystem".into(), "show".into(), device.into()],
+    )
+    .with_timeout(Duration::from_secs(30));
+    let result = runner.invoke(&invocation)?;
+    if result.binary_missing || result.timed_out || result.exit_code != 0 {
+        return Ok(BtrfsTopology::Unknown);
+    }
+    let output = String::from_utf8_lossy(&result.stdout);
+    let count = output.lines().find_map(|line| {
+        line.trim()
+            .strip_prefix("Total devices ")
+            .and_then(|rest| rest.split_whitespace().next())
+            .and_then(|value| value.parse::<u32>().ok())
+    });
+    Ok(match count {
+        Some(1) => BtrfsTopology::SingleDevice,
+        Some(_) => BtrfsTopology::MultiDevice,
+        None => BtrfsTopology::Unknown,
+    })
+}
 
 /// Run the btrfs check sequence on the target.
 ///
@@ -926,6 +964,22 @@ mod tests {
                 .into_iter()
                 .map(String::from)
                 .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn btrfs_topology_refuses_multiple_members() {
+        let runner = RecordedRunner::new().queue(ToolResult {
+            stdout: b"Label: none  uuid: test\n\tTotal devices 2 FS bytes used 1\n".to_vec(),
+            ..ToolResult::success_empty()
+        });
+        assert_eq!(
+            btrfs_topology(&runner, "/dev/sda1").unwrap(),
+            BtrfsTopology::MultiDevice
+        );
+        assert_eq!(
+            runner.invocations()[0].argv,
+            vec!["filesystem", "show", "/dev/sda1"]
         );
     }
 

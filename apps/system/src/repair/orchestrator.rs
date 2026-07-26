@@ -46,7 +46,8 @@ use crate::probe::discover_devices;
 use crate::probe::fs_probe::RealFilesystem;
 use crate::repair::runner::{CommandRunner, TrustedRunner};
 use crate::repair::runners::{
-    btrfs_flow, e2fsck_flow, f2fs_flow, fat_flow, supports_filesystem, xfs_flow, FlowOutcome,
+    btrfs_flow, btrfs_topology, e2fsck_flow, f2fs_flow, fat_flow, supports_filesystem, xfs_flow,
+    BtrfsTopology, FlowOutcome,
 };
 use crate::repair::safety::{
     evaluate_safety, RepairTargetSelection, RunningRootDevice, SafetyVerdict,
@@ -317,6 +318,57 @@ fn proceed_with_repair<R: CommandRunner + ?Sized>(
             warnings,
         };
     };
+
+    if tool == RepairTool::BtrfsCheck {
+        match btrfs_topology(runner, &device_str) {
+            Ok(BtrfsTopology::SingleDevice) => {}
+            Ok(topology) => {
+                let reason = match topology {
+                    BtrfsTopology::MultiDevice => {
+                        "btrfs filesystem has multiple devices; multi-device Btrfs repair requires manual intervention"
+                    }
+                    BtrfsTopology::Unknown => {
+                        "could not verify Btrfs device count; refusing repair rather than risk a multi-device filesystem"
+                    }
+                    BtrfsTopology::SingleDevice => unreachable!(),
+                };
+                evidence.push(Evidence::new("BTRFS_TOPOLOGY_REFUSED", "repair::orchestrator", reason));
+                return FsRepairReport {
+                    target_device: Some(device),
+                    filesystem_type: Some(fstype.to_string()),
+                    was_mounted_before_session,
+                    selected_tool: Some(tool),
+                    attempts: Vec::new(),
+                    verification_mount: None,
+                    cleanup: RepairCleanup::default(),
+                    final_outcome: FsRepairOutcome::Unsupported,
+                    requires_human_action: true,
+                    evidence,
+                    warnings,
+                };
+            }
+            Err(error) => {
+                evidence.push(Evidence::new(
+                    "BTRFS_TOPOLOGY_REFUSED",
+                    "repair::orchestrator",
+                    format!("could not inspect Btrfs device count: {error}"),
+                ));
+                return FsRepairReport {
+                    target_device: Some(device),
+                    filesystem_type: Some(fstype.to_string()),
+                    was_mounted_before_session,
+                    selected_tool: Some(tool),
+                    attempts: Vec::new(),
+                    verification_mount: None,
+                    cleanup: RepairCleanup::default(),
+                    final_outcome: FsRepairOutcome::Unsupported,
+                    requires_human_action: true,
+                    evidence,
+                    warnings,
+                };
+            }
+        }
+    }
 
     evidence.push(Evidence::new(
         "ROUTING",
