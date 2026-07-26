@@ -20,6 +20,7 @@ pub enum Invocation {
     CatosRecovery,
     CatosDoctor,
     CatosRepair,
+    CatosChroot,
 }
 
 impl Invocation {
@@ -31,6 +32,7 @@ impl Invocation {
             Invocation::CatosRecovery => "catos-recovery",
             Invocation::CatosDoctor => "catos-doctor",
             Invocation::CatosRepair => "catos-repair",
+            Invocation::CatosChroot => "catos-chroot",
         }
     }
 
@@ -43,6 +45,7 @@ impl Invocation {
             "catos-recovery" => Invocation::CatosRecovery,
             "catos-doctor" => Invocation::CatosDoctor,
             "catos-repair" => Invocation::CatosRepair,
+            "catos-chroot" => Invocation::CatosChroot,
             // Includes "catos-system" and any unknown caller: silently fall
             // back to the canonical name so probes still run.
             _ => Invocation::CatosSystem,
@@ -142,13 +145,15 @@ pub fn run(invocation: Invocation, argv: &[String]) -> i32 {
 }
 
 /// Per-invocation routing once help / version has been handled. Each
-/// arm owns its own dispatch surface; in particular `catos-repair` and
-/// `catos-update` never reach the generic `catos-system` parser.
+/// arm owns its own dispatch surface; in particular `catos-repair`,
+/// `catos-update`, and `catos-chroot` never reach the generic
+/// `catos-system` parser.
 fn invocation_dispatch(invocation: Invocation, argv: &[String]) -> i32 {
     match invocation {
         Invocation::CatosDoctor => run_doctor(),
         Invocation::CatosRepair => run_repair(argv),
         Invocation::CatosUpdate => run_update(argv),
+        Invocation::CatosChroot => run_chroot(argv),
         Invocation::CatosRecovery => {
             // The public recovery surface drops the duplicated
             // `recovery` token: `catos-recovery list`, not
@@ -713,6 +718,17 @@ fn run_update(argv: &[String]) -> i32 {
     crate::update::run(argv)
 }
 
+/// `catos-chroot` routing. Delegates to the dedicated `chroot` module
+/// which owns the lsblk + LUKS + btrfs-subvolume + fstab auto-mount +
+/// arch-chroot workflow. The module handles
+/// `--skip-root-check`, `--no-auto-mount`, `--no-systemd-chroot`, and
+/// `--show-btrfs-dot-snapshots`; any other token is rejected before
+/// any external command runs. This MUST NOT inherit any
+/// `catos-system` subcommand.
+fn run_chroot(argv: &[String]) -> i32 {
+    crate::chroot::run(argv)
+}
+
 fn print_recovery_command_help(command: &str) -> i32 {
     use std::io::Write;
     let version = crate::PROGRAM_VERSION;
@@ -770,6 +786,9 @@ fn print_help(invocation: Invocation) -> i32 {
         }
         Invocation::CatosUpdate => {
             crate::update::print_help();
+        }
+        Invocation::CatosChroot => {
+            crate::chroot::print_help();
         }
         Invocation::CatosRecovery => {
             print!(

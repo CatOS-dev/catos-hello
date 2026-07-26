@@ -14,6 +14,7 @@
 //! entry   <- main.rs glue: argv[0] multicall + dispatch
 //! ```
 
+pub mod chroot;
 pub mod cli;
 pub mod doctor;
 pub mod entry;

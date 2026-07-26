@@ -54,6 +54,7 @@ const ENTRY_POINTS: &[(&str, &str)] = &[
     ("catos-recovery", "catos-recovery"),
     ("catos-doctor", "catos-doctor"),
     ("catos-repair", "catos-repair"),
+    ("catos-chroot", "catos-chroot"),
 ];
 
 #[test]
@@ -655,4 +656,74 @@ fn recovery_subcommand_help_lists_real_required_options() {
         !stdout.contains("COMMANDS:\n    list"),
         "apply help fell back to top-level help"
     );
+}
+
+// ---------------------------------------------------------------------------
+// catos-chroot
+// ---------------------------------------------------------------------------
+
+#[test]
+fn chroot_help_and_version_are_accepted() {
+    let bin = bin_path();
+    let tmp = TempDir::new("catos-chroot-hv").unwrap();
+    let link = link_to(&bin, &tmp, "catos-chroot");
+    for flag in ["--help", "-h", "--version", "-V"] {
+        let (ok, code, stdout, _stderr) = run_via(&link, &[flag]);
+        assert!(ok, "catos-chroot {flag} failed");
+        assert_eq!(code, 0);
+        assert!(
+            stdout.contains("catos-chroot"),
+            "catos-chroot {flag} output must identify the invocation: {stdout}"
+        );
+    }
+}
+
+#[test]
+fn chroot_does_not_inherit_catos_system_commands() {
+    // `catos-chroot` is its own dispatch surface and MUST NOT expose
+    // any `catos-system` subcommand. Every inherited name must exit
+    // ARG_ERROR (2) before any external command runs.
+    let bin = bin_path();
+    let tmp = TempDir::new("catos-chroot-no-inherit").unwrap();
+    let link = link_to(&bin, &tmp, "catos-chroot");
+    for sub in ["inspect", "environment", "capabilities", "storage", "target", "recovery"] {
+        let (ok, code, _stdout, stderr) = run_via(&link, &[sub]);
+        assert!(!ok, "catos-chroot {sub} unexpectedly ran a catos-system command");
+        assert_eq!(code, 2, "catos-chroot {sub} must exit ARG_ERROR; stderr={stderr}");
+    }
+}
+
+#[test]
+fn chroot_unknown_option_is_arg_error() {
+    // Unknown flags must be rejected before any device enumeration.
+    let bin = bin_path();
+    let tmp = TempDir::new("catos-chroot-unknown-flag").unwrap();
+    let link = link_to(&bin, &tmp, "catos-chroot");
+    let (ok, code, _stdout, stderr) = run_via(&link, &["--definitely-not-a-flag"]);
+    assert!(!ok);
+    assert_eq!(code, 2, "stderr={stderr}");
+    assert!(stderr.contains("unknown option"), "stderr={stderr}");
+}
+
+#[test]
+fn chroot_help_lists_documented_flags() {
+    // Every documented long option must appear in --help output so
+    // operators can discover the full surface without reading the
+    // source.
+    let bin = bin_path();
+    let tmp = TempDir::new("catos-chroot-help-surface").unwrap();
+    let link = link_to(&bin, &tmp, "catos-chroot");
+    let (ok, _code, stdout, _stderr) = run_via(&link, &["--help"]);
+    assert!(ok);
+    for flag in [
+        "--skip-root-check",
+        "--no-auto-mount",
+        "--no-systemd-chroot",
+        "--show-btrfs-dot-snapshots",
+    ] {
+        assert!(
+            stdout.contains(flag),
+            "catos-chroot --help missing {flag}: {stdout}"
+        );
+    }
 }

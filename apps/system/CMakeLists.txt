@@ -331,7 +331,7 @@ set(_catos_install_bindir "${CMAKE_INSTALL_BINDIR}")
 install(CODE "
     set(_catos_bindir \"\$ENV{DESTDIR}\${CMAKE_INSTALL_PREFIX}/${_catos_install_bindir}\")
     file(MAKE_DIRECTORY \"\${_catos_bindir}\")
-    foreach(_name catos-update catos-recovery catos-doctor catos-repair)
+    foreach(_name catos-update catos-recovery catos-doctor catos-repair catos-chroot)
         set(_link \"\${_catos_bindir}/\${_name}\")
         if(EXISTS \"\${_link}\" AND NOT IS_SYMLINK \"\${_link}\")
             message(FATAL_ERROR \"Refusing to overwrite non-symlink \${_link}\")
