@@ -34,8 +34,6 @@
 //! in doubt, we surface the worse result: a successful repair with a
 //! failed verification is `VerificationFailed`, not `Repaired`.
 
-use std::fs::{File, OpenOptions};
-use std::os::fd::AsRawFd;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
@@ -48,6 +46,7 @@ use crate::mount::probe::probe_unmounted_candidates;
 use crate::probe::discover_devices;
 use crate::probe::fs_probe::RealFilesystem;
 use crate::repair::runner::{CommandRunner, TrustedRunner};
+use crate::recovery::lock::DeviceLock;
 use crate::repair::runners::{
     btrfs_flow, btrfs_topology, e2fsck_flow, f2fs_flow, fat_flow, supports_filesystem, xfs_flow,
     BtrfsTopology, FlowOutcome,
@@ -537,7 +536,7 @@ fn proceed_with_repair<R: CommandRunner + ?Sized>(
 }
 
 struct RepairTargetGuard {
-    _file: File,
+    _lock: DeviceLock,
 }
 
 impl RepairTargetGuard {
@@ -548,19 +547,10 @@ impl RepairTargetGuard {
             .and_then(|candidate| candidate.major_minor.as_deref())
             .ok_or_else(|| "target has no discovery-time major:minor identity".to_string())?;
         verify_target_unchanged(device, expected_major_minor)?;
-        let file = OpenOptions::new()
-            .read(true)
-            .open(device)
-            .map_err(|error| format!("cannot open target for exclusive repair lock: {error}"))?;
-        let result = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
-        if result != 0 {
-            return Err(format!(
-                "target is already locked by another repair process: {}",
-                std::io::Error::last_os_error()
-            ));
-        }
+        let lock = DeviceLock::try_acquire(device)
+            .map_err(|error| format!("cannot acquire shared repair/recovery lock: {}", error.message))?;
         verify_target_unchanged(device, expected_major_minor)?;
-        Ok(Self { _file: file })
+        Ok(Self { _lock: lock })
     }
 }
 

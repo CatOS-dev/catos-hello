@@ -39,7 +39,7 @@
 //! `fs2` / `fs4` solely for a one-line flock wrapper would violate
 //! that for no functional gain.
 
-use std::fs::File;
+use std::fs::{File, OpenOptions};
 use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
 
@@ -54,6 +54,38 @@ const LOCK_EX_NB: std::os::raw::c_int = 2 | 4;
 #[derive(Debug)]
 pub struct TransactionLock {
     _file: File,
+}
+
+/// Shared non-blocking lock on the target block-device inode. Filesystem
+/// repair and every Recovery write path hold this guard so they cannot write
+/// the same device concurrently, even across separate mount namespaces.
+#[derive(Debug)]
+pub struct DeviceLock {
+    _file: File,
+}
+
+impl DeviceLock {
+    #[allow(clippy::result_large_err)]
+    pub fn try_acquire(device: &Path) -> Result<Self, RecoveryError> {
+        let file = OpenOptions::new().read(true).open(device).map_err(|error| {
+            RecoveryError::new(
+                RecoveryErrorKind::SyscallFailed,
+                format!("cannot open target device {} for shared write lock: {error}", device.display()),
+            )
+        })?;
+        let rc = libc_flock(file.as_raw_fd(), LOCK_EX_NB);
+        if rc != 0 {
+            return Err(RecoveryError::new(
+                RecoveryErrorKind::TransactionAlreadyActive,
+                format!(
+                    "target device {} is locked by filesystem repair or recovery: {}",
+                    device.display(),
+                    std::io::Error::last_os_error()
+                ),
+            ));
+        }
+        Ok(Self { _file: file })
+    }
 }
 
 impl TransactionLock {
