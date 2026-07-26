@@ -207,12 +207,10 @@ pub fn diagnose(inputs: &MountRepairInputs) -> Vec<MountProblem> {
                     actual: actual_subvol.unwrap_or_default(),
                 });
             } else {
-                problems.push(MountProblem::RootWrongSubvol {
-                    actual: format!(
-                        "{} (for {})",
-                        actual_subvol.unwrap_or_default(),
-                        spec.mount_point
-                    ),
+                problems.push(MountProblem::StandardWrongSubvol {
+                    mount_point: spec.mount_point.to_string(),
+                    expected: spec.subvol.to_string(),
+                    actual: actual_subvol.unwrap_or_default(),
                 });
             }
         }
@@ -381,7 +379,7 @@ fn build_fstab_edits(
     let entries_with_lines = parse_with_lines(&inputs.fstab_text);
     let entries: Vec<&FstabEntry> = entries_with_lines.iter().map(|(e, _)| e).collect();
 
-    // Root UUID / subvol fixes.
+    // Root UUID / subvol fixes. Only a root problem can rewrite `/`.
     for (entry, line) in &entries_with_lines {
         if entry.target != "/" {
             continue;
@@ -407,12 +405,30 @@ fn build_fstab_edits(
                 .iter()
                 .any(|p| matches!(p, MountProblem::RootWrongSubvol { .. }))
         {
-            let opts = default_mount_options("btrfs").unwrap_or("defaults");
-            let source = source_column_string(&entry.source);
             edits.push(PlannedFstabEdit::ReplaceEntry {
                 line,
-                new_line: format!("{source}  /  btrfs  {opts},subvol=/@  0 0",),
+                new_line: entry_with_subvol(entry, "/@"),
                 reason: "root subvol must be /@ per CatOS standard layout".into(),
+            });
+        }
+    }
+
+    // Correct existing non-root standard entries in place. Retain their
+    // source, non-subvolume options, dump and pass fields.
+    for (entry, line) in &entries_with_lines {
+        let Some(expected) = crate::model::mount_repair::standard_subvol_for_mount_point(&entry.target) else {
+            continue;
+        };
+        if entry.target == "/" || entry.fstype != "btrfs" {
+            continue;
+        }
+        if problems.iter().any(|problem| matches!(problem,
+            MountProblem::StandardWrongSubvol { mount_point, .. } if mount_point == &entry.target
+        )) {
+            edits.push(PlannedFstabEdit::ReplaceEntry {
+                line: *line,
+                new_line: entry_with_subvol(entry, expected),
+                reason: format!("{} must use subvol={expected}", entry.target),
             });
         }
     }
@@ -430,10 +446,8 @@ fn build_fstab_edits(
             _ => false,
         });
         if !already && problem_present {
-            let root_source = entries
-                .iter()
-                .find(|e| e.target == "/")
-                .map(|e| source_column_string(&e.source));
+            let root_source = inputs.target.root_uuid.as_ref().map(|uuid| format!("UUID={uuid}"))
+                .or_else(|| entries.iter().find(|e| e.target == "/").map(|e| source_column_string(&e.source)));
             let Some(root_source) = root_source else {
                 continue;
             };
@@ -456,7 +470,7 @@ fn build_fstab_edits(
     // ESP UUID fix.
     if let Some(esp_uuid) = inputs.target.esp_uuid.as_ref() {
         for (entry, line) in &entries_with_lines {
-            if !matches!(entry.target.as_str(), "/boot/efi" | "/efi") {
+            if !matches!(entry.target.as_str(), "/boot/efi" | "/efi" | "/boot") {
                 continue;
             }
             if !matches!(&entry.source, FstabSource::Uuid(actual) if actual != esp_uuid) {
@@ -471,6 +485,25 @@ fn build_fstab_edits(
     }
 
     dedupe_edits(edits)
+}
+
+fn entry_with_subvol(entry: &FstabEntry, subvol: &str) -> String {
+    let mut options: Vec<String> = entry
+        .options
+        .iter()
+        .filter(|option| !option.starts_with("subvol=") && !option.starts_with("subvolid="))
+        .cloned()
+        .collect();
+    options.push(format!("subvol={subvol}"));
+    format!(
+        "{}  {}  {}  {}  {} {}",
+        source_column_string(&entry.source),
+        entry.target,
+        entry.fstype,
+        options.join(","),
+        entry.dump,
+        entry.pass,
+    )
 }
 
 fn source_column_string(source: &FstabSource) -> String {
@@ -612,6 +645,11 @@ fn problem_summary(p: &MountProblem) -> String {
             format!("expected {expected}, got {actual}")
         }
         MountProblem::RootWrongSubvol { actual } => format!("actual subvol: {actual}"),
+        MountProblem::StandardWrongSubvol {
+            mount_point,
+            expected,
+            actual,
+        } => format!("{mount_point}: expected {expected}, got {actual}"),
         MountProblem::MissingStandardEntry {
             mount_point,
             subvol,

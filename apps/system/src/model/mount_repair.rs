@@ -235,6 +235,12 @@ pub enum MountProblem {
     RootUuidMismatch { expected: String, actual: String },
     /// Root btrfs entry does not point at subvol=/@.
     RootWrongSubvol { actual: String },
+    /// A non-root standard btrfs entry points at the wrong subvolume.
+    StandardWrongSubvol {
+        mount_point: String,
+        expected: String,
+        actual: String,
+    },
     /// A standard CatOS subvolume entry is missing from fstab.
     MissingStandardEntry { mount_point: String, subvol: String },
     /// `/.snapshots` does not point at `/@snapshots`.
@@ -271,6 +277,7 @@ impl MountProblem {
             MountProblem::RootSourceUnresolvable => "root_source_unresolvable",
             MountProblem::RootUuidMismatch { .. } => "root_uuid_mismatch",
             MountProblem::RootWrongSubvol { .. } => "root_wrong_subvol",
+            MountProblem::StandardWrongSubvol { .. } => "standard_wrong_subvol",
             MountProblem::MissingStandardEntry { .. } => "missing_standard_entry",
             MountProblem::SnapshotsWrongSubvol { .. } => "snapshots_wrong_subvol",
             MountProblem::EspUuidMismatch { .. } => "esp_uuid_mismatch",
