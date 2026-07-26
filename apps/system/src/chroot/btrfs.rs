@@ -10,7 +10,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use crate::chroot::block_device::{mount_device, umount_path, BlockDevice};
-use crate::process::run_trusted_tool;
+use crate::shared::process::run_trusted_tool;
 
 const BTRFS_TIMEOUT: Duration = Duration::from_secs(30);
 const BTRFS_MAX_OUTPUT: usize = 1024 * 1024;

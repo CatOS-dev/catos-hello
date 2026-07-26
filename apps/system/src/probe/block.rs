@@ -10,7 +10,7 @@ use crate::model::inspection::Warning;
 use crate::model::storage::{BlockDevice, DeviceClass, DiskKind, MountObservation, PartitionRole};
 use crate::parse::{blkid, mountinfo};
 use crate::probe::fs_probe::FilesystemProbe;
-use crate::process::run_trusted_tool;
+use crate::shared::process::run_trusted_tool;
 
 const BLOCK_ROOT: &str = "/sys/class/block";
 const MOUNTINFO: &str = "/proc/self/mountinfo";
@@ -94,7 +94,7 @@ fn supplement_from_udev_database(
                     ));
                 }
             }
-            Err(crate::error::FsError::NotFound) => {}
+            Err(crate::shared::error::FsError::NotFound) => {}
             Err(error) => warnings.push(Warning::new(
                 "UDEV_DATABASE_UNREADABLE",
                 format!("cannot read {}: {error}", path.display()),
@@ -135,7 +135,7 @@ fn discover_sysfs(fs: &dyn FilesystemProbe) -> (Vec<BlockDevice>, Vec<Warning>) 
 fn discover_without_mountinfo(
     fs: &dyn FilesystemProbe,
     names: Vec<String>,
-    error: crate::error::FsError,
+    error: crate::shared::error::FsError,
 ) -> (Vec<BlockDevice>, Vec<Warning>) {
     let mut devices: Vec<BlockDevice> = names
         .iter()

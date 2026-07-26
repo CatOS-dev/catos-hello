@@ -1,6 +1,6 @@
 //! Trusted btrfs-progs invocations.
 //!
-//! All external invocations go through [`crate::process::run_trusted_tool`]:
+//! All external invocations go through [`crate::shared::process::run_trusted_tool`]:
 //!
 //! * Fixed trusted path resolution (no `PATH` lookup).
 //! * Minimal environment.
@@ -42,7 +42,7 @@ use crate::model::recovery::{
     BtrfsFilesystemIdentity, BtrfsSubvolumeIdentity, RecoveryError, RecoveryErrorKind,
     SubvolumeFacts,
 };
-use crate::process::{run_trusted_tool, ToolOutput};
+use crate::shared::process::{run_trusted_tool, ToolOutput};
 
 const DEFAULT_TIMEOUT_SECS: u64 = 10;
 const MAX_OUTPUT_BYTES: usize = 1024 * 1024;

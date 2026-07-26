@@ -5,7 +5,7 @@
 
 use std::io::Write;
 
-use crate::error::Error;
+use crate::shared::error::Error;
 use crate::model::recovery::{
     RecoveryError, RecoveryInspectReport, RecoveryListReport, RecoveryPlan, RecoveryStatusReport,
     TransactionRecord,

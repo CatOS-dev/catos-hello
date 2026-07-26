@@ -191,7 +191,7 @@ impl TargetRunner for TrustedTargetRunner {
             }
         }
 
-        match crate::process::run_prepared_command_with_optional_timeout(
+        match crate::shared::process::run_prepared_command_with_optional_timeout(
             command,
             PathBuf::from(&target_binary),
             self.timeout,

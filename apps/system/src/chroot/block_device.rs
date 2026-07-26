@@ -1,7 +1,7 @@
 //! Block-device discovery and mount helpers for `catos-chroot`.
 //!
 //! All external commands (`lsblk`, `mount`, `umount`) are resolved
-//! through [`crate::process::trusted_tool_path`] so they can only come
+//! through [`crate::shared::process::trusted_tool_path`] so they can only come
 //! from the fixed trusted system directories. `lsblk` is run with a
 //! bounded reader because its JSON output on a busy host can be large;
 //! `mount`/`umount` are run with inherited stdio so the operator sees
@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use serde::Deserialize;
 
-use crate::process::{run_trusted_tool, trusted_tool_path};
+use crate::shared::process::{run_trusted_tool, trusted_tool_path};
 
 const LSBLK_TIMEOUT: Duration = Duration::from_secs(30);
 const LSBLK_MAX_OUTPUT: usize = 4 * 1024 * 1024;
@@ -165,7 +165,7 @@ pub fn umount_path(mount_point: &Path, recursive: bool) -> Result<(), String> {
 
 /// Resolve a trusted tool to its absolute path. Thin wrapper so
 /// callers outside this module do not need to reach into
-/// `crate::process` directly.
+/// `crate::shared::process` directly.
 pub fn tool_path(name: &str) -> Option<PathBuf> {
     trusted_tool_path(name)
 }

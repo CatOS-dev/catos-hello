@@ -3,7 +3,7 @@
 //! dependency surface minimal, which matters for a static binary intended to
 //! run in initramfs.
 
-use crate::error::{exit_code, Error};
+use crate::shared::error::{exit_code, Error};
 use crate::system_root::SystemRoot;
 use std::path::{Component, Path, PathBuf};
 

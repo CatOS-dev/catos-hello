@@ -4,7 +4,7 @@
 
 use std::fmt;
 
-use crate::error::{exit_code, Error};
+use crate::shared::error::{exit_code, Error};
 
 /// The set of argv[0] names this binary recognises. Anything else falls
 /// back silently to the canonical `catos-system` name. The fallback is
@@ -189,7 +189,7 @@ fn run_doctor() -> i32 {
     }
     if let Err(e) = out.flush() {
         eprintln!("catos-doctor: stdout write failed: {e}");
-        return crate::error::exit_code::PROBE_FAILED;
+        return crate::shared::error::exit_code::PROBE_FAILED;
     }
     exit
 }
@@ -918,7 +918,7 @@ fn run_phase3(invocation: Invocation, args: crate::cli::CliArgs) -> i32 {
         Some(recovery_args) => recovery_args,
         None => {
             eprintln!("{invocation}: recovery subcommand selected but no recovery args parsed");
-            return crate::error::exit_code::ARG_ERROR;
+            return crate::shared::error::exit_code::ARG_ERROR;
         }
     };
     let outcome = crate::phase3::run_recovery(recovery_args);
@@ -975,7 +975,7 @@ mod tests {
     fn partially_repaired_boot_is_not_a_success_exit() {
         assert_ne!(
             boot_outcome_exit_code(BootRepairOutcome::PartiallyRepaired),
-            crate::error::exit_code::SUCCESS
+            crate::shared::error::exit_code::SUCCESS
         );
     }
 }

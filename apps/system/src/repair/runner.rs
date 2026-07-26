@@ -2,7 +2,7 @@
 //!
 //! This is the **only** interface the orchestrator uses to spawn
 //! repair binaries. The default implementation (`TrustedRunner`)
-//! goes through [`crate::process::run_trusted_tool`] with the
+//! goes through [`crate::shared::process::run_trusted_tool`] with the
 //! existing fixed-path, minimal-env, bounded-output, deadline-bound
 //! contract. Tests inject a fake runner (`RecordedRunner`) so
 //! behaviour tests do NOT need root, loop devices, or even the tools
@@ -191,7 +191,7 @@ pub trait CommandRunner: std::fmt::Debug {
 // TrustedRunner: real implementation
 // ---------------------------------------------------------------------------
 
-/// Default runner: delegates to [`crate::process::run_trusted_tool`],
+/// Default runner: delegates to [`crate::shared::process::run_trusted_tool`],
 /// reusing the same trusted-path / minimal-env / bounded-output /
 /// deadline guarantees as blkid and btrfs-progs invocations.
 #[derive(Debug, Clone, Copy)]
@@ -236,7 +236,7 @@ impl CommandRunner for TrustedRunner {
         }
 
         // Binary missing is a structured outcome, not a runner error.
-        if crate::process::trusted_tool_path(&invocation.binary).is_none() {
+        if crate::shared::process::trusted_tool_path(&invocation.binary).is_none() {
             return Ok(ToolResult::binary_missing());
         }
 
@@ -245,7 +245,7 @@ impl CommandRunner for TrustedRunner {
         // The trusted runner returns a structured error string for
         // spawn/pipe failures. Re-map into our error type so the
         // orchestrator sees one error type.
-        let output = crate::process::run_trusted_tool_with_optional_timeout(
+        let output = crate::shared::process::run_trusted_tool_with_optional_timeout(
             invocation.binary.as_str(),
             &argv_refs,
             invocation.timeout,

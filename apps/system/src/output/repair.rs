@@ -6,7 +6,7 @@
 
 use std::io::Write;
 
-use crate::error::Error;
+use crate::shared::error::Error;
 use crate::model::repair::FsRepairReport;
 
 /// Render the repair report as JSON. Uses the same envelope as

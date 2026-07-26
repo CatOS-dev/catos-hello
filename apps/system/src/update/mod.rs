@@ -29,7 +29,7 @@
 use std::io::Write;
 use std::process::Command;
 
-use crate::error::exit_code;
+use crate::shared::error::exit_code;
 
 pub mod pacman;
 pub mod su;

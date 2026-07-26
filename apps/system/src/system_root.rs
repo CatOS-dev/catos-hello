@@ -5,7 +5,7 @@
 use std::fmt;
 use std::path::{Path, PathBuf};
 
-use crate::error::Error;
+use crate::shared::error::Error;
 
 /// A validated, absolute target root directory.
 ///

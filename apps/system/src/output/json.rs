@@ -5,7 +5,7 @@ use serde::ser::SerializeMap;
 use serde::{Serialize, Serializer};
 
 use crate::cli::View;
-use crate::error::Error;
+use crate::shared::error::Error;
 use crate::model::inspection::InspectionReport;
 
 /// Serialise the report to a pretty-printed JSON string under the given

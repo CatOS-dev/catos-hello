@@ -9,7 +9,7 @@
 
 use std::io::Write;
 
-use crate::error::Error;
+use crate::shared::error::Error;
 use crate::model::doctor::{
     DoctorIssue, DoctorOverallStatus, DoctorRecommendation, DoctorReport, DoctorSection,
     DoctorSeverity, DoctorTargetKind,
@@ -204,9 +204,9 @@ pub fn render_doctor_json(report: &DoctorReport) -> Result<String, Error> {
 /// only when Doctor itself could not complete.
 pub fn exit_code_for(report: &DoctorReport) -> i32 {
     if report.doctor_failed() {
-        crate::error::exit_code::PROBE_FAILED
+        crate::shared::error::exit_code::PROBE_FAILED
     } else {
-        crate::error::exit_code::SUCCESS
+        crate::shared::error::exit_code::SUCCESS
     }
 }
 

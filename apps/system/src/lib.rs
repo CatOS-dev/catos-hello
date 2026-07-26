@@ -18,7 +18,6 @@ pub mod chroot;
 pub mod cli;
 pub mod doctor;
 pub mod entry;
-pub mod error;
 pub mod model;
 pub mod mount;
 pub mod output;
@@ -26,13 +25,13 @@ pub mod parse;
 pub mod phase2;
 pub mod phase3;
 pub mod probe;
-pub mod process;
 pub mod recovery;
 pub mod repair;
+pub mod shared;
 pub mod system_root;
 pub mod update;
 
-pub use error::{exit_code, Error, FsError};
+pub use shared::error::{exit_code, Error, FsError};
 
 /// Program version string, single source of truth.
 pub const PROGRAM_VERSION: &str = env!("CARGO_PKG_VERSION");

@@ -18,7 +18,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::cli::{RecoveryArgs, RecoverySubcommand};
-use crate::error::{exit_code, Error};
+use crate::shared::error::{exit_code, Error};
 use crate::model::inspection::Warning;
 use crate::model::recovery::{
     BootConsistencyReport, BtrfsFilesystemIdentity, BtrfsSubvolumeIdentity, CleanupSummary,

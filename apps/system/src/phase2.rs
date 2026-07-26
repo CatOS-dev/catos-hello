@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::cli::TargetSelection;
-use crate::error::{exit_code, Error};
+use crate::shared::error::{exit_code, Error};
 use crate::model::fstab::{FstabEntry, FstabEntryKind, FstabSource};
 use crate::model::inspection::{TargetInspection, Warning};
 use crate::model::mount::{MountError, MountPlan, MountSession};
@@ -404,8 +404,8 @@ fn read_target_fstab(root: &SystemRoot) -> Result<(Vec<FstabEntry>, Vec<Warning>
                 .collect();
             Ok((entries, warnings))
         }
-        Err(crate::error::FsError::NotFound) => Ok((Vec::new(), Vec::new())),
-        Err(crate::error::FsError::PermissionDenied) => Err(Error::PermissionDenied {
+        Err(crate::shared::error::FsError::NotFound) => Ok((Vec::new(), Vec::new())),
+        Err(crate::shared::error::FsError::PermissionDenied) => Err(Error::PermissionDenied {
             path: root.join("etc/fstab"),
             detail: "target fstab is not readable through confined root access".into(),
         }),

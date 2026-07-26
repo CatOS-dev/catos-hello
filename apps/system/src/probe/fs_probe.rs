@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
-use crate::error::FsError;
+use crate::shared::error::FsError;
 
 /// Minimal stat-like info needed by probes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

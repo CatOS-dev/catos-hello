@@ -2091,7 +2091,7 @@ fn observe_target_inputs(
                         None
                     },
                 },
-                Err(crate::error::FsError::NotFound) => MountPointObservation::missing(),
+                Err(crate::shared::error::FsError::NotFound) => MountPointObservation::missing(),
                 Err(error) => {
                     return Err(format!(
                         "cannot safely inspect target mount point {}: {error}",
@@ -2118,7 +2118,7 @@ fn observe_target_inputs(
                     None
                 },
             },
-            Err(crate::error::FsError::NotFound) => MountPointObservation::missing(),
+            Err(crate::shared::error::FsError::NotFound) => MountPointObservation::missing(),
             Err(error) => {
                 return Err(format!(
                     "cannot safely inspect target mount point {mount_point}: {error}"
@@ -2692,7 +2692,7 @@ fn ensure_nested_esp_mountpoint(
                             "mounted separate /boot contains a non-directory efi entry".into()
                         );
                     }
-                    Err(crate::error::FsError::NotFound) => false,
+                    Err(crate::shared::error::FsError::NotFound) => false,
                     Err(error) => {
                         return Err(format!("cannot inspect mounted /boot/efi: {error}"));
                     }
@@ -2731,7 +2731,7 @@ fn ensure_nested_esp_mountpoint(
                     let _ = syscall::umount2(&mount_point, 0);
                     return Err("separate /boot contains a non-directory efi entry".into());
                 }
-                Err(crate::error::FsError::NotFound) => false,
+                Err(crate::shared::error::FsError::NotFound) => false,
                 Err(error) => {
                     let _ = syscall::umount2(&mount_point, 0);
                     return Err(format!("cannot inspect separate /boot/efi: {error}"));

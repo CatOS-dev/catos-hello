@@ -4,7 +4,7 @@
 
 use std::path::Path;
 
-use crate::error::FsError;
+use crate::shared::error::FsError;
 use crate::model::evidence::Evidence;
 use crate::model::runtime::{Detection, RuntimeFacts};
 use crate::probe::fs_probe::FilesystemProbe;

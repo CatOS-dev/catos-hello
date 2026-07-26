@@ -37,8 +37,8 @@ use std::process::Command;
 use crate::chroot::block_device::{list_block_devices, mount_device, umount_path, BlockDevice};
 use crate::chroot::btrfs::list_subvolumes;
 use crate::chroot::fstab::{read as read_fstab, FsTabEntry};
-use crate::error::exit_code;
-use crate::process::trusted_tool_path;
+use crate::shared::error::exit_code;
+use crate::shared::process::trusted_tool_path;
 
 pub mod block_device;
 pub mod btrfs;

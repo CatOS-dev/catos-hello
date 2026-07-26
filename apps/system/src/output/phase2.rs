@@ -4,7 +4,7 @@
 
 use std::io::Write;
 
-use crate::error::Error;
+use crate::shared::error::Error;
 use crate::model::mount::{CleanupReport, MountPlan, MountSession};
 use crate::model::storage::StorageReport;
 use crate::phase2::Phase2Outcome;

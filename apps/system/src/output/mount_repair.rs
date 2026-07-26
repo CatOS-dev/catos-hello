@@ -5,7 +5,7 @@
 
 use std::io::Write;
 
-use crate::error::Error;
+use crate::shared::error::Error;
 use crate::model::mount_repair::MountRepairReport;
 
 pub fn render_mount_repair_json(

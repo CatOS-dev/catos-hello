@@ -9,7 +9,7 @@
 
 use std::time::Duration;
 
-use crate::process::{run_trusted_tool, ToolOutput};
+use crate::shared::process::{run_trusted_tool, ToolOutput};
 
 /// Maximum wall time `checkupdates` may take before we abort it.
 /// `checkupdates` normally finishes in a few seconds; a hung mirror

@@ -14,7 +14,7 @@
 //!
 //! Every tool invocation goes through the [`CommandRunner`] trait,
 //! which the real implementation (`TrustedRunner`) backs with
-//! [`crate::process::run_trusted_tool`]'s fixed-path / minimal-env /
+//! [`crate::shared::process::run_trusted_tool`]'s fixed-path / minimal-env /
 //! bounded-output / deadline contract. There is no `sh -c`, no
 //! string-concatenated argv, no auto-format, no auto-unmount of
 //! pre-existing mounts.

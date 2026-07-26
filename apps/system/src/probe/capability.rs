@@ -131,7 +131,7 @@ fn read_target_root(fs: &dyn FilesystemProbe, root: &SystemRoot) -> Capability {
                 "successfully read a file under the target root",
             )],
         ),
-        Err(crate::error::FsError::PermissionDenied) => unavailable(
+        Err(crate::shared::error::FsError::PermissionDenied) => unavailable(
             CapabilityKind::ReadTargetRoot,
             vec![Evidence::new(
                 "TARGET_ROOT_PERMISSION_DENIED",
@@ -139,7 +139,7 @@ fn read_target_root(fs: &dyn FilesystemProbe, root: &SystemRoot) -> Capability {
                 "permission denied reading a file under the target root",
             )],
         ),
-        Err(crate::error::FsError::NotFound) => match fs.metadata(root.canonical_path()) {
+        Err(crate::shared::error::FsError::NotFound) => match fs.metadata(root.canonical_path()) {
             Ok(metadata) if metadata.is_dir => available(
                 CapabilityKind::ReadTargetRoot,
                 vec![Evidence::new(
@@ -198,7 +198,7 @@ fn read_proc(fs: &dyn FilesystemProbe) -> Capability {
                 "successfully read a procfs entry",
             )],
         ),
-        Err(crate::error::FsError::PermissionDenied) => unavailable(
+        Err(crate::shared::error::FsError::PermissionDenied) => unavailable(
             CapabilityKind::ReadProc,
             vec![Evidence::new(
                 "PROC_PERMISSION_DENIED",
@@ -313,7 +313,7 @@ fn shell_available(fs: &dyn FilesystemProbe) -> Capability {
                 );
             }
             // File-not-found: try next candidate.
-            Err(crate::error::FsError::NotFound) => continue,
+            Err(crate::shared::error::FsError::NotFound) => continue,
             // Permission denied / I/O error: cannot decide.
             Err(e) => {
                 return unknown(
@@ -398,7 +398,7 @@ fn write_efivars_possible(fs: &dyn FilesystemProbe, caps: &ProcCaps) -> Capabili
     // write).
     let meta = match fs.metadata(p) {
         Ok(m) => m,
-        Err(crate::error::FsError::NotFound) => {
+        Err(crate::shared::error::FsError::NotFound) => {
             return unavailable(
                 CapabilityKind::WriteEfivarsPossible,
                 vec![Evidence::new(
@@ -408,7 +408,7 @@ fn write_efivars_possible(fs: &dyn FilesystemProbe, caps: &ProcCaps) -> Capabili
                 )],
             );
         }
-        Err(crate::error::FsError::PermissionDenied) => {
+        Err(crate::shared::error::FsError::PermissionDenied) => {
             return unknown(
                 CapabilityKind::WriteEfivarsPossible,
                 vec![Evidence::new(

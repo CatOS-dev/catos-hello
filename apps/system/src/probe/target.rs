@@ -4,7 +4,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::error::FsError;
+use crate::shared::error::FsError;
 use crate::model::capability::CapabilityStatus;
 use crate::model::evidence::Evidence;
 use crate::model::inspection::{OsRelease, Presence, TargetInspection, ToolPath};

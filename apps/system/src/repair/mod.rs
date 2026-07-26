@@ -22,7 +22,7 @@
 //!
 //! * The CommandRunner trait is the *only* interface the orchestrator
 //!   uses to spawn tools. The default implementation
-//!   (`TrustedRunner`) goes through [`crate::process::run_trusted_tool`]
+//!   (`TrustedRunner`) goes through [`crate::shared::process::run_trusted_tool`]
 //!   with the existing fixed-path, minimal-env, bounded-output,
 //!   deadline-bound contract. Tests inject a fake runner so behaviour
 //!   tests do NOT need root, loop devices, or even the tools
