@@ -23,7 +23,7 @@
 //!
 //! * Target discovery, mount session, and device locks: those are
 //!   the stage 1–3 surfaces (`repair::mount_repair`,
-//!   `crate::phase3::RecoveryRwSession`, `recovery::lock`).
+//!   `crate::recovery::RecoveryRwSession`, `recovery::lock`).
 //! * Bootloader migration: repair restores the provider the target
 //!   already uses. It never swaps GRUB for systemd-boot, etc.
 //! * Arbitrary chroot / shell API: the only target commands that

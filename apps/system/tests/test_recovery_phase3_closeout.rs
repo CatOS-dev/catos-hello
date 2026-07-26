@@ -478,7 +478,7 @@ fn session_directory_error_kinds_have_distinct_stable_codes() {
 /// next boot.
 #[test]
 fn exit_code_for_completed_apply_with_dirty_cleanup_is_nonzero() {
-    use catos_system::phase3::{exit_code_for, Phase3Outcome};
+    use catos_system::recovery::{exit_code_for, Phase3Outcome};
     let record = sample_record_with_cleanup(Some(CleanupSummary {
         unmounted: Vec::new(),
         residual: vec![
@@ -510,7 +510,7 @@ fn exit_code_for_completed_apply_with_dirty_cleanup_is_nonzero() {
 /// non-zero, otherwise a half-reverted system would look healthy.
 #[test]
 fn exit_code_for_reverted_with_dirty_cleanup_is_nonzero() {
-    use catos_system::phase3::{exit_code_for, Phase3Outcome};
+    use catos_system::recovery::{exit_code_for, Phase3Outcome};
     let dirty_cleanup = CleanupSummary {
         unmounted: Vec::new(),
         residual: vec!["session directory cleanup: residual mount".into()],
@@ -531,7 +531,7 @@ fn exit_code_for_reverted_with_dirty_cleanup_is_nonzero() {
 /// always-non-zero, breaking the contract for healthy recoveries.
 #[test]
 fn exit_code_for_completed_apply_with_clean_cleanup_is_success() {
-    use catos_system::phase3::{exit_code_for, Phase3Outcome};
+    use catos_system::recovery::{exit_code_for, Phase3Outcome};
     let clean_cleanup = CleanupSummary {
         unmounted: vec!["/run/catos-system/sessions/recovery-rw-1234".into()],
         residual: Vec::new(),

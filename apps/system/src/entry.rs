@@ -921,7 +921,7 @@ fn run_phase3(invocation: Invocation, args: crate::shared::cli::CliArgs) -> i32 
             return crate::shared::error::exit_code::ARG_ERROR;
         }
     };
-    let outcome = crate::phase3::run_recovery(recovery_args);
+    let outcome = crate::recovery::run_recovery(recovery_args);
     let result = if args.json {
         crate::shared::output::render_phase3_json(&outcome, invocation.as_str(), args.root.as_path())
             .and_then(|s| {
@@ -935,7 +935,7 @@ fn run_phase3(invocation: Invocation, args: crate::shared::cli::CliArgs) -> i32 
             .map_err(|e| Error::SerializeFailed(format!("stdout write: {e}")))
     };
     match result {
-        Ok(()) => crate::phase3::exit_code_for(&outcome),
+        Ok(()) => crate::recovery::exit_code_for(&outcome),
         Err(e) => {
             eprintln!("{invocation}: {e}");
             e.exit_code()

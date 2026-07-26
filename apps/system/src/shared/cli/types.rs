@@ -16,7 +16,7 @@ use std::path::PathBuf;
 ///     the final session/cleanup report.
 ///
 /// Phase 3 commands drive the btrfs snapshot recovery transaction.
-/// See [`crate::phase3`] for the orchestrators.
+/// See [`crate::recovery`] for the orchestrators.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Command {
     Environment,

@@ -1150,7 +1150,7 @@ fn build_action_audit(plan: &MountRepairPlan) -> Vec<AppliedAction> {
 /// Btrfs target. It mounts the Btrfs top level in a private session, gathers
 /// target-local facts, and records actions only after they have succeeded.
 enum MountRepairRwSession {
-    Btrfs(crate::phase3::RecoveryRwSession),
+    Btrfs(crate::recovery::RecoveryRwSession),
     Plain(PlainRwSession),
     Running(RunningRootSession),
 }
@@ -1158,7 +1158,7 @@ enum MountRepairRwSession {
 impl MountRepairRwSession {
     fn mount(device: &Path, fstype: &str, running_root: bool) -> Result<Self, RecoveryError> {
         if fstype == "btrfs" {
-            crate::phase3::RecoveryRwSession::mount(device).map(Self::Btrfs)
+            crate::recovery::RecoveryRwSession::mount(device).map(Self::Btrfs)
         } else if running_root {
             RunningRootSession::enter().map(Self::Running)
         } else {

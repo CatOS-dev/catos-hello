@@ -17,10 +17,10 @@
 pub mod chroot;
 pub mod doctor;
 pub mod entry;
-pub mod system;
-pub mod phase3;
+pub mod recovery;
 pub mod repair;
 pub mod shared;
+pub mod system;
 pub mod update;
 
 pub use shared::error::{exit_code, Error, FsError};

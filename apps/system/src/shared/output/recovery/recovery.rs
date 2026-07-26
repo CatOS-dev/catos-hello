@@ -10,7 +10,7 @@ use crate::shared::model::recovery::{
     RecoveryError, RecoveryInspectReport, RecoveryListReport, RecoveryPlan, RecoveryStatusReport,
     TransactionRecord,
 };
-use crate::phase3::Phase3Outcome;
+use crate::recovery::Phase3Outcome;
 
 pub fn render_phase3_json(
     outcome: &Phase3Outcome,

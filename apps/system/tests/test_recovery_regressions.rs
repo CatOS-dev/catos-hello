@@ -6,7 +6,7 @@ use catos_system::shared::model::recovery::{
     FstabRootDefinition, RecoveryError, RecoveryErrorKind, RecoveryPlan, SubvolumeFacts,
     TransactionRecord, TransactionState, RECOVERY_PLAN_SCHEMA_VERSION, TX_RECORD_SCHEMA_VERSION,
 };
-use catos_system::phase3::{exit_code_for, Phase3Outcome};
+use catos_system::recovery::{exit_code_for, Phase3Outcome};
 use catos_system::shared::snapshot_engine::engine::{Engine, EngineOptions};
 use catos_system::shared::snapshot_engine::lock::{lock_file_path, TransactionLock};
 use catos_system::shared::snapshot_engine::state::{reconcile_with_disk_facts, resume_checkpoint};
