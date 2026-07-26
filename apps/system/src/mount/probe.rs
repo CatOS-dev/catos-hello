@@ -19,6 +19,7 @@ use crate::model::storage::{
 };
 use crate::mount::plan::build_probe_plan;
 use crate::mount::session::{Session, SESSION_ROOT_PARENT};
+use crate::parse::fstab::parse_all_with_diagnostics;
 use crate::probe::candidate::identify_candidates;
 use crate::probe::capability::ProcCaps;
 use crate::probe::fs_probe::{FilesystemProbe, RealFilesystem};
@@ -267,9 +268,22 @@ fn probe_simple(device: &BlockDevice, fstab: &[FstabEntry], report: &mut ProbeCa
         }
     };
 
+    let candidate_fstab = RealFilesystem
+        .rooted_read_to_string(&snapshot.target_root, Path::new("etc/fstab"))
+        .map(|body| parse_all_with_diagnostics(&body).0)
+        .unwrap_or_default();
     let mut mounted = device.clone();
     mounted.mount_point = Some(snapshot.target_root.clone());
     mounted.mounted_before_session = false;
+    // Prefer the candidate's own fstab when it is available. This lets
+    // root confidence require that the filesystem we mounted is the
+    // source of that target's `/` entry, rather than treating any
+    // unmounted ext4 data partition as a possible system root.
+    let fstab = if candidate_fstab.is_empty() {
+        fstab
+    } else {
+        &candidate_fstab
+    };
     let (mut roots, mut esps, _, warnings) = identify_candidates(&[mounted], fstab);
     for candidate in &mut roots {
         candidate.mounted_at = None;
