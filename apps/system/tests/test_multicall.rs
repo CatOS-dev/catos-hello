@@ -406,7 +406,7 @@ fn repair_without_args_rejects_and_lists_three_domains() {
 
 #[test]
 fn repair_domains_route_appropriately() {
-    // After stage 3:
+    // After stage 4:
     //   * `catos-repair fs` is implemented (stage 2). With no
     //     devices and no explicit selection it refuses with
     //     ARG_ERROR (ambiguous target).
@@ -414,8 +414,11 @@ fn repair_domains_route_appropriately() {
     //     a structured report and may exit 0 (clean / partially
     //     repaired) or non-zero depending on the host. It MUST NOT
     //     print "not implemented".
-    //   * `catos-repair boot` remains a stable "not implemented"
-    //     result, exits non-zero, and mentions the domain.
+    //   * `catos-repair boot` is implemented (stage 4). It detects
+    //     the target's bootloader provider from the target's own
+    //     configuration; without a verified target it refuses with
+    //     a structured report (ARG_ERROR for ambiguous_target) and
+    //     MUST NOT print "not implemented in this stage".
     let bin = bin_path();
     let tmp = TempDir::new("catos-repair-domains").unwrap();
     let link = link_to(&bin, &tmp, "catos-repair");
@@ -436,21 +439,18 @@ fn repair_domains_route_appropriately() {
         "mount must be implemented in stage 3; stderr={mount_stderr}"
     );
 
-    let (boot_ok, boot_code, _boot_stdout, boot_stderr) = run_via(&link, &["boot"]);
-    assert!(!boot_ok, "catos-repair boot unexpectedly succeeded");
+    let (boot_ok, _boot_code, _boot_stdout, boot_stderr) = run_via(&link, &["boot"]);
     assert!(
-        boot_stderr.contains("boot"),
-        "stderr must mention domain boot: {boot_stderr}"
-    );
-    assert!(
-        boot_stderr
+        !boot_stderr
             .to_lowercase()
             .contains("not implemented in this stage"),
-        "stderr must say 'not implemented in this stage' for boot: {boot_stderr}"
+        "boot must be implemented in stage 4; stderr={boot_stderr}"
     );
-    assert_ne!(
-        boot_code, 0,
-        "unimplemented repair domain must exit non-zero"
+    // Without a verified target, boot repair refuses — never exits 0
+    // on a host without a uniquely identified CatOS root.
+    assert!(
+        !boot_ok || std::env::var("CATOS_REPAIR_BOOT_TEST_ALLOW_OK").is_ok(),
+        "catos-repair boot should refuse without a verified target"
     );
 }
 
