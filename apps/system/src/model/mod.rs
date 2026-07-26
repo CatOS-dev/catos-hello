@@ -2,6 +2,7 @@
 
 pub mod boot_repair;
 pub mod capability;
+pub mod doctor;
 pub mod evidence;
 pub mod fstab;
 pub mod inspection;
