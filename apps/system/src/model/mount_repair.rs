@@ -638,10 +638,18 @@ pub struct MountRepairReport {
 }
 
 impl MountRepairReport {
-    /// Convenience constructor for a refusal report.
+    /// Convenience constructor for a refusal-style report. Accepts
+    /// both true refusals (e.g. `AmbiguousTarget`) and
+    /// execution-failure outcomes the orchestrator surfaces through
+    /// the same shape (e.g. `DeviceChanged` when the shared
+    /// device lock cannot be acquired).
     pub fn refused(outcome: MountRepairOutcome, reason: &str) -> Self {
         debug_assert!(
-            outcome.is_refusal() || matches!(outcome, MountRepairOutcome::Unknown),
+            outcome.is_refusal()
+                || matches!(
+                    outcome,
+                    MountRepairOutcome::Unknown | MountRepairOutcome::DeviceChanged
+                ),
             "refused() called with non-refusal outcome {outcome:?}"
         );
         Self {
