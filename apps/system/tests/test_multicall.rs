@@ -210,9 +210,27 @@ fn doctor_without_arguments_outputs_diagnosis() {
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8(output.stdout).unwrap();
-    assert!(stdout.contains("Runtime"));
-    assert!(stdout.contains("Capabilities"));
-    assert!(stdout.contains("Target"));
+    // Stage-5 Doctor now produces an aggregated report whose
+    // canonical sections are Environment, Storage, Filesystem, Mount,
+    // Boot, Secure Boot, Recovery. The previous phase-1-only
+    // "Runtime / Capabilities / Target" headings are intentionally
+    // gone.
+    assert!(stdout.contains("CatOS Doctor"));
+    assert!(stdout.contains("Overall status"));
+    for section in [
+        "Environment",
+        "Storage",
+        "Filesystem",
+        "Mount layout",
+        "Boot",
+        "Secure Boot",
+        "Recovery",
+    ] {
+        assert!(
+            stdout.contains(section),
+            "doctor output missing section {section:?}: {stdout}"
+        );
+    }
 }
 
 #[test]
@@ -571,16 +589,26 @@ fn update_does_not_inherit_catos_system_commands() {
 
 #[test]
 fn doctor_remains_argumentless_after_routing_changes() {
-    // Pins the existing doctor contract so the routing refactor does
-    // not regress it. Doctor runs the diagnosis with no args; any
-    // functional argument is rejected with ARG_ERROR (2).
+    // Pins the doctor contract so future refactors do not regress it.
+    // Doctor runs the diagnosis with no args; any functional argument
+    // is rejected with ARG_ERROR (2). Stage-5 Doctor emits an
+    // aggregated report whose canonical sections include Environment,
+    // Storage, Filesystem, Mount layout, Boot, Secure Boot, Recovery.
     let bin = bin_path();
     let tmp = TempDir::new("catos-doctor-routing-regression").unwrap();
     let link = link_to(&bin, &tmp, "catos-doctor");
     let (ok_no_args, code_no_args, stdout, _) = run_via(&link, &[]);
     assert!(ok_no_args);
     assert_eq!(code_no_args, 0);
-    for section in ["Runtime", "Capabilities", "Target"] {
+    for section in [
+        "Environment",
+        "Storage",
+        "Filesystem",
+        "Mount layout",
+        "Boot",
+        "Secure Boot",
+        "Recovery",
+    ] {
         assert!(
             stdout.contains(section),
             "doctor output missing {section}: {stdout}"
@@ -596,6 +624,9 @@ fn doctor_remains_argumentless_after_routing_changes() {
         "boot",
         "check",
         "apply",
+        "--json",
+        "--root-device",
+        "/dev/sda1",
     ] {
         let (ok, code, _stdout, _stderr) = run_via(&link, &[forbidden]);
         assert!(!ok, "catos-doctor {forbidden} unexpectedly succeeded");
