@@ -219,7 +219,8 @@ fn auto_select_catos_root(
                     .iter()
                     .any(|evidence| evidence.code == "FSTAB_ROOT_MATCH")
         })
-        .filter_map(|root| PathBuf::from(&root.source).is_absolute().then(|| &root.source))
+        .filter(|root| PathBuf::from(&root.source).is_absolute())
+        .map(|root| &root.source)
         .filter_map(|source| {
             devices.iter().find(|device| {
                 device.dev_path.as_deref() == Some(Path::new(source))
