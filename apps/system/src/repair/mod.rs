@@ -57,6 +57,13 @@ pub use runner::{
     CommandRunner, RecordedInvocation, RecordedRunner, RepairInvocation, RepairRunnerError,
     TrustedRunner,
 };
-pub use runners::{btrfs_flow, e2fsck_flow, f2fs_flow, fat_flow, supports_filesystem, xfs_flow};
+pub use runners::{
+    btrfs_check_only, check_only_for, e2fsck_check_only, f2fs_check_only, fat_check_only,
+    xfs_check_only, ReadonlyOutcome, ReadonlyResult,
+};
+pub use runners::{
+    btrfs_flow, btrfs_topology, e2fsck_flow, f2fs_flow, fat_flow, supports_filesystem, xfs_flow,
+    BtrfsTopology, FlowOutcome,
+};
 pub use safety::{SafetyDecision, SafetyVerdict};
 pub use verify::VerificationOutcome;

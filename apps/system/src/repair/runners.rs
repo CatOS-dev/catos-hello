@@ -699,6 +699,300 @@ pub fn decode_btrfs_exit(result: &ToolResult) -> ExitInterpretation {
 }
 
 // ---------------------------------------------------------------------------
+// Read-only diagnosis flows (Doctor surface)
+// ---------------------------------------------------------------------------
+//
+// These functions are the read-only twins of the repair flows above.
+// They invoke the SAME trusted binaries with the SAME exit-code
+// interpreters, but pass the documented read-only flag (`-n`,
+// `--readonly`) so the tool is contractually forbidden from writing.
+//
+// Doctor calls these. The repair orchestrator calls the repair flows.
+// Both surfaces share the exact same exit-code interpretation table,
+// so a Doctor report and a `catos-repair` attempt cannot disagree on
+// what a given exit code means.
+//
+// The flows deliberately return a richer outcome type than the repair
+// flow's `FlowOutcome`: Doctor needs to distinguish "clean" from
+// "corruption detected even though exit code is 0" (the Btrfs DUP
+// mirror recovery case), and to surface "tool missing" so the
+// surrounding section can emit `FS_TOOL_MISSING` rather than
+// `FS_CHECK_FAILED`.
+
+/// Outcome of a read-only filesystem check.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReadonlyOutcome {
+    /// Filesystem verified clean. No write occurred.
+    Clean,
+    /// Filesystem has detectable corruption. The Doctor caller
+    /// surfaces `FS_CORRUPTION_DETECTED`.
+    CorruptionDetected,
+    /// The required fsck binary is not installed on the host.
+    /// Corruption status is unknown.
+    ToolMissing,
+    /// The tool timed out. Corruption status is unknown.
+    TimedOut,
+    /// The tool ran but its result was ambiguous. Corruption status
+    /// is unknown.
+    Ambiguous,
+}
+
+/// Result of running a read-only check flow.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReadonlyResult {
+    pub outcome: ReadonlyOutcome,
+    /// Recorded invocation, suitable for the Doctor evidence trail.
+    pub argv: Vec<String>,
+    /// Tool name, e.g. `e2fsck`, for the evidence trail.
+    pub tool: &'static str,
+    /// Captured stdout (truncated by the runner's safety limit).
+    pub stdout: Vec<u8>,
+    /// Captured stderr (truncated).
+    pub stderr: Vec<u8>,
+    /// Raw exit code; `-1` when the binary was missing or the call
+    /// timed out.
+    pub exit_code: i32,
+    /// `true` when stdout/stderr were truncated by the runner's cap.
+    pub stdout_truncated: bool,
+    pub stderr_truncated: bool,
+    /// Stable label derived from the exit-code interpreter, when the
+    /// tool ran at all.
+    pub label: Option<String>,
+}
+
+impl ReadonlyResult {
+    /// `true` iff the read-only check completed cleanly.
+    pub fn is_clean(&self) -> bool {
+        matches!(self.outcome, ReadonlyOutcome::Clean)
+    }
+}
+
+/// `e2fsck -n DEVICE` — read-only check. Verified against e2fsck(8):
+/// `-n` opens the filesystem read-only and assumes 'no' to every
+/// repair prompt. The tool never writes.
+pub fn e2fsck_check_only<R: CommandRunner + ?Sized>(
+    runner: &R,
+    device: &str,
+) -> Result<ReadonlyResult, crate::repair::runner::RepairRunnerError> {
+    let invocation = RepairInvocation::new(
+        RepairTool::E2fsck.binary_name(),
+        vec!["-n".into(), "-C".into(), "0".into(), device.into()],
+    );
+    let result = runner.invoke(&invocation)?;
+    let interp = decode_e2fsck_exit(&result);
+    let outcome = decide_e2fsck_readonly_outcome(&result);
+    Ok(ReadonlyResult {
+        outcome,
+        argv: invocation.argv,
+        tool: RepairTool::E2fsck.binary_name(),
+        stdout: result.stdout,
+        stderr: result.stderr,
+        exit_code: result.exit_code,
+        stdout_truncated: result.stdout_truncated,
+        stderr_truncated: result.stderr_truncated,
+        label: interp.label,
+    })
+}
+
+fn decide_e2fsck_readonly_outcome(result: &ToolResult) -> ReadonlyOutcome {
+    if result.binary_missing {
+        return ReadonlyOutcome::ToolMissing;
+    }
+    if result.timed_out {
+        return ReadonlyOutcome::TimedOut;
+    }
+    let code = result.exit_code;
+    if code == 0 {
+        return ReadonlyOutcome::Clean;
+    }
+    if (code & 0x04) != 0 {
+        // Bit 2 = errors left uncorrected. Under `-n` the tool did
+        // not attempt to correct them, so their presence means
+        // corruption was detected.
+        return ReadonlyOutcome::CorruptionDetected;
+    }
+    if (code & 0x01) != 0 || (code & 0x02) != 0 {
+        // Exit 1 / 2 under `-n`: the tool would have corrected
+        // errors in write mode. Read-only it observed them, so this
+        // is detected corruption.
+        return ReadonlyOutcome::CorruptionDetected;
+    }
+    // Operational / usage / shared-lib errors: ambiguous.
+    ReadonlyOutcome::Ambiguous
+}
+
+/// `fsck.fat -n DEVICE` — read-only check. Verified against
+/// fsck.fat(8): `-n` is the documented "perform no modifications"
+/// mode. The tool performs a read-only pass and reports what it
+/// would have done.
+pub fn fat_check_only<R: CommandRunner + ?Sized>(
+    runner: &R,
+    device: &str,
+) -> Result<ReadonlyResult, crate::repair::runner::RepairRunnerError> {
+    let invocation = RepairInvocation::new(
+        RepairTool::FsckFat.binary_name(),
+        vec!["-n".into(), device.into()],
+    );
+    let result = runner.invoke(&invocation)?;
+    let interp = decode_fat_exit(&result);
+    let outcome = if result.binary_missing {
+        ReadonlyOutcome::ToolMissing
+    } else if result.timed_out {
+        ReadonlyOutcome::TimedOut
+    } else if result.exit_code == 0 {
+        ReadonlyOutcome::Clean
+    } else if result.exit_code == 1 {
+        // Exit 1 under `-n` means "recoverable errors found, not
+        // applied". This is detected corruption from Doctor's
+        // perspective.
+        ReadonlyOutcome::CorruptionDetected
+    } else {
+        ReadonlyOutcome::Ambiguous
+    };
+    Ok(ReadonlyResult {
+        outcome,
+        argv: invocation.argv,
+        tool: RepairTool::FsckFat.binary_name(),
+        stdout: result.stdout,
+        stderr: result.stderr,
+        exit_code: result.exit_code,
+        stdout_truncated: result.stdout_truncated,
+        stderr_truncated: result.stderr_truncated,
+        label: interp.label,
+    })
+}
+
+/// `fsck.f2fs --dry-run DEVICE` — read-only check. Verified against
+/// f2fs-tools: `--dry-run` performs a read-only verification pass.
+/// We do NOT pass `-a`/`-f`/`-y`; none of those are read-only.
+pub fn f2fs_check_only<R: CommandRunner + ?Sized>(
+    runner: &R,
+    device: &str,
+) -> Result<ReadonlyResult, crate::repair::runner::RepairRunnerError> {
+    let invocation = RepairInvocation::new(
+        RepairTool::FsckF2fs.binary_name(),
+        vec!["--dry-run".into(), device.into()],
+    );
+    let result = runner.invoke(&invocation)?;
+    // f2fs reuses the e2fsck bitmask table for the read-only result
+    // (a confirmed bug or correction surfaces as the same bits).
+    let interp = decode_f2fs_exit(&result);
+    let outcome = decide_e2fsck_readonly_outcome(&result);
+    Ok(ReadonlyResult {
+        outcome,
+        argv: invocation.argv,
+        tool: RepairTool::FsckF2fs.binary_name(),
+        stdout: result.stdout,
+        stderr: result.stderr,
+        exit_code: result.exit_code,
+        stdout_truncated: result.stdout_truncated,
+        stderr_truncated: result.stderr_truncated,
+        label: interp.label,
+    })
+}
+
+/// `xfs_repair -n DEVICE` — read-only check. Verified against
+/// xfs_repair(8): `-n` is the documented "no-op mode" which only
+/// prints what would be done.
+pub fn xfs_check_only<R: CommandRunner + ?Sized>(
+    runner: &R,
+    device: &str,
+) -> Result<ReadonlyResult, crate::repair::runner::RepairRunnerError> {
+    let invocation = RepairInvocation::new(
+        RepairTool::XfsRepair.binary_name(),
+        vec!["-n".into(), device.into()],
+    );
+    let result = runner.invoke(&invocation)?;
+    let interp = decode_xfs_exit(&result, false);
+    let outcome = if result.binary_missing {
+        ReadonlyOutcome::ToolMissing
+    } else if result.timed_out {
+        ReadonlyOutcome::TimedOut
+    } else if result.exit_code == 0 {
+        ReadonlyOutcome::Clean
+    } else {
+        // xfs_repair -n is purely diagnostic; any non-zero exit is
+        // detected corruption.
+        ReadonlyOutcome::CorruptionDetected
+    };
+    Ok(ReadonlyResult {
+        outcome,
+        argv: invocation.argv,
+        tool: RepairTool::XfsRepair.binary_name(),
+        stdout: result.stdout,
+        stderr: result.stderr,
+        exit_code: result.exit_code,
+        stdout_truncated: result.stdout_truncated,
+        stderr_truncated: result.stderr_truncated,
+        label: interp.label,
+    })
+}
+
+/// `btrfs check --readonly DEVICE` — read-only structural check.
+/// Verified against btrfs-check(8): `--readonly` runs the check in
+/// read-only mode and is the canonical non-mutating invocation.
+///
+/// This is the SAME first step `btrfs_flow` runs in repair mode; the
+/// difference is Doctor stops here. It never escalates to `--repair`.
+pub fn btrfs_check_only<R: CommandRunner + ?Sized>(
+    runner: &R,
+    device: &str,
+) -> Result<ReadonlyResult, crate::repair::runner::RepairRunnerError> {
+    let invocation = RepairInvocation::new(
+        RepairTool::BtrfsCheck.binary_name(),
+        vec!["check".into(), "--readonly".into(), device.into()],
+    );
+    let result = runner.invoke(&invocation)?;
+    let checksum_failed = btrfs_reports_metadata_checksum_failure(&result);
+    let mut interp = decode_btrfs_exit(&result);
+    if checksum_failed {
+        interp.clean = false;
+        interp.errors_uncorrected = true;
+        interp.label = Some("btrfs-metadata-checksum-failure".into());
+    }
+    let outcome = if result.binary_missing {
+        ReadonlyOutcome::ToolMissing
+    } else if result.timed_out {
+        ReadonlyOutcome::TimedOut
+    } else if result.exit_code == 0 && !checksum_failed {
+        ReadonlyOutcome::Clean
+    } else if checksum_failed || result.exit_code != 0 {
+        ReadonlyOutcome::CorruptionDetected
+    } else {
+        ReadonlyOutcome::Ambiguous
+    };
+    Ok(ReadonlyResult {
+        outcome,
+        argv: invocation.argv,
+        tool: RepairTool::BtrfsCheck.binary_name(),
+        stdout: result.stdout,
+        stderr: result.stderr,
+        exit_code: result.exit_code,
+        stdout_truncated: result.stdout_truncated,
+        stderr_truncated: result.stderr_truncated,
+        label: interp.label,
+    })
+}
+
+/// Dispatch a read-only check by filesystem type. Centralises the
+/// fstype → tool routing so Doctor and any future read-only caller
+/// cannot diverge from `supports_filesystem`.
+pub fn check_only_for<R: CommandRunner + ?Sized>(
+    fstype: &str,
+    runner: &R,
+    device: &str,
+) -> Result<Option<ReadonlyResult>, crate::repair::runner::RepairRunnerError> {
+    Ok(match supports_filesystem(fstype) {
+        Some(RepairTool::E2fsck) => Some(e2fsck_check_only(runner, device)?),
+        Some(RepairTool::FsckFat) => Some(fat_check_only(runner, device)?),
+        Some(RepairTool::FsckF2fs) => Some(f2fs_check_only(runner, device)?),
+        Some(RepairTool::XfsRepair) => Some(xfs_check_only(runner, device)?),
+        Some(RepairTool::BtrfsCheck) => Some(btrfs_check_only(runner, device)?),
+        None => None,
+    })
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -1082,6 +1376,158 @@ mod tests {
         assert_eq!(
             btrfs_flow(&runner, "/dev/sda1").unwrap().outcome,
             FlowOutcome::ToolMissing
+        );
+    }
+
+    // ---------------- read-only flows (Doctor surface) ----------------
+
+    #[test]
+    fn e2fsck_readonly_clean_exit_is_clean() {
+        let runner = RecordedRunner::new().queue_raw(0, b"clean".to_vec(), b"".to_vec());
+        let r = e2fsck_check_only(&runner, "/dev/sda1").unwrap();
+        assert_eq!(r.outcome, ReadonlyOutcome::Clean);
+        assert!(r.is_clean());
+        assert_eq!(r.argv, vec!["-n", "-C", "0", "/dev/sda1"]);
+    }
+
+    #[test]
+    fn e2fsck_readonly_exit_1_is_corruption_detected() {
+        // Exit 1 under `-n` = "would have corrected errors". Doctor
+        // surfaces this as corruption.
+        let runner = RecordedRunner::new().queue_raw(1, b"".to_vec(), b"".to_vec());
+        let r = e2fsck_check_only(&runner, "/dev/sda1").unwrap();
+        assert_eq!(r.outcome, ReadonlyOutcome::CorruptionDetected);
+    }
+
+    #[test]
+    fn e2fsck_readonly_exit_4_is_corruption_detected() {
+        // Bit 2 = uncorrected errors. Under `-n` this is observed
+        // corruption.
+        let runner = RecordedRunner::new().queue_raw(4, b"".to_vec(), b"".to_vec());
+        let r = e2fsck_check_only(&runner, "/dev/sda1").unwrap();
+        assert_eq!(r.outcome, ReadonlyOutcome::CorruptionDetected);
+    }
+
+    #[test]
+    fn e2fsck_readonly_never_uses_y_flag() {
+        let runner = RecordedRunner::new().queue_raw(0, b"".to_vec(), b"".to_vec());
+        let _ = e2fsck_check_only(&runner, "/dev/sda1").unwrap();
+        assert!(!runner.any_invocation_with_flag("-y"));
+        assert!(runner.any_invocation_with_flag("-n"));
+    }
+
+    #[test]
+    fn fat_readonly_clean_exit_is_clean() {
+        let runner = RecordedRunner::new().queue_raw(0, b"".to_vec(), b"".to_vec());
+        let r = fat_check_only(&runner, "/dev/sda1").unwrap();
+        assert_eq!(r.outcome, ReadonlyOutcome::Clean);
+        assert_eq!(r.argv, vec!["-n", "/dev/sda1"]);
+    }
+
+    #[test]
+    fn fat_readonly_exit_1_is_corruption_detected() {
+        let runner = RecordedRunner::new().queue_raw(1, b"".to_vec(), b"".to_vec());
+        let r = fat_check_only(&runner, "/dev/sda1").unwrap();
+        assert_eq!(r.outcome, ReadonlyOutcome::CorruptionDetected);
+    }
+
+    #[test]
+    fn fat_readonly_never_uses_a_flag() {
+        let runner = RecordedRunner::new().queue_raw(0, b"".to_vec(), b"".to_vec());
+        let _ = fat_check_only(&runner, "/dev/sda1").unwrap();
+        assert!(!runner.any_invocation_with_flag("-a"));
+        assert!(runner.any_invocation_with_flag("-n"));
+    }
+
+    #[test]
+    fn f2fs_readonly_uses_dry_run_not_a() {
+        let runner = RecordedRunner::new().queue_raw(0, b"".to_vec(), b"".to_vec());
+        let _ = f2fs_check_only(&runner, "/dev/sda1").unwrap();
+        assert!(runner.any_invocation_with_flag("--dry-run"));
+        assert!(!runner.any_invocation_with_flag("-a"));
+        assert!(!runner.any_invocation_with_flag("-y"));
+    }
+
+    #[test]
+    fn xfs_readonly_uses_n_flag_not_bare() {
+        let runner = RecordedRunner::new().queue_raw(0, b"".to_vec(), b"".to_vec());
+        let r = xfs_check_only(&runner, "/dev/sda1").unwrap();
+        assert_eq!(r.outcome, ReadonlyOutcome::Clean);
+        assert_eq!(r.argv, vec!["-n", "/dev/sda1"]);
+    }
+
+    #[test]
+    fn xfs_readonly_nonzero_is_corruption_detected() {
+        let runner = RecordedRunner::new().queue_raw(1, b"".to_vec(), b"".to_vec());
+        let r = xfs_check_only(&runner, "/dev/sda1").unwrap();
+        assert_eq!(r.outcome, ReadonlyOutcome::CorruptionDetected);
+    }
+
+    #[test]
+    fn xfs_readonly_never_uses_l_flag() {
+        let runner = RecordedRunner::new().queue_raw(2, b"".to_vec(), b"".to_vec());
+        let _ = xfs_check_only(&runner, "/dev/sda1").unwrap();
+        assert!(!runner.any_invocation_with_flag("-L"));
+    }
+
+    #[test]
+    fn btrfs_readonly_clean_exit_is_clean() {
+        let runner = RecordedRunner::new().queue_raw(0, b"".to_vec(), b"".to_vec());
+        let r = btrfs_check_only(&runner, "/dev/sda1").unwrap();
+        assert_eq!(r.outcome, ReadonlyOutcome::Clean);
+        assert_eq!(r.argv, vec!["check", "--readonly", "/dev/sda1"]);
+    }
+
+    #[test]
+    fn btrfs_readonly_never_uses_repair_flag() {
+        let runner = RecordedRunner::new().queue_raw(1, b"errors".to_vec(), b"".to_vec());
+        let _ = btrfs_check_only(&runner, "/dev/sda1").unwrap();
+        assert!(!runner.any_invocation_with_flag("--repair"));
+        assert!(runner.any_invocation_with_flag("--readonly"));
+    }
+
+    #[test]
+    fn btrfs_readonly_checksum_diagnostic_is_corruption_even_with_exit_zero() {
+        // Mirrors the repair-flow contract: a 0 exit + checksum verify
+        // failed diagnostic is corruption, not clean.
+        let runner = RecordedRunner::new().queue_raw(
+            0,
+            b"checksum verify failed on 30605312 wanted 0x1 found 0x2".to_vec(),
+            b"".to_vec(),
+        );
+        let r = btrfs_check_only(&runner, "/dev/sda1").unwrap();
+        assert_eq!(r.outcome, ReadonlyOutcome::CorruptionDetected);
+        assert!(!r.is_clean());
+        assert_eq!(r.label.as_deref(), Some("btrfs-metadata-checksum-failure"));
+    }
+
+    #[test]
+    fn check_only_for_dispatches_by_fstype() {
+        let runner = RecordedRunner::new().queue_raw(0, b"".to_vec(), b"".to_vec());
+        assert!(check_only_for("ext4", &runner, "/dev/sda1")
+            .unwrap()
+            .is_some());
+        let runner = RecordedRunner::new().queue_raw(0, b"".to_vec(), b"".to_vec());
+        assert!(check_only_for("btrfs", &runner, "/dev/sda1")
+            .unwrap()
+            .is_some());
+        let runner = RecordedRunner::new().queue_raw(0, b"".to_vec(), b"".to_vec());
+        assert!(check_only_for("ntfs", &runner, "/dev/sda1")
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn readonly_flows_report_tool_missing() {
+        let runner = RecordedRunner::new().queue(ToolResult::binary_missing());
+        assert_eq!(
+            e2fsck_check_only(&runner, "/dev/sda1").unwrap().outcome,
+            ReadonlyOutcome::ToolMissing
+        );
+        let runner = RecordedRunner::new().queue(ToolResult::binary_missing());
+        assert_eq!(
+            btrfs_check_only(&runner, "/dev/sda1").unwrap().outcome,
+            ReadonlyOutcome::ToolMissing
         );
     }
 }
