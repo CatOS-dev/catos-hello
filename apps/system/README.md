@@ -408,16 +408,20 @@ The following surfaces are wired into CTest when `-DBUILD_TESTS=ON`:
 | `catos-system-initramfs-smoke-with-marker` | Runtime detection failing to identify a mkinitcpio-style initramfs containing `/etc/initrd-release`. |
 | `catos-system-storage-qemu-smoke` | A real writable ext4 root, FAT ESP, and Btrfs `@`/snapshot image: discovery, explicit planning, mount-inspect-cleanup, snapshot exclusion, session cleanup, and byte-for-byte no-write verification. |
 | `catos-system-recovery-qemu-smoke` | Authoritative real-Btrfs acceptance in QEMU. Exercises the happy path, all three fault windows, resume reconciliation, Completed revert including the reverse-swap crash window, non-default source identity, guest-side data/backup/readonly assertions, nested-layout refusal, external-ESP refusal, and byte-for-byte ESP no-write verification. Once QEMU starts, skipped assertions are hard failures. |
+| `catos-system-repair-qemu-smoke` | Stage-2 real-filesystem repair acceptance in QEMU. Builds corrupt ext4, vfat, btrfs (and xfs when xfsprogs is present) images, boots the static binary, and verifies each filesystem routes to the correct official fsck tool, the corruption is repaired, the high-risk xfs `-L` fallback fires on a dirty-log image and is flagged `repaired_with_risk`, the btrfs read-only → `--repair` → read-only recheck sequence runs end-to-end, and no residual session mounts remain under `/run/catos-system/sessions`. |
 
 The two minimal initramfs tests are opt-in through
 `-DCATOS_SYSTEM_INITRAMFS_SMOKE=ON`. The real storage test is enabled with
 `-DCATOS_SYSTEM_STORAGE_SMOKE=ON`. The phase-3 recovery crash/resume
 test is enabled with `-DCATOS_SYSTEM_RECOVERY_SMOKE=ON` and additionally
 requires `mkfs.btrfs`, `mkfs.vfat`, `mtools` (`mmd`, `mcopy`), `cpio`,
-`gzip`, `zstd`, and `modinfo`. All three smoke tests require
-`qemu-system-x86_64`, a kernel image, and static `busybox`; they use KVM
-when available, otherwise TCG, and skip with exit code 77 when
-prerequisites are missing.
+`gzip`, `zstd`, and `modinfo`. The stage-2 repair test is enabled with
+`-DCATOS_SYSTEM_REPAIR_SMOKE=ON` and additionally requires `mkfs.ext4`,
+`mkfs.vfat`, `mkfs.btrfs`, `e2fsck`, `fsck.fat`, `btrfs`, `debugfs`, and
+(optionally) `mkfs.xfs` + `xfs_repair` to exercise the xfs paths. All
+four smoke tests require `qemu-system-x86_64`, a kernel image, and
+static `busybox`; they use KVM when available, otherwise TCG, and skip
+with exit code 77 when prerequisites are missing.
 
 Run them:
 
@@ -433,7 +437,8 @@ To explicitly run all QEMU smoke tests:
 cmake -S . -B build -DBUILD_TESTS=ON \
   -DCATOS_SYSTEM_INITRAMFS_SMOKE=ON \
   -DCATOS_SYSTEM_STORAGE_SMOKE=ON \
-  -DCATOS_SYSTEM_RECOVERY_SMOKE=ON
+  -DCATOS_SYSTEM_RECOVERY_SMOKE=ON \
+  -DCATOS_SYSTEM_REPAIR_SMOKE=ON
 ( cd build && ctest -L qemu --output-on-failure )
 ```
 

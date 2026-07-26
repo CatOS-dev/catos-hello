@@ -135,6 +135,9 @@ if(BUILD_TESTS)
     option(CATOS_SYSTEM_RECOVERY_SMOKE
            "Enable real btrfs recovery crash/resume QEMU test (opt-in; requires a musl binary built with --features recovery_fault_injection)"
            OFF)
+    option(CATOS_SYSTEM_REPAIR_SMOKE
+           "Enable real ext4+vfat+btrfs+xfs repair QEMU test (opt-in; needs qemu + kernel + busybox + mkfs/e2fsck tools)"
+           OFF)
     if(CATOS_SYSTEM_INITRAMFS_SMOKE)
         # Two test variants:
         #   * bare:         no initramfs markers; verifies binary starts
@@ -220,6 +223,32 @@ if(BUILD_TESTS)
             TIMEOUT 1800
             SKIP_RETURN_CODE 77
             LABELS "rust;integration;qemu;recovery"
+        )
+    endif()
+    if(CATOS_SYSTEM_REPAIR_SMOKE)
+        # Stage-2 real-filesystem repair smoke test. Builds corrupt
+        # ext4/vfat/btrfs images (and xfs when xfsprogs is present),
+        # boots the static binary in QEMU, and asserts:
+        #   * each fstype routes to the correct tool;
+        #   * ext4 e2fsck repairs the corruption;
+        #   * vfat fsck.fat repairs the corruption;
+        #   * btrfs check --readonly -> --repair -> --readonly sequence;
+        #   * xfs normal repair on a clean image (no -L fallback);
+        #   * xfs -L fallback on a dirty-log image, flagged as
+        #     RepairedWithRisk;
+        #   * no residual session mounts under /run/catos-system.
+        # Skips with exit 77 when qemu/kernel/busybox/mkfs tools are
+        # missing.
+        add_test(
+            NAME catos-system-repair-qemu-smoke
+            COMMAND "${BASH_CMD}"
+                    "${CMAKE_CURRENT_SOURCE_DIR}/scripts/repair-qemu-smoke.sh"
+                    --bin "${CATOS_SYSTEM_BIN}"
+        )
+        set_tests_properties(catos-system-repair-qemu-smoke PROPERTIES
+            TIMEOUT 600
+            SKIP_RETURN_CODE 77
+            LABELS "rust;integration;qemu;repair"
         )
     endif()
 endif()
