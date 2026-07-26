@@ -146,13 +146,7 @@ pub fn run(invocation: Invocation, argv: &[String]) -> i32 {
 /// `catos-update` never reach the generic `catos-system` parser.
 fn invocation_dispatch(invocation: Invocation, argv: &[String]) -> i32 {
     match invocation {
-        Invocation::CatosDoctor => {
-            // Empty argv (the only shape that escapes the strict doctor
-            // contract above) runs the full diagnosis. Internally the
-            // generic parser is fed `inspect` so the existing phase-1
-            // orchestrator produces the report.
-            run_via_full_parser(invocation, &["inspect".to_string()])
-        }
+        Invocation::CatosDoctor => run_doctor(),
         Invocation::CatosRepair => run_repair(argv),
         Invocation::CatosUpdate => run_update(argv),
         Invocation::CatosRecovery => {
@@ -171,6 +165,28 @@ fn invocation_dispatch(invocation: Invocation, argv: &[String]) -> i32 {
         }
         Invocation::CatosSystem => run_via_full_parser(invocation, argv),
     }
+}
+
+/// Run the aggregated Doctor diagnosis and render the report. Per
+/// scheme B, the process exit code is `0` whenever Doctor produced a
+/// report — even if every section found a problem — and non-zero only
+/// when Doctor itself failed (broken invariant, namespace failure for
+/// a required offline probe, ...).
+fn run_doctor() -> i32 {
+    use std::io::Write;
+
+    let report = crate::doctor::run_doctor();
+    let exit = crate::output::doctor_exit_code_for(&report);
+    let mut out = std::io::stdout();
+    if let Err(e) = crate::output::render_doctor_human(&report, &mut out) {
+        eprintln!("catos-doctor: {e}");
+        return e.exit_code();
+    }
+    if let Err(e) = out.flush() {
+        eprintln!("catos-doctor: stdout write failed: {e}");
+        return crate::error::exit_code::PROBE_FAILED;
+    }
+    exit
 }
 
 /// Drive the canonical `catos-system` parser + phase orchestrators.
@@ -752,7 +768,7 @@ fn print_help(invocation: Invocation) -> i32 {
     match invocation {
         Invocation::CatosDoctor => {
             print!(
-                "catos-doctor {version} - CatOS diagnosis\n\nUSAGE:\n    catos-doctor\n\nOPTIONS:\n    -h, --help    Show this help message and exit.\n    -V, --version Print program version and exit.\n\nNOTES:\n    * catos-doctor takes no functional arguments. The full\n      diagnosis is printed with no args.\n    * catos-doctor has no `inspect` or `preflight` subcommands.\n",
+                "catos-doctor {version} - CatOS aggregated diagnosis\n\nUSAGE:\n    catos-doctor\n\nOPTIONS:\n    -h, --help    Show this help message and exit.\n    -V, --version Print program version and exit.\n\nDIAGNOSTIC SECTIONS:\n    environment   Runtime facts and primary mode.\n    storage       Block devices and target identity.\n    filesystem    Read-only fsck check (e2fsck -n, xfs_repair -n,\n                  btrfs check --readonly, fsck.fat -n).\n    mount         fstab, root source, standard subvolumes, ESP,\n                  and the six /boot/ESP layouts.\n    boot          Bootloader provider detection (GRUB, Limine,\n                  systemd-boot, UKI, EFI Stub) from target evidence.\n    secure_boot   Firmware runtime + target policy consistency.\n    recovery      Btrfs snapshot transaction state.\n\nEXIT CODES (scheme B):\n    0   Doctor completed the diagnosis and produced a report,\n        regardless of whether the target is healthy.\n    !=0 Doctor itself could not complete the diagnosis.\n\nNOTES:\n    * catos-doctor takes no functional arguments. There is no\n      `inspect`, `preflight`, `--root-device`, or `--json` form.\n    * catos-doctor is read-only. It never invokes a repair flow;\n      the only resources it may clean up are mounts it created\n      itself inside its private mount namespace.\n",
             );
         }
         Invocation::CatosRepair => {
