@@ -178,6 +178,7 @@ pub fn verify_with<R: RepairRunnerProbe>(
     // (e.g. we asked for ext4 but the kernel mounted it as ext3).
     let observed_fstype = runner.read_fstype_at(&mounted_snapshot.target_root);
     let observed_fstype_for_evidence = observed_fstype.clone();
+    let fstype_matches = observed_fstype.as_deref() == Some(fstype);
 
     // Cleanup. The session only unmounts what IT created; pre-
     // existing mounts are never touched.
@@ -185,13 +186,22 @@ pub fn verify_with<R: RepairRunnerProbe>(
 
     VerificationOutcome {
         model: VerificationMount {
-            mounted: true,
+            mounted: fstype_matches,
             observed_fstype,
-            failure_message: None,
+            failure_message: (!fstype_matches).then(|| {
+                format!(
+                    "verification mount fstype mismatch: expected {fstype}, observed {:?}",
+                    observed_fstype_for_evidence
+                )
+            }),
         },
         cleanup,
         evidence: vec![Evidence::new(
-            "VERIFICATION_MOUNT_OK",
+            if fstype_matches {
+                "VERIFICATION_MOUNT_OK"
+            } else {
+                "VERIFICATION_FSTYPE_MISMATCH"
+            },
             "repair::verify",
             format!(
                 "target {device_str} mounted read-only and unmounted cleanly; observed_fstype={:?}",

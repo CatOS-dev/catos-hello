@@ -397,7 +397,10 @@ pub fn xfs_flow<R: CommandRunner + ?Sized>(
     } else if normal_result.timed_out {
         FlowOutcome::TimedOut
     } else if normal_result.exit_code == 0 {
-        FlowOutcome::Clean
+        // Modify-mode xfs_repair does not distinguish "nothing to do"
+        // from "repairs were made" in its normal exit status. Never
+        // claim clean without a preceding -n check.
+        FlowOutcome::Repaired
     } else if normal_result.exit_code == 2 {
         // Dirty log: fall back to -L as the spec authorizes. Mark
         // the attempt HighRiskFallback.
@@ -847,10 +850,10 @@ mod tests {
     // ---------------- xfs ----------------
 
     #[test]
-    fn xfs_clean_does_not_use_l() {
+    fn xfs_success_is_reported_as_repaired_without_a_readonly_check() {
         let runner = RecordedRunner::new().queue_raw(0, b"".to_vec(), b"".to_vec());
         let flow = xfs_flow(&runner, "/dev/sda1").unwrap();
-        assert_eq!(flow.outcome, FlowOutcome::Clean);
+        assert_eq!(flow.outcome, FlowOutcome::Repaired);
         assert!(!runner.any_invocation_with_flag("-L"));
         assert_eq!(flow.attempts.len(), 1);
         assert!(!flow.attempts[0].high_risk);
