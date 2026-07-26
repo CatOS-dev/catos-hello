@@ -37,7 +37,8 @@ only and never grants permission.
 | 3 | Transactional mount-configuration repair | Implemented for CatOS Btrfs and plain ext2/3/4, XFS, and F2FS roots |
 | 4 | Transactional Btrfs root-snapshot recovery | Implemented, including direct public recovery commands and cleanup persistence |
 | 5 | Bootloader-provider repair (`catos-repair boot`) | Implemented (GRUB, Limine, systemd-boot, UKI, EFI Stub); contract tests in place, full QEMU matrix pending OVMF/Secure Boot CI |
-| 6 | Live/Polkit/GUI integration, Doctor aggregation, `catos-update` workflow | Not implemented |
+| 5+ | Aggregated `catos-doctor` diagnosis | Implemented; read-only; scheme-B exit codes; real-QEMU byte-hash acceptance in place |
+| 6 | Live/Polkit/GUI integration, `catos-update` workflow | Not implemented |
 
 ## Current read/write boundary
 
@@ -81,14 +82,17 @@ target concurrently.
 
 ## CLI
 
-`catos-doctor` is intentionally argumentless:
+`catos-doctor` is intentionally argumentless. Stage 5 replaces the
+phase-1-only `inspect` delegation with an aggregated diagnosis that
+covers environment, storage, filesystem, mount layout, boot, Secure
+Boot, and recovery in a single human-readable report:
 
 ```text
 catos-doctor
 ```
 
-The currently implemented backend commands remain available through the
-canonical binary:
+The canonical backend commands below remain available through the
+canonical binary for tooling that needs structured JSON:
 
 ```
 # Stage 1 — read-only environment + target inspection
@@ -436,6 +440,7 @@ The following surfaces are wired into CTest when `-DBUILD_TESTS=ON`:
 | `catos-system-recovery-qemu-smoke` | Authoritative real-Btrfs acceptance in QEMU. Exercises the happy path, all three fault windows, resume reconciliation, Completed revert including the reverse-swap crash window, non-default source identity, guest-side data/backup/readonly assertions, nested-layout refusal, external-ESP refusal, and byte-for-byte ESP no-write verification. Once QEMU starts, skipped assertions are hard failures. |
 | `catos-system-repair-qemu-smoke` | Stage-2 real-filesystem repair acceptance in QEMU. It repairs deliberately damaged ext4 and FAT images, damages one metadata-DUP root-tree mirror and proves Btrfs escalates from the checksum diagnostic to `--repair` and a clean recheck, exercises normal XFS repair, and creates a real unclean XFS journal by killing a writer VM before proving `xfs_repair -L` reports `repaired_with_risk`. |
 | `catos-system-mount-repair-qemu-smoke` | Stage-3 state-changing acceptance in QEMU. It exercises all six `/boot`/ESP layouts, a Btrfs `@boot`, an independent ext4 `/boot`, a plain ext4 target, the currently-running ext4 root without unmounting it, complete fstab mount verification, and empty-subvolume rollback after an induced verification failure. |
+| `catos-system-doctor-qemu-smoke` | Stage-5 read-only Doctor acceptance in QEMU. Builds real CatOS btrfs target images (healthy, fs-corrupt, mount-break, ambiguous, doctor-fail), runs `catos-doctor` against each, asserts exit code 0 per scheme B for every unhealthy scenario, asserts non-zero exit only for doctor-fail, AND verifies byte-for-byte by `sha256` that no target image was written. Once QEMU starts, skipped assertions are hard failures. |
 
 The two minimal initramfs tests are opt-in through
 `-DCATOS_SYSTEM_INITRAMFS_SMOKE=ON`. The real storage test is enabled with
@@ -469,7 +474,8 @@ cmake -S . -B build -DBUILD_TESTS=ON \
   -DCATOS_SYSTEM_INITRAMFS_SMOKE=ON \
   -DCATOS_SYSTEM_STORAGE_SMOKE=ON \
   -DCATOS_SYSTEM_RECOVERY_SMOKE=ON \
-  -DCATOS_SYSTEM_REPAIR_SMOKE=ON
+  -DCATOS_SYSTEM_REPAIR_SMOKE=ON \
+  -DCATOS_SYSTEM_DOCTOR_SMOKE=ON
 ( cd build && ctest -L qemu --output-on-failure )
 ```
 
@@ -720,10 +726,113 @@ a provider based on the live host's installed tools, open LUKS, repartition
 devices, run arbitrary target commands outside the fixed allow-list, or claim
 atomic rollback for EFI NVRAM / MOK / signature operations.
 
+## `catos-doctor` (stage 5)
+
+`catos-doctor` is the read-only aggregated diagnosis entry point. It takes no
+functional arguments and produces a single human-readable report that
+summarises every diagnostic domain stages 1–4 already cover:
+
+```text
+catos-doctor
+```
+
+### Public surface
+
+* **No subcommands.** `catos-doctor inspect`, `catos-doctor preflight`,
+  `catos-doctor repair`, `catos-doctor fs`, `catos-doctor mount`,
+  `catos-doctor boot`, `catos-doctor recovery` are all rejected with exit
+  code 2 (`ARG_ERROR`).
+* **No target-selection flags.** `catos-doctor --root-device`,
+  `catos-doctor --root-subvolume`, `catos-doctor --esp-device`,
+  `catos-doctor --root` are rejected.
+* **No `--json`.** Doctor's public surface is human-readable only. The
+  internal `catos-system` binary keeps a stable JSON renderer for future
+  GUI/front-end consumption; the public entry point intentionally does not
+  expose it.
+* `--help` / `--version` work as on every other entry point.
+* All five public entry points (`catos-system`, `catos-update`,
+  `catos-recovery`, `catos-doctor`, `catos-repair`) install as symlinks to
+  the same single static binary.
+
+### Exit-code semantics (scheme B)
+
+`overall_status` and the process exit code are independent:
+
+| Exit code | Meaning |
+|---|---|
+| `0` | Doctor completed the diagnosis and produced a report. The target may be healthy, degraded, unhealthy, critical, or unknown — the severity is in the report. |
+| `!= 0` | Doctor itself could not complete the diagnosis (broken invariant, serialisation failure, private-namespace failure for a required offline probe, internal crash). |
+
+These are NOT Doctor execution failures and MUST return 0:
+
+* the target is unhealthy;
+* the target is ambiguous or missing;
+* a read-only check tool is missing;
+* the current root is mounted RW so an offline fsck is impossible;
+* the boot provider cannot be uniquely identified;
+* a recovery transaction is interrupted.
+
+### Diagnostic sections
+
+The report aggregates seven sections, in canonical order:
+
+1. **Environment** — runtime primary mode and running-root-is-Catos flag.
+2. **Storage** — discovered root and ESP device paths.
+3. **Filesystem** — read-only fsck result via the `check_only_for` family
+   (`e2fsck -n`, `fsck.fat -n`, `fsck.f2fs --dry-run`, `xfs_repair -n`,
+   `btrfs check --readonly`). Doctor NEVER invokes `-y`, `-a`, `--repair`,
+   or `-L`.
+4. **Mount layout** — fstab, root source/subvolume, CatOS standard
+   subvolumes, ESP, and the six `/boot`/ESP layouts. Reuses the same
+   pure `repair::mount_repair::diagnose` that `catos-repair mount` uses.
+5. **Boot** — provider detection reusing
+   `repair::boot_repair::detect::detect` (GRUB, Limine, systemd-boot,
+   UKI, EFI Stub). Doctor never invokes the provider's `execute` or
+   `verify` methods.
+6. **Secure Boot** — consistency between firmware runtime state, the
+   target's `/etc/catos/secureboot` policy marker, and the
+   firmware-boot configuration. Doctor never enrolls, disables, or
+   signs.
+7. **Recovery** — read-only enumeration of in-flight Btrfs snapshot
+   transactions. Uses `Engine::load` + `reconcile_status` (both
+   read-only). Doctor never calls `Engine::drive`, `Engine::begin`,
+   `Engine::load_for_write`, `Engine::load_for_revert`, or
+   `store::persist_record`.
+
+### Overall status
+
+`healthy` | `degraded` | `unhealthy` | `critical` | `unknown`. The
+aggregation is conservative: a single critical section promotes the
+overall to critical; a single unhealthy section promotes it to
+unhealthy; limitations alone degrade an otherwise-healthy report.
+
+### Read-only boundary
+
+Doctor never writes to the target. The only resources it may clean up
+are mounts it created itself inside its private mount namespace
+(`DoctorCleanup`). The QEMU acceptance test
+(`scripts/doctor-qemu-smoke.sh`) verifies this by `sha256`-hashing
+each target image before and after a `catos-doctor` run; any hash
+mismatch is a hard failure.
+
+### Issue codes
+
+Stable snake_case codes are emitted for every issue
+(`FS_CORRUPTION_DETECTED`, `FSTAB_ROOT_SOURCE_MISMATCH`,
+`STANDARD_SUBVOLUME_MISSING`, `ESP_AMBIGUOUS`,
+`BOOT_PROVIDER_AMBIGUOUS`, `BOOT_PROVIDER_CONFLICT`,
+`SECURE_BOOT_STATE_INCOMPLETE`, `RECOVERY_TRANSACTION_INTERRUPTED`,
+`RECOVERY_RECORD_DRIFT`, `RECOVERY_CLEANUP_RESIDUAL`,
+`RECOVERY_BACKUP_PRESENT`, `TARGET_NOT_FOUND`, `TARGET_AMBIGUOUS`,
+...). Recommendations carry their own stable codes
+(`RUN_CATOS_REPAIR_FS`, `RUN_CATOS_REPAIR_MOUNT`,
+`RUN_CATOS_REPAIR_BOOT`, `RUN_CATOS_RECOVERY_RESUME`,
+`RUN_CATOS_RECOVERY_REVERT`, `BOOT_LIVE_ENVIRONMENT`,
+`MANUAL_REVIEW`).
+
 ## What is not implemented yet
 
 - `catos-update`: the entry point is reserved but no update workflow exists.
-- Doctor's final aggregation of fs, mount, boot, and recovery diagnostics.
 - Automatic deletion of recovery backups; they remain available for revert or
   explicit operator removal.
 - Complete boot-and-reboot QEMU acceptance for every provider/firmware
