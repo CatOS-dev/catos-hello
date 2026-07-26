@@ -24,7 +24,7 @@
 //!    ambiguity. No I/O, no real devices; we feed synthetic
 //!    `BlockDevice` lists. This is where the spec's "must refuse"
 //!    invariants are most directly testable.
-//! 2. **Per-fstype runners (injected runner)**: tool routing, argv
+//! 2. **Per-fstype flows (injected runner)**: tool routing, argv
 //!    shape, exit-code interpretation, high-risk fallback marking,
 //!    output truncation. We inject a `RecordedRunner` that returns
 //!    canned exit/stdout/stderr. The real binary never runs; no
@@ -49,7 +49,7 @@ use std::path::PathBuf;
 use catos_system::model::repair::{AttemptKind, FsRepairOutcome, RepairTool};
 use catos_system::model::storage::{BlockDevice, DeviceClass, DiskKind, PartitionRole};
 use catos_system::repair::runner::{RecordedRunner, ToolResult};
-use catos_system::repair::runners::{
+use catos_system::repair::fs_flows::{
     btrfs_flow, e2fsck_flow, f2fs_flow, fat_flow, supports_filesystem, xfs_flow, FlowOutcome,
 };
 use catos_system::repair::safety::{

@@ -169,7 +169,7 @@ fn doctor_and_repair_agree_on_ambiguous_provider() {
 // ---------------------------------------------------------------------------
 
 use catos_system::repair::runner::{RecordedRunner, ToolResult};
-use catos_system::repair::runners::{btrfs_check_only, btrfs_flow, ReadonlyOutcome};
+use catos_system::repair::fs_flows::{btrfs_check_only, btrfs_flow, ReadonlyOutcome};
 
 #[test]
 fn doctor_and_fs_repair_agree_on_checksum_diagnostic_label() {

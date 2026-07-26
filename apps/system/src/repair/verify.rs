@@ -217,7 +217,7 @@ pub fn verify_with<R: RepairRunnerProbe>(
 /// no `CommandRunner`-style fake for the mount itself: the mount
 /// uses real `mount(2)` syscalls via `mount::session::Session`, so
 /// tests that exercise a failure path run as root in the QEMU smoke
-/// harness. Unit tests use the safety/runners/orchestrator flow
+/// harness. Unit tests use the safety/fs_flows/orchestrator flow
 /// without a real mount.
 pub trait RepairRunnerProbe: Default {
     /// Read the fstype the kernel reports for `target` in

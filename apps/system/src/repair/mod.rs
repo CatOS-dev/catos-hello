@@ -14,7 +14,7 @@
 //!     |
 //!     +-- repair::safety   : target selection + safety refusals
 //!     +-- repair::runner   : CommandRunner trait (real + fake)
-//!     +-- repair::runners  : per-fstype flows built on CommandRunner
+//!     +-- repair::fs_flows  : per-fstype flows built on CommandRunner
 //!     +-- repair::verify   : read-only post-repair verification mount
 //! ```
 //!
@@ -42,7 +42,7 @@ pub mod mount_repair;
 pub mod orchestrator;
 pub mod path_safety;
 pub mod runner;
-pub mod runners;
+pub mod fs_flows;
 pub mod safety;
 pub mod subvol_decision;
 pub mod verify;
@@ -57,11 +57,11 @@ pub use runner::{
     CommandRunner, RecordedInvocation, RecordedRunner, RepairInvocation, RepairRunnerError,
     TrustedRunner,
 };
-pub use runners::{
+pub use fs_flows::{
     btrfs_check_only, check_only_for, e2fsck_check_only, f2fs_check_only, fat_check_only,
     xfs_check_only, ReadonlyOutcome, ReadonlyResult,
 };
-pub use runners::{
+pub use fs_flows::{
     btrfs_flow, btrfs_topology, e2fsck_flow, f2fs_flow, fat_flow, supports_filesystem, xfs_flow,
     BtrfsTopology, FlowOutcome,
 };

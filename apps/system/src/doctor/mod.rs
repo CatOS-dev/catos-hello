@@ -4,7 +4,7 @@
 //!
 //! * environment / target discovery: phase 1 (`entry::build_report`,
 //!   phase2 storage scan)
-//! * filesystem: stage 2 (`repair::runners::check_only_for`)
+//! * filesystem: stage 2 (`repair::fs_flows::check_only_for`)
 //! * mount layout / fstab: stage 3 (`repair::mount_repair::diagnose`)
 //! * boot provider: stage 4 (`repair::boot_repair::detect::detect`)
 //! * recovery: stage 4 (`recovery::engine::Engine::load` +
@@ -43,7 +43,7 @@ use crate::recovery::store;
 use crate::repair::boot_repair::detect::{detect, DetectionInputs, DetectionVerdict};
 use crate::repair::mount_repair::{MountPointObservation, MountRepairInputs};
 use crate::repair::runner::CommandRunner;
-use crate::repair::runners::{check_only_for, ReadonlyOutcome, ReadonlyResult};
+use crate::repair::fs_flows::{check_only_for, ReadonlyOutcome, ReadonlyResult};
 use crate::repair::subvol_decision::{CatosConfirmation, SubvolFacts};
 
 pub mod target_selection;
@@ -348,7 +348,7 @@ fn push_fs_evidence(
         id,
         Evidence::new(
             "FS_CHECK",
-            format!("repair::runners::{}", result.tool),
+            format!("repair::fs_flows::{}", result.tool),
             format!("argv: {argv}"),
         )
         .with_value(format!("exit={}", result.exit_code)),

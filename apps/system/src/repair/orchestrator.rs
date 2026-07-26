@@ -6,7 +6,7 @@
 //!
 //! * device discovery (reused from `probe::block`),
 //! * safety evaluation (reused from `repair::safety`),
-//! * repair tool dispatch (per-fstype flows in `repair::runners`),
+//! * repair tool dispatch (per-fstype flows in `repair::fs_flows`),
 //! * verification mount (`repair::verify`),
 //! * final outcome synthesis.
 //!
@@ -47,7 +47,7 @@ use crate::probe::discover_devices;
 use crate::probe::fs_probe::RealFilesystem;
 use crate::recovery::lock::DeviceLock;
 use crate::repair::runner::{CommandRunner, TrustedRunner};
-use crate::repair::runners::{
+use crate::repair::fs_flows::{
     btrfs_flow, btrfs_topology, e2fsck_flow, f2fs_flow, fat_flow, supports_filesystem, xfs_flow,
     BtrfsTopology, FlowOutcome,
 };
