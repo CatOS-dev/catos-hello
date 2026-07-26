@@ -2,6 +2,7 @@
 //! text or stable JSON. Never mutates the model.
 
 pub mod boot_repair;
+pub mod doctor;
 pub mod human;
 pub mod json;
 pub mod mount_repair;
@@ -10,6 +11,7 @@ pub mod recovery;
 pub mod repair;
 
 pub use boot_repair::{render_boot_repair_human, render_boot_repair_json};
+pub use doctor::{exit_code_for as doctor_exit_code_for, render_doctor_human, render_doctor_json};
 pub use human::render_human;
 pub use json::render_json;
 pub use mount_repair::{render_mount_repair_human, render_mount_repair_json};
