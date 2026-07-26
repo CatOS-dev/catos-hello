@@ -140,14 +140,21 @@ pub fn run_trusted_tool_with_optional_timeout(
 }
 
 fn read_capped<R: Read>(reader: R, limit: usize) -> Result<(Vec<u8>, bool), String> {
-    let mut output = Vec::new();
-    let mut limited = reader.take(limit.saturating_add(1) as u64);
-    limited
-        .read_to_end(&mut output)
-        .map_err(|error| format!("failed reading child output: {error}"))?;
-    let truncated = output.len() > limit;
-    if truncated {
-        output.truncate(limit);
+    let mut reader = reader;
+    let mut output = Vec::with_capacity(limit);
+    let mut buffer = [0u8; 8192];
+    let mut truncated = false;
+    loop {
+        let read = reader
+            .read(&mut buffer)
+            .map_err(|error| format!("failed reading child output: {error}"))?;
+        if read == 0 {
+            break;
+        }
+        let available = limit.saturating_sub(output.len());
+        let retained = available.min(read);
+        output.extend_from_slice(&buffer[..retained]);
+        truncated |= retained != read;
     }
     Ok((output, truncated))
 }
@@ -194,6 +201,14 @@ mod tests {
     fn capped_reader_reports_truncation() {
         let (bytes, truncated) = read_capped(&b"abcdef"[..], 3).unwrap();
         assert_eq!(bytes, b"abc");
+        assert!(truncated);
+    }
+
+    #[test]
+    fn capped_reader_drains_bytes_after_the_limit() {
+        let bytes = vec![b'x'; 128 * 1024];
+        let (retained, truncated) = read_capped(&bytes[..], 64).unwrap();
+        assert_eq!(retained, vec![b'x'; 64]);
         assert!(truncated);
     }
 }
