@@ -42,7 +42,7 @@ use crate::recovery::external as btrfs;
 use crate::recovery::identity::{
     drift_between, ensure_target_is_not_running_root, is_protected_recovery_path,
 };
-use crate::recovery::lock::{lock_file_path, TransactionLock};
+use crate::recovery::lock::{lock_file_path, DeviceLock, TransactionLock};
 use crate::recovery::plan::verify_revert_confirmation_token;
 use crate::recovery::state::{reconcile_with_disk_facts, resume_checkpoint, AdvanceAction, Intent};
 use crate::recovery::store;
@@ -69,6 +69,7 @@ pub struct Engine {
     /// (used by `status`). Construction via `begin` or
     /// `load_for_write` always holds a lock.
     lock: Option<TransactionLock>,
+    _device_lock: Option<DeviceLock>,
 }
 
 impl Engine {
@@ -83,6 +84,7 @@ impl Engine {
             opts,
             record,
             lock: None,
+            _device_lock: None,
         })
     }
 
@@ -111,11 +113,12 @@ impl Engine {
         opts: EngineOptions,
         transaction_id: &str,
     ) -> Result<Self, RecoveryError> {
-        let (record, lock) = load_record_under_lock(&opts, transaction_id)?;
+        let (record, lock, device_lock) = load_record_under_lock(&opts, transaction_id)?;
         let mut engine = Self {
             opts,
             record,
             lock: Some(lock),
+            _device_lock: Some(device_lock),
         };
         // Reconcile the persisted state with current disk facts BEFORE
         // any action runs. This is the load-bearing fix for the
@@ -139,11 +142,12 @@ impl Engine {
         transaction_id: &str,
         presented_confirmation: &str,
     ) -> Result<Self, RecoveryError> {
-        let (record, lock) = load_record_under_lock(&opts, transaction_id)?;
+        let (record, lock, device_lock) = load_record_under_lock(&opts, transaction_id)?;
         let mut engine = Self {
             opts,
             record,
             lock: Some(lock),
+            _device_lock: Some(device_lock),
         };
 
         let facts = engine.reconcile_status();
@@ -198,6 +202,7 @@ impl Engine {
     pub fn begin(opts: EngineOptions, plan: RecoveryPlan) -> Result<Self, RecoveryError> {
         let transaction_id = plan.plan_id.clone();
         ensure_target_matches_plan(&plan, &opts.validated_filesystem)?;
+        let device_lock = DeviceLock::try_acquire(&opts.device_path)?;
         let fsid = opts.validated_filesystem.fsid.clone();
         let lock = acquire_lock_guard(&opts.top_level_mount, &fsid).map_err(|e| *e)?;
         let plan_path = top_level_plan_path(&opts.top_level_mount, &transaction_id);
@@ -223,6 +228,7 @@ impl Engine {
             opts,
             record,
             lock: Some(lock),
+            _device_lock: Some(device_lock),
         };
         engine.persist_record("begin")?;
         Ok(engine)
@@ -1219,13 +1225,14 @@ fn acquire_lock_guard(
 fn load_record_under_lock(
     opts: &EngineOptions,
     transaction_id: &str,
-) -> Result<(TransactionRecord, TransactionLock), RecoveryError> {
+) -> Result<(TransactionRecord, TransactionLock, DeviceLock), RecoveryError> {
+    let device_lock = DeviceLock::try_acquire(&opts.device_path)?;
     let fsid = opts.validated_filesystem.fsid.clone();
     let lock = acquire_lock_guard(&opts.top_level_mount, &fsid).map_err(|error| *error)?;
     let state_path = top_level_state_path(&opts.top_level_mount, transaction_id);
     let record = store::load_record(&state_path)?;
     ensure_target_matches_plan(&record.plan, &opts.validated_filesystem)?;
-    Ok((record, lock))
+    Ok((record, lock, device_lock))
 }
 
 fn source_snapshot_fsid_via_path(snapshot_mounted: &Path, top_level_mount: &Path) -> String {
