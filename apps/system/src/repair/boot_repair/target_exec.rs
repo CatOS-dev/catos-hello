@@ -25,6 +25,11 @@
 //! NOT need root, loop devices, or the tools installed.
 
 use std::cell::RefCell;
+use std::ffi::{CStr, CString};
+use std::os::unix::ffi::OsStrExt;
+use std::os::unix::process::CommandExt;
+use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::time::Duration;
 
 use crate::model::boot_repair::{TargetCommand, TargetCommandResult};
@@ -41,6 +46,7 @@ pub const ALLOWED_BINARIES: &[&str] = &[
     "limine-update",
     "limine-list",
     "limine-btrfs",
+    "sdboot-btrfs",
     "bootctl",
     "kernel-install",
     "efibootmgr",
@@ -84,17 +90,14 @@ pub trait TargetRunner: std::fmt::Debug {
     fn invoke(&self, request: &TargetRequest) -> TargetCommandResult;
 }
 
-/// Default real runner. Spawns the target binary directly (no
-/// chroot, no shell) using the same trusted-path resolution as
-/// [`crate::process::run_trusted_tool`].
-///
-/// The runner does NOT enter a chroot itself; the boot-repair
-/// orchestrator runs the target system's binaries from the live
-/// environment after bind-mounting the target root. This matches
-/// the existing stage 1–3 confined-execution discipline and avoids
-/// creating a general-purpose chroot API.
-#[derive(Debug, Clone, Copy)]
+/// Default real runner. It invokes the host's fixed-path `chroot` helper
+/// with a target binary that was resolved from the mounted target root.
+/// The chroot is deliberately not exposed as a public command interface:
+/// this type accepts only [`TargetRequest`] values whose binary is in the
+/// fixed allow-list.
+#[derive(Debug, Clone)]
 pub struct TrustedTargetRunner {
+    target_root: PathBuf,
     pub max_output_bytes: usize,
     pub timeout: Option<Duration>,
 }
@@ -103,7 +106,12 @@ impl TrustedTargetRunner {
     pub const DEFAULT_MAX_OUTPUT: usize = 64 * 1024;
 
     pub fn new() -> Self {
+        Self::for_target(PathBuf::from("/"))
+    }
+
+    pub fn for_target(target_root: impl Into<PathBuf>) -> Self {
         Self {
+            target_root: target_root.into(),
             max_output_bytes: Self::DEFAULT_MAX_OUTPUT,
             timeout: None,
         }
@@ -134,10 +142,58 @@ impl TargetRunner for TrustedTargetRunner {
                 stderr_truncated: false,
             };
         }
-        let argv_refs: Vec<&str> = request.argv.iter().map(String::as_str).collect();
-        match crate::process::run_trusted_tool_with_optional_timeout(
-            &request.binary,
-            &argv_refs,
+        let Some(target_binary) = target_binary_path(&self.target_root, &request.binary) else {
+            return TargetCommandResult {
+                command: request.into(),
+                binary_missing: true,
+                timed_out: false,
+                exit_code: -1,
+                stdout: Vec::new(),
+                stderr: format!(
+                    "target binary {:?} is not executable below {}",
+                    request.binary,
+                    self.target_root.display()
+                )
+                .into_bytes(),
+                stdout_truncated: false,
+                stderr_truncated: false,
+            };
+        };
+        let mut command = Command::new(&target_binary);
+        command
+            .args(&request.argv)
+            .env_clear()
+            .env("LC_ALL", "C")
+            .env("LANG", "C")
+            .env("PATH", "/usr/bin:/usr/sbin:/bin:/sbin");
+
+        if self.target_root != Path::new("/") {
+            let target_root = match CString::new(self.target_root.as_os_str().as_bytes()) {
+                Ok(path) => path,
+                Err(_) => {
+                    return TargetCommandResult {
+                        command: request.into(),
+                        binary_missing: true,
+                        timed_out: false,
+                        exit_code: -1,
+                        stdout: Vec::new(),
+                        stderr: b"target root contains an embedded NUL byte".to_vec(),
+                        stdout_truncated: false,
+                        stderr_truncated: false,
+                    };
+                }
+            };
+            // SAFETY: the closure performs only async-signal-safe syscalls
+            // before exec. It changes a freshly-forked child's mount namespace
+            // and never mutates the parent namespace.
+            unsafe {
+                command.pre_exec(move || pivot_to_target_root(&target_root));
+            }
+        }
+
+        match crate::process::run_prepared_command_with_optional_timeout(
+            command,
+            PathBuf::from(&target_binary),
             self.timeout,
             self.max_output_bytes,
         ) {
@@ -165,10 +221,80 @@ impl TargetRunner for TrustedTargetRunner {
     }
 }
 
+fn pivot_to_target_root(target_root: &CStr) -> std::io::Result<()> {
+    const SLASH: &CStr = c"/";
+    const DOT: &CStr = c".";
+
+    syscall_result(unsafe { libc::unshare(libc::CLONE_NEWNS) })?;
+    syscall_result(unsafe {
+        libc::mount(
+            std::ptr::null(),
+            SLASH.as_ptr(),
+            std::ptr::null(),
+            (libc::MS_REC | libc::MS_PRIVATE) as libc::c_ulong,
+            std::ptr::null(),
+        )
+    })?;
+    // A rescue initramfs uses the special rootfs mount, which cannot be the
+    // old root of pivot_root. Stack a private bind mount at `/` first.
+    syscall_result(unsafe {
+        libc::mount(
+            SLASH.as_ptr(),
+            SLASH.as_ptr(),
+            std::ptr::null(),
+            (libc::MS_BIND | libc::MS_REC) as libc::c_ulong,
+            std::ptr::null(),
+        )
+    })?;
+    // A Btrfs target root is a directory inside the top-level mount rather
+    // than a mountpoint of its own. Bind it to itself inside the child.
+    syscall_result(unsafe {
+        libc::mount(
+            target_root.as_ptr(),
+            target_root.as_ptr(),
+            std::ptr::null(),
+            (libc::MS_BIND | libc::MS_REC) as libc::c_ulong,
+            std::ptr::null(),
+        )
+    })?;
+    syscall_result(unsafe { libc::chdir(target_root.as_ptr()) })?;
+    syscall_result(unsafe {
+        libc::syscall(libc::SYS_pivot_root, DOT.as_ptr(), DOT.as_ptr()) as libc::c_int
+    })?;
+    syscall_result(unsafe { libc::umount2(DOT.as_ptr(), libc::MNT_DETACH) })?;
+    syscall_result(unsafe { libc::chdir(SLASH.as_ptr()) })
+}
+
+fn syscall_result(result: libc::c_int) -> std::io::Result<()> {
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+fn target_binary_path(target_root: &Path, binary: &str) -> Option<String> {
+    const TARGET_TOOL_DIRS: &[&str] = &["/usr/bin", "/usr/sbin", "/bin", "/sbin"];
+    if binary.is_empty() || binary.contains('/') {
+        return None;
+    }
+    TARGET_TOOL_DIRS.iter().find_map(|directory| {
+        let relative = directory.trim_start_matches('/');
+        let candidate = target_root.join(relative).join(binary);
+        std::fs::metadata(candidate)
+            .ok()
+            .filter(|metadata| {
+                use std::os::unix::fs::PermissionsExt;
+
+                metadata.is_file() && metadata.permissions().mode() & 0o111 != 0
+            })
+            .map(|_| format!("{directory}/{binary}"))
+    })
+}
+
 /// Recording fake runner for tests. Records every invocation and
-/// replays queued results in order. When the queue is empty, it
-/// returns a synthetic "exit 0, no output" result so tests fail on
-/// their own assertions rather than panicking inside `invoke`.
+/// replays queued results in order. An undeclared call is a failure:
+/// provider tests must explicitly model every target command they expect.
 #[derive(Debug, Default, Clone)]
 pub struct RecordedTargetRunner {
     invocations: RefCell<Vec<TargetRequest>>,
@@ -244,14 +370,13 @@ impl TargetRunner for RecordedTargetRunner {
         self.invocations.borrow_mut().push(request.clone());
         let mut queue = self.queued.borrow_mut();
         if queue.is_empty() {
-            // Default to a clean success with empty output.
             TargetCommandResult {
                 command: request.into(),
-                binary_missing: false,
+                binary_missing: true,
                 timed_out: false,
-                exit_code: 0,
+                exit_code: -1,
                 stdout: Vec::new(),
-                stderr: Vec::new(),
+                stderr: b"unexpected target command: no queued result".to_vec(),
                 stdout_truncated: false,
                 stderr_truncated: false,
             }
@@ -269,6 +394,16 @@ impl TargetRunner for RecordedTargetRunner {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
+
+    fn target_fixture(name: &str) -> PathBuf {
+        let root =
+            std::env::temp_dir().join(format!("catos-target-exec-{name}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("usr/bin")).unwrap();
+        root
+    }
 
     #[test]
     fn trusted_runner_refuses_non_allowlisted_binary() {
@@ -277,6 +412,51 @@ mod tests {
         let result = runner.invoke(&request);
         assert!(result.binary_missing);
         assert!(String::from_utf8_lossy(&result.stderr).contains("non-allow-list"));
+    }
+
+    #[test]
+    fn target_binary_path_includes_the_binary_name() {
+        let root = target_fixture("binary-path");
+        let tool = root.join("usr/bin/mkinitcpio");
+        fs::write(&tool, b"#!/bin/sh\n").unwrap();
+        let mut permissions = fs::metadata(&tool).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&tool, permissions).unwrap();
+
+        assert_eq!(
+            target_binary_path(&root, "mkinitcpio"),
+            Some("/usr/bin/mkinitcpio".to_string())
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    #[ignore = "requires CAP_SYS_CHROOT; exercised by the privileged QEMU harness"]
+    fn trusted_runner_executes_the_target_binary_inside_target_root() {
+        let root = target_fixture("chroot");
+        fs::copy("/bin/busybox", root.join("usr/bin/busybox")).unwrap();
+        let mut busybox_permissions = fs::metadata(root.join("usr/bin/busybox"))
+            .unwrap()
+            .permissions();
+        busybox_permissions.set_mode(0o755);
+        fs::set_permissions(root.join("usr/bin/busybox"), busybox_permissions).unwrap();
+        let script = root.join("usr/bin/limine-list");
+        fs::write(
+            &script,
+            "#!/usr/bin/busybox sh\nprintf 'target-root:%s\\n' \"$1\"\n",
+        )
+        .unwrap();
+        let mut permissions = fs::metadata(&script).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&script, permissions).unwrap();
+
+        let runner = TrustedTargetRunner::for_target(&root);
+        let request = TargetRequest::new("limine-list", vec!["fixture".into()], "verify target");
+        let result = runner.invoke(&request);
+        fs::remove_dir_all(&root).unwrap();
+
+        assert_eq!(result.exit_code, 0);
+        assert_eq!(result.stdout, b"target-root:fixture\n");
     }
 
     #[test]
@@ -304,11 +484,12 @@ mod tests {
     }
 
     #[test]
-    fn recorded_runner_defaults_to_success_when_queue_empty() {
+    fn recorded_runner_fails_when_queue_empty() {
         let runner = RecordedTargetRunner::new();
         let req = TargetRequest::new("bootctl", vec!["is-installed".into()], "verify");
         let result = runner.invoke(&req);
-        assert_eq!(result.exit_code, 0);
+        assert_eq!(result.exit_code, -1);
+        assert!(result.binary_missing);
         assert_eq!(result.command.binary, "bootctl");
     }
 

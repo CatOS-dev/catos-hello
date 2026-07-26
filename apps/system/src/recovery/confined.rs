@@ -499,6 +499,53 @@ fn list_open_directory_names(
     Ok(names)
 }
 
+/// Return the size of a regular file below `top_level` without reading its
+/// contents. Every path component is resolved beneath the pinned root and
+/// symlinks are rejected. Missing paths return `Ok(None)`.
+pub fn rooted_regular_file_size(
+    top_level: &Path,
+    rooted_path: &str,
+) -> Result<Option<u64>, RecoveryError> {
+    let entry = open_rooted_parent(top_level, rooted_path, false)?;
+    match entry_type(entry.parent.as_raw_fd(), &entry.name, &entry.display)? {
+        None => Ok(None),
+        Some(libc::S_IFLNK) => Err(unsafe_path(
+            &entry.display,
+            "rooted regular-file query encountered a symlink",
+        )),
+        Some(kind) if kind != libc::S_IFREG => Err(unsafe_path(
+            &entry.display,
+            "rooted regular-file query target is not a regular file",
+        )),
+        Some(_) => {
+            let fd = open_file_at(
+                entry.parent.as_raw_fd(),
+                &entry.name,
+                libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+                0,
+                false,
+            )?;
+            let mut stat = std::mem::MaybeUninit::<libc::stat>::zeroed();
+            let rc = unsafe { libc::fstat(fd.as_raw_fd(), stat.as_mut_ptr()) };
+            if rc != 0 {
+                return Err(io_error(
+                    &entry.display,
+                    "inspect rooted regular file",
+                    std::io::Error::last_os_error(),
+                ));
+            }
+            let stat = unsafe { stat.assume_init() };
+            if stat.st_mode & libc::S_IFMT != libc::S_IFREG {
+                return Err(unsafe_path(
+                    &entry.display,
+                    "opened rooted object is not a regular file",
+                ));
+            }
+            Ok(Some(stat.st_size.max(0) as u64))
+        }
+    }
+}
+
 /// Read a regular file below a mounted filesystem top-level without
 /// following symlinks in any component.
 pub fn read_rooted_file(top_level: &Path, rooted_path: &str) -> Result<Vec<u8>, RecoveryError> {
@@ -512,6 +559,36 @@ pub fn read_rooted_file(top_level: &Path, rooted_path: &str) -> Result<Vec<u8>, 
     )?;
     require_regular_file(fd.as_raw_fd(), &entry.display)?;
     read_owned_fd(fd, &entry.display)
+}
+
+/// Remove one regular file below a mounted target root without following a
+/// symlink in any component. Used only to roll back a file created by the
+/// current boot-repair configuration transaction.
+pub fn remove_rooted_file(top_level: &Path, rooted_path: &str) -> Result<(), RecoveryError> {
+    let entry = open_rooted_parent(top_level, rooted_path, false)?;
+    match entry_type(entry.parent.as_raw_fd(), &entry.name, &entry.display)? {
+        None => return Ok(()),
+        Some(libc::S_IFLNK) => {
+            return Err(unsafe_path(
+                &entry.display,
+                "refusing to remove a symlink during configuration rollback",
+            ));
+        }
+        Some(libc::S_IFREG) => {}
+        Some(_) => {
+            return Err(unsafe_path(
+                &entry.display,
+                "configuration rollback target is not a regular file",
+            ));
+        }
+    }
+    unlinkat_name(entry.parent.as_raw_fd(), &entry.name)
+        .map_err(|error| map_path_error(&entry.display, "remove rooted file", error, false))?;
+    fsync_fd(
+        entry.parent.as_raw_fd(),
+        &entry.display,
+        "fsync rooted parent after configuration rollback",
+    )
 }
 
 /// Create a btrfs snapshot through pinned source and destination

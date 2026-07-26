@@ -146,6 +146,53 @@ pub fn compute_arrays(inputs: &MkinitcpioInputs<'_>) -> MkinitcpioArrays {
     // encrypted-root + non-unencrypted-/boot precondition holds.
     arrays.files.retain(|entry| entry != "/crypto_keyfile.bin");
 
+    // Snapshot repair must not silently migrate an existing systemd
+    // initramfs back to the BusyBox/udev family. Current CatOS snapshot hooks
+    // have a native systemd path using systemd-volatile-root; preserving the
+    // target's family is both safer and required for real snapshot switch-root.
+    if inputs.snapshots_enabled && parsed.hooks.iter().any(|hook| hook == "systemd") {
+        let uses_btrfs = inputs.root_is_btrfs || inputs.root_filesystem == "btrfs";
+        let mut hooks = parsed
+            .hooks
+            .into_iter()
+            .filter(|hook| {
+                hook != "udev"
+                    && !matches!(
+                        hook.as_str(),
+                        "grub-btrfs-overlayfs"
+                            | "limine-btrfs-overlayfs"
+                            | "sdboot-btrfs-overlayfs"
+                    )
+                    && !(uses_btrfs && hook == "fsck")
+            })
+            .collect::<Vec<_>>();
+        if !hooks.iter().any(|hook| hook == "base") {
+            hooks.insert(0, "base".into());
+        }
+        if !hooks.iter().any(|hook| hook == "systemd") {
+            hooks.insert(1, "systemd".into());
+        }
+        if !hooks.iter().any(|hook| hook == "filesystems") {
+            hooks.push("filesystems".into());
+        }
+        if inputs.encrypted_root
+            && !inputs.has_unencrypted_separate_boot
+            && inputs.has_crypto_keyfile
+        {
+            arrays.files.push("/crypto_keyfile.bin".into());
+        }
+        if inputs.root_is_btrfs {
+            if let Some(snapshot) = registry::snapshot_profile(inputs.provider) {
+                hooks.push(snapshot.overlayfs_hook.to_string());
+            }
+        }
+        arrays.hooks = dedupe(hooks);
+        arrays.modules = dedupe(arrays.modules);
+        arrays.binaries = dedupe(arrays.binaries);
+        arrays.files = dedupe(arrays.files);
+        return arrays;
+    }
+
     let mut hooks = vec![
         "base".to_string(),
         "udev".to_string(),
@@ -322,6 +369,33 @@ mod tests {
             assert_eq!(arrays.hooks.last().map(String::as_str), Some(*overlay_hook));
             assert_eq!(arrays.hooks.iter().filter(|h| h == overlay_hook).count(), 1);
         }
+    }
+
+    #[test]
+    fn snapshot_repair_preserves_existing_systemd_initramfs_family() {
+        let inputs = MkinitcpioInputs {
+            existing_config:
+                "HOOKS=(base systemd microcode modconf keyboard keymap block filesystems fsck)\n",
+            root_filesystem: "btrfs".into(),
+            provider: ProviderId::Limine,
+            snapshots_enabled: true,
+            root_is_btrfs: true,
+            ..MkinitcpioInputs::default()
+        };
+
+        let arrays = compute_arrays(&inputs);
+
+        assert!(arrays.hooks.contains(&"systemd".to_string()));
+        assert!(!arrays.hooks.contains(&"udev".to_string()));
+        assert!(arrays.hooks.contains(&"limine-btrfs-overlayfs".to_string()));
+        assert_eq!(
+            arrays
+                .hooks
+                .iter()
+                .filter(|hook| *hook == "systemd")
+                .count(),
+            1
+        );
     }
 
     #[test]

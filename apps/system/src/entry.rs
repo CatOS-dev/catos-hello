@@ -678,9 +678,10 @@ fn run_repair_boot(argv: &[String]) -> i32 {
 fn boot_outcome_exit_code(outcome: crate::model::boot_repair::BootRepairOutcome) -> i32 {
     use crate::model::boot_repair::BootRepairOutcome as O;
     match outcome {
-        O::Clean | O::Repaired | O::PartiallyRepaired => exit_code::SUCCESS,
+        O::Clean | O::Repaired => exit_code::SUCCESS,
         O::AmbiguousTarget | O::AmbiguousProvider | O::Unsupported => exit_code::ARG_ERROR,
-        O::VerificationFailed
+        O::PartiallyRepaired
+        | O::VerificationFailed
         | O::CleanupIncomplete
         | O::ManualInterventionRequired
         | O::Unknown => exit_code::PROBE_FAILED,
@@ -963,4 +964,18 @@ fn write_json_stdout(json: &str) -> std::io::Result<()> {
     lock.write_all(json.as_bytes())?;
     lock.write_all(b"\n")?;
     lock.flush()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::boot_repair::BootRepairOutcome;
+
+    #[test]
+    fn partially_repaired_boot_is_not_a_success_exit() {
+        assert_ne!(
+            boot_outcome_exit_code(BootRepairOutcome::PartiallyRepaired),
+            crate::error::exit_code::SUCCESS
+        );
+    }
 }

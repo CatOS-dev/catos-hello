@@ -79,7 +79,20 @@ pub fn run_trusted_tool_with_optional_timeout(
         .env_clear()
         .env("LC_ALL", "C")
         .env("LANG", "C")
-        .env("PATH", "/usr/bin:/usr/sbin:/bin:/sbin")
+        .env("PATH", "/usr/bin:/usr/sbin:/bin:/sbin");
+    run_prepared_command_with_optional_timeout(command, path, timeout, max_output_bytes)
+}
+
+/// Execute a command whose argv, environment, and optional `pre_exec` setup
+/// have already been constructed by a narrowly-scoped caller. Output handling,
+/// timeout behavior, and EOF draining remain identical to trusted tools.
+pub(crate) fn run_prepared_command_with_optional_timeout(
+    mut command: Command,
+    path: PathBuf,
+    timeout: Option<Duration>,
+    max_output_bytes: usize,
+) -> Result<ToolOutput, String> {
+    command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());

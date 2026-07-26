@@ -24,7 +24,9 @@
 //!   `supportedProviders` list omits it. We refuse before invoking
 //!   `catos-secureboot`.
 
-use crate::model::boot_repair::{BootRepairOutcome, ProviderId, SecureBootReport};
+use crate::model::boot_repair::{
+    BootRepairOutcome, ProviderId, SecureBootReport, TargetCommandResult,
+};
 use crate::repair::boot_repair::registry;
 use crate::repair::boot_repair::target_exec::{TargetRequest, TargetRunner};
 
@@ -58,19 +60,18 @@ pub struct SecureBootInputs {
 /// `/sys/firmware/efi/efivars/SecureBoot-*` value is NEVER consulted
 /// for the target. Only target-side evidence is.
 pub fn should_finalize(inputs: &SecureBootInputs) -> FinalizeDecision {
-    if !registry::secure_boot_supported(inputs.provider) {
-        return FinalizeDecision::Unsupported;
-    }
     // Target policy is "present" when bootloadu has previously
     // enrolled a CatOS certificate. We treat the marker as
     // authoritative; the package + signed artefact are corroborating.
     let target_policy_present =
         inputs.target_marker_present || (inputs.package_present && inputs.signed_artefact_observed);
-    if target_policy_present {
-        FinalizeDecision::Reapply
-    } else {
-        FinalizeDecision::LeaveUntouched
+    if !target_policy_present {
+        return FinalizeDecision::LeaveUntouched;
     }
+    if !registry::secure_boot_supported(inputs.provider) {
+        return FinalizeDecision::Unsupported;
+    }
+    FinalizeDecision::Reapply
 }
 
 /// What the orchestrator should do about Secure Boot.
@@ -98,7 +99,11 @@ pub enum FinalizeDecision {
 pub fn finalize_secure_boot<R: TargetRunner>(
     runner: &R,
     inputs: &SecureBootInputs,
-) -> (SecureBootReport, Option<BootRepairOutcome>) {
+) -> (
+    SecureBootReport,
+    Option<BootRepairOutcome>,
+    Option<TargetCommandResult>,
+) {
     let decision = should_finalize(inputs);
     match decision {
         FinalizeDecision::LeaveUntouched => (
@@ -108,6 +113,7 @@ pub fn finalize_secure_boot<R: TargetRunner>(
                 ambiguous: false,
                 ..SecureBootReport::default()
             },
+            None,
             None,
         ),
         FinalizeDecision::Unsupported => (
@@ -121,6 +127,7 @@ pub fn finalize_secure_boot<R: TargetRunner>(
                 )),
                 ..SecureBootReport::default()
             },
+            Some(BootRepairOutcome::ManualInterventionRequired),
             None,
         ),
         FinalizeDecision::Reapply => {
@@ -145,10 +152,11 @@ pub fn finalize_secure_boot<R: TargetRunner>(
                         enable_invoked: true,
                         ambiguous: false,
                         failure_message: Some(failure),
-                        raw_payload: Some(String::from_utf8_lossy(&result.stdout).into_owned()),
+                        raw_payload: sanitise_payload(&String::from_utf8_lossy(&result.stdout)),
                         ..SecureBootReport::default()
                     },
                     Some(BootRepairOutcome::ManualInterventionRequired),
+                    Some(result),
                 );
             }
             let payload = String::from_utf8_lossy(&result.stdout).into_owned();
@@ -159,10 +167,11 @@ pub fn finalize_secure_boot<R: TargetRunner>(
                         enable_invoked: true,
                         certificate_fingerprint: parsed.fingerprint,
                         enrollment_pending: parsed.enrollment_pending,
-                        raw_payload: Some(payload),
+                        raw_payload: sanitise_payload(&payload),
                         ..SecureBootReport::default()
                     },
                     None,
+                    Some(result),
                 ),
                 Err(reason) => (
                     SecureBootReport {
@@ -170,10 +179,11 @@ pub fn finalize_secure_boot<R: TargetRunner>(
                         enable_invoked: true,
                         ambiguous: true,
                         failure_message: Some(reason),
-                        raw_payload: Some(payload),
+                        raw_payload: sanitise_payload(&payload),
                         ..SecureBootReport::default()
                     },
                     Some(BootRepairOutcome::ManualInterventionRequired),
+                    Some(result),
                 ),
             }
         }
@@ -213,6 +223,16 @@ fn parse_secure_boot_payload(payload: &str) -> Result<ParsedPayload, String> {
     })
 }
 
+fn sanitise_payload(payload: &str) -> Option<String> {
+    let mut value: serde_json::Value = serde_json::from_str(payload).ok()?;
+    let object = value.as_object_mut()?;
+    object.retain(|key, _| {
+        let key = key.to_ascii_lowercase();
+        !key.contains("password") && !key.contains("secret") && !key.contains("token")
+    });
+    serde_json::to_string(&value).ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -229,9 +249,29 @@ mod tests {
     }
 
     #[test]
-    fn efistub_is_unsupported() {
+    fn efistub_without_target_policy_is_left_untouched() {
         let decision = should_finalize(&inputs(ProviderId::Efistub));
+        assert_eq!(decision, FinalizeDecision::LeaveUntouched);
+    }
+
+    #[test]
+    fn efistub_with_target_policy_is_unsupported() {
+        let mut inputs = inputs(ProviderId::Efistub);
+        inputs.target_marker_present = true;
+        let decision = should_finalize(&inputs);
         assert_eq!(decision, FinalizeDecision::Unsupported);
+    }
+
+    #[test]
+    fn efistub_secureboot_unsupported_requires_human_action() {
+        let runner = RecordedTargetRunner::new();
+        let mut inputs = inputs(ProviderId::Efistub);
+        inputs.target_marker_present = true;
+        let (report, outcome, action) = finalize_secure_boot(&runner, &inputs);
+
+        assert!(!report.enable_invoked);
+        assert_eq!(outcome, Some(BootRepairOutcome::ManualInterventionRequired));
+        assert!(action.is_none());
     }
 
     #[test]
@@ -284,11 +324,17 @@ mod tests {
             target_marker_present: true,
             ..SecureBootInputs::default()
         };
-        let (report, outcome) = finalize_secure_boot(&runner, &inputs);
+        let (report, outcome, action) = finalize_secure_boot(&runner, &inputs);
         assert_eq!(outcome, None);
         assert!(report.enable_invoked);
         assert_eq!(report.certificate_fingerprint.as_deref(), Some("AA:BB"));
         assert!(report.enrollment_pending);
+        assert!(action.is_some());
+        assert!(!report
+            .raw_payload
+            .as_deref()
+            .unwrap_or_default()
+            .contains("sekret"));
         assert!(runner.invoked_binary("catos-secureboot"));
     }
 
@@ -301,10 +347,11 @@ mod tests {
             target_marker_present: true,
             ..SecureBootInputs::default()
         };
-        let (report, outcome) = finalize_secure_boot(&runner, &inputs);
+        let (report, outcome, action) = finalize_secure_boot(&runner, &inputs);
         assert_eq!(outcome, Some(BootRepairOutcome::ManualInterventionRequired));
         assert!(report.enable_invoked);
         assert!(report.failure_message.is_some());
+        assert!(action.is_some());
     }
 
     #[test]
@@ -319,7 +366,7 @@ mod tests {
             target_marker_present: true,
             ..SecureBootInputs::default()
         };
-        let (_report, outcome) = finalize_secure_boot(&runner, &inputs);
+        let (_report, outcome, _action) = finalize_secure_boot(&runner, &inputs);
         assert_eq!(outcome, Some(BootRepairOutcome::ManualInterventionRequired));
     }
 

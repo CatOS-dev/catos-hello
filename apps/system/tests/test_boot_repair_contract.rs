@@ -195,8 +195,13 @@ fn secureboot_supports_grub_limine_systemd_boot_uki_only() {
 #[test]
 fn secureboot_decision_preserves_target_policy_only() {
     // bootloadu test_prepare_secure_boot_supports_uki_and_rejects_efistub port.
+    // Efistub is rejected only when a target policy actually demands re-application.
     assert_eq!(
         should_finalize(&secureboot_inputs(ProviderId::Efistub, false)),
+        FinalizeDecision::LeaveUntouched
+    );
+    assert_eq!(
+        should_finalize(&secureboot_inputs(ProviderId::Efistub, true)),
         FinalizeDecision::Unsupported
     );
     // GRUB without target policy is left untouched.
