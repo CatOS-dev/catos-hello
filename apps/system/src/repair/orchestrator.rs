@@ -34,6 +34,9 @@
 //! in doubt, we surface the worse result: a successful repair with a
 //! failed verification is `VerificationFailed`, not `Repaired`.
 
+use std::fs::{File, OpenOptions};
+use std::os::fd::AsRawFd;
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
 use crate::model::evidence::Evidence;
@@ -245,7 +248,7 @@ fn proceed_with_repair<R: CommandRunner + ?Sized>(
     device: PathBuf,
     filesystem: Option<&str>,
     was_mounted_before_session: bool,
-    _all_devices: Vec<BlockDevice>,
+    all_devices: Vec<BlockDevice>,
     mut evidence: Vec<Evidence>,
     warnings: Vec<Warning>,
 ) -> FsRepairReport {
@@ -317,6 +320,29 @@ fn proceed_with_repair<R: CommandRunner + ?Sized>(
             .collect(),
             warnings,
         };
+    };
+
+    // Discovery-time mount state is not sufficient for a write-capable
+    // fsck. Hold an advisory exclusive lock and re-check both the device
+    // identity and mount table immediately before any tool invocation.
+    let _guard = match RepairTargetGuard::acquire(&device, &all_devices) {
+        Ok(guard) => guard,
+        Err(reason) => {
+            evidence.push(Evidence::new("REPAIR_PREFLIGHT_REFUSED", "repair::orchestrator", reason));
+            return FsRepairReport {
+                target_device: Some(device),
+                filesystem_type: Some(fstype.to_string()),
+                was_mounted_before_session,
+                selected_tool: Some(tool),
+                attempts: Vec::new(),
+                verification_mount: None,
+                cleanup: RepairCleanup::default(),
+                final_outcome: FsRepairOutcome::Unrepaired,
+                requires_human_action: true,
+                evidence,
+                warnings,
+            };
+        }
     };
 
     if tool == RepairTool::BtrfsCheck {
@@ -507,6 +533,60 @@ fn proceed_with_repair<R: CommandRunner + ?Sized>(
             || !report.cleanup.all_clean;
 
     report
+}
+
+struct RepairTargetGuard {
+    _file: File,
+}
+
+impl RepairTargetGuard {
+    fn acquire(device: &Path, devices: &[BlockDevice]) -> Result<Self, String> {
+        let expected_major_minor = devices
+            .iter()
+            .find(|candidate| candidate.dev_path.as_deref() == Some(device))
+            .and_then(|candidate| candidate.major_minor.as_deref())
+            .ok_or_else(|| "target has no discovery-time major:minor identity".to_string())?;
+        verify_target_unchanged(device, expected_major_minor)?;
+        let file = OpenOptions::new()
+            .read(true)
+            .open(device)
+            .map_err(|error| format!("cannot open target for exclusive repair lock: {error}"))?;
+        let result = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+        if result != 0 {
+            return Err(format!(
+                "target is already locked by another repair process: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+        verify_target_unchanged(device, expected_major_minor)?;
+        Ok(Self { _file: file })
+    }
+}
+
+fn verify_target_unchanged(device: &Path, expected_major_minor: &str) -> Result<(), String> {
+    let metadata = std::fs::metadata(device)
+        .map_err(|error| format!("cannot stat target device: {error}"))?;
+    let actual_major_minor = format!(
+        "{}:{}",
+        libc::major(metadata.rdev()),
+        libc::minor(metadata.rdev())
+    );
+    if actual_major_minor != expected_major_minor {
+        return Err(format!(
+            "target device identity changed from {expected_major_minor} to {actual_major_minor}"
+        ));
+    }
+    let mountinfo = std::fs::read_to_string("/proc/self/mountinfo")
+        .map_err(|error| format!("cannot re-read mount table: {error}"))?;
+    if crate::parse::mountinfo::parse_all(&mountinfo)
+        .iter()
+        .any(|mount| mount.major_minor == expected_major_minor)
+    {
+        return Err(format!(
+            "target {device:?} is mounted immediately before repair"
+        ));
+    }
+    Ok(())
 }
 
 /// Conservative outcome combination: when verification produced a
