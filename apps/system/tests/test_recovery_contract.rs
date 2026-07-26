@@ -26,13 +26,13 @@ use catos_system::shared::model::recovery::{
     TransactionPaths, TransactionRecord, TransactionState, RECOVERY_PLAN_SCHEMA_VERSION,
     TX_RECORD_SCHEMA_VERSION,
 };
-use catos_system::recovery::identity::{
+use catos_system::shared::snapshot_engine::identity::{
     drift_between, is_protected_recovery_path, safe_join, target_is_running_root,
     validate_plan_shape, verify_confirmation_token, RunningRoot, SubvolumePath,
 };
-use catos_system::recovery::plan::{build_confirmation_token, effective_plan_digest, PlanInputs};
-use catos_system::recovery::state::{reconcile_with_disk_facts, AdvanceAction, Intent};
-use catos_system::recovery::{confined, store};
+use catos_system::shared::snapshot_engine::plan::{build_confirmation_token, effective_plan_digest, PlanInputs};
+use catos_system::shared::snapshot_engine::state::{reconcile_with_disk_facts, AdvanceAction, Intent};
+use catos_system::shared::snapshot_engine::{confined, store};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -67,7 +67,7 @@ fn sample_plan() -> RecoveryPlan {
         },
         target_catos_identity: Some(CatosIdentity::default()),
         boot_layout: BootLayout::default(),
-        boot_consistency: catos_system::recovery::boot::evaluate_readonly_consistency(
+        boot_consistency: catos_system::shared::snapshot_engine::boot::evaluate_readonly_consistency(
             &BootLayout::default(),
         ),
         backup_root_path:
@@ -585,7 +585,7 @@ fn recovery_paths_layout_is_namespaced_under_top_level() {
 
 #[test]
 fn plan_builder_emits_no_boot_finalization_step() {
-    use catos_system::recovery::build_recovery_plan;
+    use catos_system::shared::snapshot_engine::build_recovery_plan;
     let inputs = PlanInputs {
         filesystem: BtrfsFilesystemIdentity {
             fsid: "fsid-A".into(),

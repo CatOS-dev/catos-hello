@@ -12,3 +12,4 @@ pub mod output;
 pub mod parse;
 pub mod process;
 pub mod probe;
+pub mod snapshot_engine;

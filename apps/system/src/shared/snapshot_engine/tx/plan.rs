@@ -53,9 +53,9 @@ pub struct PlanInputs {
 /// cryptographic — we have no OpenSSL by design — but it is bound
 /// structurally to the plan id and identity fields, so it cannot be
 /// replayed against a different plan without being detected by
-/// [`crate::recovery::identity::verify_confirmation_token`].
+/// [`crate::shared::snapshot_engine::identity::verify_confirmation_token`].
 pub fn build_plan(inputs: PlanInputs) -> Result<RecoveryPlan, RecoveryError> {
-    use crate::recovery::identity::{ensure_supported_snapshot_layout, SubvolumePath};
+    use crate::shared::snapshot_engine::identity::{ensure_supported_snapshot_layout, SubvolumePath};
 
     // Validate the paths so a malformed plan never reaches disk.
     SubvolumePath::parse(&inputs.current_root.path)?;
@@ -74,7 +74,7 @@ pub fn build_plan(inputs: PlanInputs) -> Result<RecoveryPlan, RecoveryError> {
         ));
     }
     ensure_supported_snapshot_layout(&inputs.current_root.path, &inputs.source_snapshot.path)?;
-    crate::recovery::identity::validate_recovery_id(&inputs.plan_id)?;
+    crate::shared::snapshot_engine::identity::validate_recovery_id(&inputs.plan_id)?;
     if inputs.confirmation_token_entropy.len() != 32 {
         return Err(RecoveryError::new(
             crate::shared::model::recovery::RecoveryErrorKind::RandomSourceFailed,
@@ -93,7 +93,7 @@ pub fn build_plan(inputs: PlanInputs) -> Result<RecoveryPlan, RecoveryError> {
     );
 
     let boot_consistency =
-        crate::recovery::boot::evaluate_readonly_consistency(&inputs.boot_layout);
+        crate::shared::snapshot_engine::boot::evaluate_readonly_consistency(&inputs.boot_layout);
     let mut refusal_conditions = vec![
         "plan id, filesystem FSID, or subvolume identity has changed".into(),
         "the source snapshot's readonly flag has been cleared between plan and apply".into(),

@@ -33,8 +33,8 @@ use crate::shared::model::recovery::{
     RecoveryError, RecoveryErrorKind, TransactionRecord, RECOVERY_PLAN_SCHEMA_VERSION,
     TX_RECORD_SCHEMA_VERSION,
 };
-use crate::recovery::confined;
-use crate::recovery::identity::{validate_plan_shape, validate_recovery_id};
+use crate::shared::snapshot_engine::confined;
+use crate::shared::snapshot_engine::identity::{validate_plan_shape, validate_recovery_id};
 
 /// Minimal view used to peek at a record's `schema_version` field
 /// BEFORE attempting a typed deserialization. This keeps v1 records
@@ -302,7 +302,7 @@ mod tests {
         BootLayout, BtrfsFilesystemIdentity, BtrfsSubvolumeIdentity, CompletedStep, DiskFacts,
         FstabRootDefinition, RecoveryPlan, TransactionPaths, TransactionState,
     };
-    use crate::recovery::plan::{build_confirmation_token, effective_plan_digest};
+    use crate::shared::snapshot_engine::plan::{build_confirmation_token, effective_plan_digest};
     use std::fs;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -353,7 +353,7 @@ mod tests {
             },
             target_catos_identity: None,
             boot_layout: BootLayout::default(),
-            boot_consistency: crate::recovery::boot::evaluate_readonly_consistency(
+            boot_consistency: crate::shared::snapshot_engine::boot::evaluate_readonly_consistency(
                 &BootLayout::default(),
             ),
             backup_root_path: format!("/.catos-recovery/backups/{id}/root-before"),

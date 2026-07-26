@@ -297,7 +297,7 @@ pub struct FstabRootDefinition {
 // ---------------------------------------------------------------------------
 
 /// All states a recovery transaction can be in. Transitions are
-/// validated by [`crate::recovery::state`] — direct mutation of the
+/// validated by [`crate::shared::snapshot_engine::state`] — direct mutation of the
 /// persisted state outside the engine is forbidden.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
@@ -495,7 +495,7 @@ pub struct TransactionRecord {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct DiskFacts {
     /// FSID observed at this transition. Reconciled against the plan
-    /// by [`crate::recovery::state`] to detect that the recovery is
+    /// by [`crate::shared::snapshot_engine::state`] to detect that the recovery is
     /// now talking to a different btrfs filesystem than it started
     /// against.
     pub filesystem_fsid: String,
@@ -1132,7 +1132,7 @@ mod tests {
                 pretty_name: None,
             }),
             boot_layout: BootLayout::default(),
-            boot_consistency: crate::recovery::boot::evaluate_readonly_consistency(
+            boot_consistency: crate::shared::snapshot_engine::boot::evaluate_readonly_consistency(
                 &BootLayout::default(),
             ),
             backup_root_path: "/.catos-recovery/backups/tx/root-before".into(),

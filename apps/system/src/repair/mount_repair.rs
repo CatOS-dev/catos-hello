@@ -62,9 +62,9 @@ use crate::shared::parse::fstab::{parse_all_with_diagnostics, FstabEntry, FstabE
 use crate::shared::probe::candidate::device_matches_fstab_source;
 use crate::shared::probe::discover_devices;
 use crate::shared::probe::fs_probe::{FilesystemProbe, RealFilesystem};
-use crate::recovery::confined;
-use crate::recovery::external as btrfs;
-use crate::recovery::lock::DeviceLock;
+use crate::shared::snapshot_engine::confined;
+use crate::shared::snapshot_engine::external as btrfs;
+use crate::shared::snapshot_engine::lock::DeviceLock;
 use crate::repair::fstab_edit::apply_edits;
 use crate::repair::path_safety::{validate_directory_creation, PathObservation};
 use crate::repair::subvol_decision::{

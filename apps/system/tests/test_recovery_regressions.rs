@@ -7,9 +7,9 @@ use catos_system::shared::model::recovery::{
     TransactionRecord, TransactionState, RECOVERY_PLAN_SCHEMA_VERSION, TX_RECORD_SCHEMA_VERSION,
 };
 use catos_system::phase3::{exit_code_for, Phase3Outcome};
-use catos_system::recovery::engine::{Engine, EngineOptions};
-use catos_system::recovery::lock::{lock_file_path, TransactionLock};
-use catos_system::recovery::state::{reconcile_with_disk_facts, resume_checkpoint};
+use catos_system::shared::snapshot_engine::engine::{Engine, EngineOptions};
+use catos_system::shared::snapshot_engine::lock::{lock_file_path, TransactionLock};
+use catos_system::shared::snapshot_engine::state::{reconcile_with_disk_facts, resume_checkpoint};
 
 const ID: &str = "tx-00000000000000000000000000000001";
 const FSID: &str = "11111111-2222-3333-4444-555555555555";
@@ -67,7 +67,7 @@ fn plan() -> RecoveryPlan {
             evidence: vec![],
         },
         target_catos_identity: None,
-        boot_consistency: catos_system::recovery::boot::evaluate_readonly_consistency(&boot_layout),
+        boot_consistency: catos_system::shared::snapshot_engine::boot::evaluate_readonly_consistency(&boot_layout),
         boot_layout,
         backup_root_path: format!("/.catos-recovery/backups/{ID}/root-before"),
         staging_root_path: format!("/.catos-recovery/staging/{ID}/new-root"),

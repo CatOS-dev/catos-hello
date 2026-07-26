@@ -10,7 +10,7 @@
 //! Every transition is persisted *before* the next one starts. The
 //! on-disk record is the source of truth after a crash. On resume
 //! the engine re-reads the record, reconciles it with disk facts
-//! via [`crate::recovery::state::reconcile_with_disk_facts`], and
+//! via [`crate::shared::snapshot_engine::state::reconcile_with_disk_facts`], and
 //! continues from the reconciled state.
 //!
 //! ## Test-only fault injection
@@ -37,15 +37,15 @@ use crate::shared::model::recovery::{
     RecoveryPlan, SubvolumeFacts, TransactionPaths, TransactionRecord, TransactionState,
     TX_RECORD_SCHEMA_VERSION,
 };
-use crate::recovery::confined;
-use crate::recovery::external as btrfs;
-use crate::recovery::identity::{
+use crate::shared::snapshot_engine::confined;
+use crate::shared::snapshot_engine::external as btrfs;
+use crate::shared::snapshot_engine::identity::{
     drift_between, ensure_target_is_not_running_root, is_protected_recovery_path,
 };
-use crate::recovery::lock::{lock_file_path, DeviceLock, TransactionLock};
-use crate::recovery::plan::verify_revert_confirmation_token;
-use crate::recovery::state::{reconcile_with_disk_facts, resume_checkpoint, AdvanceAction, Intent};
-use crate::recovery::store;
+use crate::shared::snapshot_engine::lock::{lock_file_path, DeviceLock, TransactionLock};
+use crate::shared::snapshot_engine::plan::verify_revert_confirmation_token;
+use crate::shared::snapshot_engine::state::{reconcile_with_disk_facts, resume_checkpoint, AdvanceAction, Intent};
+use crate::shared::snapshot_engine::store;
 
 /// Engine options. Built by the orchestrator (phase3.rs) before the
 /// engine runs. All paths are absolute; the orchestrator validates
@@ -418,8 +418,8 @@ impl Engine {
     fn resume_reverting(&mut self) -> Result<TransactionState, Box<RecoveryError>> {
         let facts = self.observe_disk_facts();
         let reverse_done =
-            crate::recovery::state::reverse_swap_appears_done(&self.record.plan, &facts);
-        let swap_done = crate::recovery::state::swap_appears_done(&self.record.plan, &facts);
+            crate::shared::snapshot_engine::state::reverse_swap_appears_done(&self.record.plan, &facts);
+        let swap_done = crate::shared::snapshot_engine::state::swap_appears_done(&self.record.plan, &facts);
         if reverse_done {
             self.persist_reverted("revert-resume-after-reverse-swap")?;
             return Ok(TransactionState::Reverted);

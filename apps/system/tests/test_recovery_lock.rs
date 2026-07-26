@@ -34,11 +34,11 @@ use catos_system::shared::model::recovery::{
     TransactionPaths, TransactionRecord, TransactionState, RECOVERY_PLAN_SCHEMA_VERSION,
     TX_RECORD_SCHEMA_VERSION,
 };
-use catos_system::recovery::engine::{Engine, EngineOptions};
-use catos_system::recovery::lock::{lock_file_path, TransactionLock};
-use catos_system::recovery::plan::{build_confirmation_token, effective_plan_digest};
-use catos_system::recovery::state::reconcile_with_disk_facts;
-use catos_system::recovery::store;
+use catos_system::shared::snapshot_engine::engine::{Engine, EngineOptions};
+use catos_system::shared::snapshot_engine::lock::{lock_file_path, TransactionLock};
+use catos_system::shared::snapshot_engine::plan::{build_confirmation_token, effective_plan_digest};
+use catos_system::shared::snapshot_engine::state::reconcile_with_disk_facts;
+use catos_system::shared::snapshot_engine::store;
 use std::hash::{Hash, Hasher};
 
 // ---------------------------------------------------------------------------
@@ -105,7 +105,7 @@ fn sample_plan_with_fsid(fsid: &str, plan_label: &str) -> RecoveryPlan {
         },
         target_catos_identity: None,
         boot_layout: BootLayout::default(),
-        boot_consistency: catos_system::recovery::boot::evaluate_readonly_consistency(
+        boot_consistency: catos_system::shared::snapshot_engine::boot::evaluate_readonly_consistency(
             &BootLayout::default(),
         ),
         backup_root_path: format!("/.catos-recovery/backups/{plan_id}/root-before"),
@@ -964,7 +964,7 @@ fn swap_done_rejects_readonly_active_root() {
     // subvolume_id, a readonly snapshot someone dropped at /@
     // would falsely match. Assert swap_appears_done returns
     // false here.
-    use catos_system::recovery::state::swap_appears_done;
+    use catos_system::shared::snapshot_engine::state::swap_appears_done;
     let plan = sample_plan_with_fsid("fsid-ro-rej", "p-ro-rej");
     let facts = DiskFacts {
         filesystem_fsid: plan.filesystem.fsid.clone(),

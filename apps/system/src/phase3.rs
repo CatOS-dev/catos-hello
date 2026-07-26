@@ -32,17 +32,17 @@ use crate::shared::mount::secure_dir::{create_session_dir, remove_session_dir, S
 use crate::shared::mount::session::Session;
 use crate::shared::mount::syscall::{self, mnt_flags, ms_flags};
 use crate::shared::parse::fstab::{self, FstabEntry, FstabEntryKind, FstabSource};
-use crate::recovery::confined;
-use crate::recovery::engine::{Engine, EngineOptions};
-use crate::recovery::external as btrfs;
-use crate::recovery::identity::{
+use crate::shared::snapshot_engine::confined;
+use crate::shared::snapshot_engine::engine::{Engine, EngineOptions};
+use crate::shared::snapshot_engine::external as btrfs;
+use crate::shared::snapshot_engine::identity::{
     canonical_block_identity, ensure_supported_snapshot_layout, ensure_target_is_not_running_root,
     validate_mounted_filesystem, validate_recovery_id, SubvolumePath,
 };
-use crate::recovery::plan::{
+use crate::shared::snapshot_engine::plan::{
     build_plan as build_recovery_plan, build_revert_confirmation_token, PlanInputs,
 };
-use crate::recovery::store;
+use crate::shared::snapshot_engine::store;
 
 /// Outcome of a phase-3 subcommand. Each variant carries the model
 /// the matching output renderer consumes.
@@ -306,8 +306,8 @@ fn run_apply(
     require_root()?;
 
     let plan = store::load_plan(plan_file)?;
-    crate::recovery::identity::validate_plan_shape(&plan)?;
-    crate::recovery::identity::verify_confirmation_token(&plan, plan_id_arg, confirm)?;
+    crate::shared::snapshot_engine::identity::validate_plan_shape(&plan)?;
+    crate::shared::snapshot_engine::identity::verify_confirmation_token(&plan, plan_id_arg, confirm)?;
 
     ensure_cli_root_matches_plan(selection.root_subvolume.as_deref(), &plan.current_root.path)?;
     ensure_supported_snapshot_layout(&plan.current_root.path, &plan.source_snapshot.path)?;
@@ -320,7 +320,7 @@ fn run_apply(
         Some(&plan.current_root.path),
         Some(&plan.source_snapshot.path),
     )?;
-    if let Some(error) = crate::recovery::identity::drift_between(
+    if let Some(error) = crate::shared::snapshot_engine::identity::drift_between(
         &plan,
         &fresh.filesystem,
         &fresh.current_root,
@@ -348,7 +348,7 @@ fn run_apply(
             "boot consistency report changed after the plan was generated",
         ));
     }
-    crate::recovery::boot::require_boot_consistency(&fresh.boot_consistency)?;
+    crate::shared::snapshot_engine::boot::require_boot_consistency(&fresh.boot_consistency)?;
     ensure_target_is_not_running_root(&fresh.filesystem, &fresh.current_root)?;
     let device = fresh.canonical_device;
 
@@ -1120,8 +1120,8 @@ fn probe_target_readonly(
                     format!("source snapshot {snapshot_btrfs_path} has no /etc/fstab"),
                 )
             })?;
-        let boot_layout = crate::recovery::boot::detect_layout(&snapshot_root, &snapshot_fstab);
-        let boot_consistency = crate::recovery::boot::evaluate_readonly_consistency(&boot_layout);
+        let boot_layout = crate::shared::snapshot_engine::boot::detect_layout(&snapshot_root, &snapshot_fstab);
+        let boot_consistency = crate::shared::snapshot_engine::boot::evaluate_readonly_consistency(&boot_layout);
         let catos_identity = read_catos_identity(top_level, snapshot_btrfs_path);
 
         Ok(TargetProbe {
@@ -1701,7 +1701,7 @@ mod tests {
         })
         .unwrap();
         let id = format!("tx-{}", hex(&bytes));
-        crate::recovery::identity::validate_recovery_id(&id).unwrap();
+        crate::shared::snapshot_engine::identity::validate_recovery_id(&id).unwrap();
         assert_eq!(id, "tx-000102030405060708090a0b0c0d0e0f");
     }
 

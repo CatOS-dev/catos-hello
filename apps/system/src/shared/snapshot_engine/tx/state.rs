@@ -603,7 +603,7 @@ mod tests {
             },
             target_catos_identity: None,
             boot_layout: Default::default(),
-            boot_consistency: crate::recovery::boot::evaluate_readonly_consistency(
+            boot_consistency: crate::shared::snapshot_engine::boot::evaluate_readonly_consistency(
                 &crate::shared::model::recovery::BootLayout::default(),
             ),
             backup_root_path: "/.catos-recovery/backups/p-test/root-before".into(),

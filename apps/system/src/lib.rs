@@ -20,7 +20,6 @@ pub mod doctor;
 pub mod entry;
 pub mod phase2;
 pub mod phase3;
-pub mod recovery;
 pub mod repair;
 pub mod shared;
 pub mod system_root;

@@ -236,7 +236,7 @@ pub fn run_boot_repair(
         has_plymouth: installed_packages
             .iter()
             .any(|package| package == "plymouth"),
-        has_crypto_keyfile: crate::recovery::confined::read_rooted_file(
+        has_crypto_keyfile: crate::shared::snapshot_engine::confined::read_rooted_file(
             target_root,
             "/crypto_keyfile.bin",
         )
@@ -640,7 +640,7 @@ fn run_boot_repair_mounted(
 
 fn detect_target_architecture(root: &Path) -> Option<crate::shared::model::boot_repair::Architecture> {
     let executable =
-        crate::recovery::confined::read_rooted_file(root, "/usr/lib/systemd/systemd").ok()?;
+        crate::shared::snapshot_engine::confined::read_rooted_file(root, "/usr/lib/systemd/systemd").ok()?;
     let machine = executable.get(18..20)?;
     match u16::from_le_bytes([machine[0], machine[1]]) {
         62 => Some(crate::shared::model::boot_repair::Architecture::X86_64),
@@ -749,12 +749,12 @@ fn collect_detection_inputs_from_target_root(root: &Path) -> DetectionInputs {
 }
 
 fn collect_installed_packages_from_target_root(root: &Path) -> Vec<String> {
-    crate::recovery::confined::list_rooted_directory_names(root, "/var/lib/pacman/local")
+    crate::shared::snapshot_engine::confined::list_rooted_directory_names(root, "/var/lib/pacman/local")
         .unwrap_or_default()
         .into_iter()
         .filter_map(|entry| entry.into_string().ok())
         .filter_map(|entry| {
-            crate::recovery::confined::read_rooted_file(
+            crate::shared::snapshot_engine::confined::read_rooted_file(
                 root,
                 &format!("/var/lib/pacman/local/{entry}/desc"),
             )
@@ -766,18 +766,18 @@ fn collect_installed_packages_from_target_root(root: &Path) -> Vec<String> {
 }
 
 fn collect_target_kernels(root: &Path) -> Vec<crate::repair::boot_repair::mkinitcpio::Kernel> {
-    let entries = crate::recovery::confined::list_rooted_directory_names(root, "/usr/lib/modules")
+    let entries = crate::shared::snapshot_engine::confined::list_rooted_directory_names(root, "/usr/lib/modules")
         .unwrap_or_default()
         .into_iter()
         .filter_map(|entry| entry.into_string().ok())
         .map(|version| {
             let base = format!("/usr/lib/modules/{version}");
             let pkgbase =
-                crate::recovery::confined::read_rooted_file(root, &format!("{base}/pkgbase"))
+                crate::shared::snapshot_engine::confined::read_rooted_file(root, &format!("{base}/pkgbase"))
                     .ok()
                     .and_then(|bytes| String::from_utf8(bytes).ok())
                     .unwrap_or_default();
-            let has_vmlinuz = crate::recovery::confined::rooted_regular_file_size(
+            let has_vmlinuz = crate::shared::snapshot_engine::confined::rooted_regular_file_size(
                 root,
                 &format!("{base}/vmlinuz"),
             )
@@ -804,13 +804,13 @@ fn pacman_package_name(desc: &str) -> Option<String> {
 }
 
 fn read_target_file(root: &Path, relative: &str) -> Option<String> {
-    crate::recovery::confined::read_rooted_file(root, &format!("/{relative}"))
+    crate::shared::snapshot_engine::confined::read_rooted_file(root, &format!("/{relative}"))
         .ok()
         .and_then(|contents| String::from_utf8(contents).ok())
 }
 
 fn target_regular_file_present(root: &Path, relative: &str) -> bool {
-    crate::recovery::confined::rooted_regular_file_size(root, &format!("/{relative}"))
+    crate::shared::snapshot_engine::confined::rooted_regular_file_size(root, &format!("/{relative}"))
         .ok()
         .flatten()
         .is_some_and(|size| size > 0)
@@ -826,7 +826,7 @@ fn target_uki_deployed(root: &Path) -> bool {
     ["/boot/EFI/Linux", "/boot/efi/EFI/Linux", "/efi/EFI/Linux"]
         .iter()
         .any(|directory| {
-            crate::recovery::confined::list_rooted_directory_names(root, directory)
+            crate::shared::snapshot_engine::confined::list_rooted_directory_names(root, directory)
                 .unwrap_or_default()
                 .iter()
                 .any(|entry| {
@@ -841,7 +841,7 @@ fn target_efistub_deployed(root: &Path) -> bool {
     ["/boot/EFI/CatOS", "/boot/efi/EFI/CatOS", "/efi/EFI/CatOS"]
         .iter()
         .any(|directory| {
-            crate::recovery::confined::list_rooted_directory_names(root, directory)
+            crate::shared::snapshot_engine::confined::list_rooted_directory_names(root, directory)
                 .unwrap_or_default()
                 .iter()
                 .filter_map(|entry| entry.to_str().map(str::to_string))
@@ -864,7 +864,7 @@ fn target_efistub_deployed(root: &Path) -> bool {
 }
 
 fn has_target_path(root: &Path, relative: &str) -> bool {
-    crate::recovery::confined::list_rooted_directory_names(root, &format!("/{relative}")).is_ok()
+    crate::shared::snapshot_engine::confined::list_rooted_directory_names(root, &format!("/{relative}")).is_ok()
 }
 
 #[derive(Debug, Clone, Default)]
@@ -886,7 +886,7 @@ fn snapshot_repair_state(
         return SnapshotRepairState::default();
     }
 
-    if crate::recovery::confined::read_rooted_file(target_root, "/etc/snapper/configs/root").is_ok()
+    if crate::shared::snapshot_engine::confined::read_rooted_file(target_root, "/etc/snapper/configs/root").is_ok()
     {
         return SnapshotRepairState {
             enabled: true,
@@ -894,7 +894,7 @@ fn snapshot_repair_state(
         };
     }
 
-    let template = crate::recovery::confined::read_rooted_file(
+    let template = crate::shared::snapshot_engine::confined::read_rooted_file(
         target_root,
         "/etc/snapper/config-templates/catos-root",
     )
@@ -1099,18 +1099,18 @@ fn run_snapshot_repair(
 }
 
 fn target_snapshot_catalog_has_entries(target_root: &Path) -> bool {
-    crate::recovery::confined::list_rooted_directory_names(target_root, "/.snapshots")
+    crate::shared::snapshot_engine::confined::list_rooted_directory_names(target_root, "/.snapshots")
         .unwrap_or_default()
         .into_iter()
         .filter_map(|entry| entry.into_string().ok())
         .filter(|entry| entry.chars().all(|character| character.is_ascii_digit()))
         .any(|entry| {
-            crate::recovery::confined::rooted_regular_file_size(
+            crate::shared::snapshot_engine::confined::rooted_regular_file_size(
                 target_root,
                 &format!("/.snapshots/{entry}/info.xml"),
             )
             .is_ok()
-                && crate::recovery::confined::list_rooted_directory_names(
+                && crate::shared::snapshot_engine::confined::list_rooted_directory_names(
                     target_root,
                     &format!("/.snapshots/{entry}/snapshot"),
                 )
@@ -1133,12 +1133,12 @@ fn snapshot_generate_reports_zero_deployment(
 }
 
 fn snapshot_unit_present(target_root: &Path, unit: &str) -> bool {
-    crate::recovery::confined::read_rooted_file(
+    crate::shared::snapshot_engine::confined::read_rooted_file(
         target_root,
         &format!("/usr/lib/systemd/system/{unit}"),
     )
     .is_ok()
-        || crate::recovery::confined::read_rooted_file(
+        || crate::shared::snapshot_engine::confined::read_rooted_file(
             target_root,
             &format!("/etc/systemd/system/{unit}"),
         )
@@ -1172,9 +1172,9 @@ impl ConfigTransaction {
             .parent()
             .and_then(Path::to_str)
             .ok_or_else(|| format!("invalid target configuration path {target_path:?}"))?;
-        crate::recovery::confined::create_rooted_directory(&self.root, parent)
+        crate::shared::snapshot_engine::confined::create_rooted_directory(&self.root, parent)
             .map_err(|error| format!("cannot create target config parent {parent}: {error}"))?;
-        let existing = crate::recovery::confined::read_rooted_file(&self.root, target_path).ok();
+        let existing = crate::shared::snapshot_engine::confined::read_rooted_file(&self.root, target_path).ok();
         if existing.as_deref() == Some(contents.as_bytes()) {
             return Ok(crate::shared::model::boot_repair::BootAction::ConfigUnchanged {
                 target_path: target_path.to_string(),
@@ -1182,12 +1182,12 @@ impl ConfigTransaction {
         }
         let backup_path = existing.as_ref().map(|bytes| {
             let backup_path = format!("{target_path}.catos-repair.backup");
-            crate::recovery::confined::atomic_write_rooted(&self.root, &backup_path, bytes, 0o600)
+            crate::shared::snapshot_engine::confined::atomic_write_rooted(&self.root, &backup_path, bytes, 0o600)
                 .map_err(|error| format!("cannot write backup {backup_path}: {error}"))?;
             Ok::<String, String>(backup_path)
         });
         let backup_path = backup_path.transpose()?;
-        crate::recovery::confined::atomic_write_rooted(
+        crate::shared::snapshot_engine::confined::atomic_write_rooted(
             &self.root,
             target_path,
             contents.as_bytes(),
@@ -1209,14 +1209,14 @@ impl ConfigTransaction {
         let mut errors = Vec::new();
         for change in self.changes.drain(..).rev() {
             let result = match change.original {
-                Some(original) => crate::recovery::confined::atomic_write_rooted(
+                Some(original) => crate::shared::snapshot_engine::confined::atomic_write_rooted(
                     &self.root,
                     &change.target_path,
                     &original,
                     0o644,
                 ),
                 None => {
-                    crate::recovery::confined::remove_rooted_file(&self.root, &change.target_path)
+                    crate::shared::snapshot_engine::confined::remove_rooted_file(&self.root, &change.target_path)
                 }
             };
             if let Err(error) = result {
@@ -1433,7 +1433,7 @@ fn target_systemd_boot_entry_present(target_root: &Path, esp: &str, kernels: &[K
     else {
         return false;
     };
-    let entries = crate::recovery::confined::list_rooted_directory_names(
+    let entries = crate::shared::snapshot_engine::confined::list_rooted_directory_names(
         target_root,
         &format!("/{esp}/loader/entries"),
     )
@@ -1459,7 +1459,7 @@ fn target_signed_catos_efi_present(target_root: &Path, esp_mount_point: Option<&
         return false;
     };
     let directory = format!("/{}/EFI/CatOS", esp_mount_point.trim_start_matches('/'));
-    let entries = crate::recovery::confined::list_rooted_directory_names(target_root, &directory)
+    let entries = crate::shared::snapshot_engine::confined::list_rooted_directory_names(target_root, &directory)
         .unwrap_or_default()
         .into_iter()
         .filter_map(|entry| entry.into_string().ok())

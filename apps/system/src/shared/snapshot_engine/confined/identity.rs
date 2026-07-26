@@ -10,7 +10,7 @@ use crate::shared::model::recovery::{
     RecoveryPlan, RECOVERY_PLAN_SCHEMA_VERSION,
 };
 use crate::shared::parse::mountinfo;
-use crate::recovery::external as btrfs;
+use crate::shared::snapshot_engine::external as btrfs;
 
 pub const RECOVERY_ID_HEX_LEN: usize = 32;
 
@@ -429,7 +429,7 @@ pub fn verify_confirmation_token(
             "presented plan id does not match the plan record on disk",
         ));
     }
-    let observed_digest = crate::recovery::plan::effective_plan_digest(plan)?;
+    let observed_digest = crate::shared::snapshot_engine::plan::effective_plan_digest(plan)?;
     if observed_digest != plan.plan_digest {
         return Err(RecoveryError::new(
             RecoveryErrorKind::PlanDigestMismatch,
@@ -439,7 +439,7 @@ pub fn verify_confirmation_token(
             ),
         ));
     }
-    let expected_token = crate::recovery::plan::build_confirmation_token(
+    let expected_token = crate::shared::snapshot_engine::plan::build_confirmation_token(
         &plan.plan_id,
         &plan.plan_digest,
         &plan.nonce,
@@ -499,7 +499,7 @@ pub fn validate_plan_shape(plan: &RecoveryPlan) -> Result<(), RecoveryError> {
         ));
     }
     let expected_boot_consistency =
-        crate::recovery::boot::evaluate_readonly_consistency(&plan.boot_layout);
+        crate::shared::snapshot_engine::boot::evaluate_readonly_consistency(&plan.boot_layout);
     if plan.boot_consistency != expected_boot_consistency {
         return Err(RecoveryError::new(
             RecoveryErrorKind::BootConsistencyInconsistent,
@@ -526,7 +526,7 @@ pub fn validate_plan_shape(plan: &RecoveryPlan) -> Result<(), RecoveryError> {
             "plan record is missing a valid nonce, digest, or confirmation token",
         ));
     }
-    let observed_digest = crate::recovery::plan::effective_plan_digest(plan)?;
+    let observed_digest = crate::shared::snapshot_engine::plan::effective_plan_digest(plan)?;
     if observed_digest != plan.plan_digest {
         return Err(RecoveryError::new(
             RecoveryErrorKind::PlanDigestMismatch,
@@ -711,7 +711,7 @@ pub fn target_is_running_root(
 mod tests {
     use super::*;
     use crate::shared::model::recovery::{BootLayout, CatosIdentity, FstabRootDefinition};
-    use crate::recovery::plan::{build_confirmation_token, effective_plan_digest};
+    use crate::shared::snapshot_engine::plan::{build_confirmation_token, effective_plan_digest};
 
     const PLAN_ID: &str = "tx-00000000000000000000000000000001";
     const OTHER_PLAN_ID: &str = "tx-00000000000000000000000000000002";
@@ -747,7 +747,7 @@ mod tests {
             },
             target_catos_identity: Some(CatosIdentity::default()),
             boot_layout: BootLayout::default(),
-            boot_consistency: crate::recovery::boot::evaluate_readonly_consistency(
+            boot_consistency: crate::shared::snapshot_engine::boot::evaluate_readonly_consistency(
                 &BootLayout::default(),
             ),
             backup_root_path: format!("/.catos-recovery/backups/{PLAN_ID}/root-before"),

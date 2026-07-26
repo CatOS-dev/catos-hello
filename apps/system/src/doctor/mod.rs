@@ -39,7 +39,7 @@ use crate::shared::model::doctor::{
 use crate::shared::model::evidence::Evidence;
 use crate::shared::model::mount_repair::{MountProblem, TargetIdentity};
 use crate::shared::model::recovery::TransactionRecord;
-use crate::recovery::store;
+use crate::shared::snapshot_engine::store;
 use crate::repair::boot_repair::detect::{detect, DetectionInputs, DetectionVerdict};
 use crate::repair::mount_repair::{MountPointObservation, MountRepairInputs};
 use crate::repair::runner::CommandRunner;

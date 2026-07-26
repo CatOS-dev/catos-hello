@@ -45,7 +45,7 @@ use crate::shared::model::storage::{BlockDevice, DeviceClass, PartitionRole, Roo
 use crate::shared::mount::probe::probe_unmounted_candidates;
 use crate::shared::probe::discover_devices;
 use crate::shared::probe::fs_probe::RealFilesystem;
-use crate::recovery::lock::DeviceLock;
+use crate::shared::snapshot_engine::lock::DeviceLock;
 use crate::repair::runner::{CommandRunner, TrustedRunner};
 use crate::repair::fs_flows::{
     btrfs_flow, btrfs_topology, e2fsck_flow, f2fs_flow, fat_flow, supports_filesystem, xfs_flow,

@@ -44,7 +44,7 @@ use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
 
 use crate::shared::model::recovery::{RecoveryError, RecoveryErrorKind};
-use crate::recovery::confined;
+use crate::shared::snapshot_engine::confined;
 
 /// `flock(LOCK_EX)` = 2. `LOCK_NB` = 4. Combined = 6.
 const LOCK_EX_NB: std::os::raw::c_int = 2 | 4;

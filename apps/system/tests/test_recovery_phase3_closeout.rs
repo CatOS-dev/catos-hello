@@ -346,7 +346,7 @@ fn sample_record_with_cleanup(summary: Option<CleanupSummary>) -> TransactionRec
         },
         target_catos_identity: None,
         boot_layout: Default::default(),
-        boot_consistency: catos_system::recovery::boot::evaluate_readonly_consistency(
+        boot_consistency: catos_system::shared::snapshot_engine::boot::evaluate_readonly_consistency(
             &Default::default(),
         ),
         backup_root_path: "/.catos-recovery/backups/tx-1/root-before".into(),
@@ -558,7 +558,7 @@ fn attach_cleanup_does_not_clear_last_error() {
     use catos_system::shared::model::recovery::{
         BtrfsFilesystemIdentity, CompletedStep, RecoveryPlan, RECOVERY_PLAN_SCHEMA_VERSION,
     };
-    use catos_system::recovery::engine::{Engine, EngineOptions};
+    use catos_system::shared::snapshot_engine::engine::{Engine, EngineOptions};
     use std::path::PathBuf;
 
     let top = std::env::temp_dir().join(format!(
@@ -601,7 +601,7 @@ fn attach_cleanup_does_not_clear_last_error() {
         },
         target_catos_identity: None,
         boot_layout: Default::default(),
-        boot_consistency: catos_system::recovery::boot::evaluate_readonly_consistency(
+        boot_consistency: catos_system::shared::snapshot_engine::boot::evaluate_readonly_consistency(
             &Default::default(),
         ),
         backup_root_path:
@@ -621,8 +621,8 @@ fn attach_cleanup_does_not_clear_last_error() {
         confirmation_token: String::new(),
         evidence: vec![],
     };
-    plan.plan_digest = catos_system::recovery::plan::effective_plan_digest(&plan).unwrap();
-    plan.confirmation_token = catos_system::recovery::plan::build_confirmation_token(
+    plan.plan_digest = catos_system::shared::snapshot_engine::plan::effective_plan_digest(&plan).unwrap();
+    plan.confirmation_token = catos_system::shared::snapshot_engine::plan::build_confirmation_token(
         &plan.plan_id,
         &plan.plan_digest,
         &plan.nonce,
@@ -647,10 +647,10 @@ fn attach_cleanup_does_not_clear_last_error() {
     {
         let state_path =
             top.join(".catos-recovery/transactions/tx-00000000000000000000000000000009/state.json");
-        let mut record = catos_system::recovery::store::load_record(&state_path).unwrap();
+        let mut record = catos_system::shared::snapshot_engine::store::load_record(&state_path).unwrap();
         record.last_error = Some(injected_error);
         record.state = catos_system::shared::model::recovery::TransactionState::FailedRecoverable;
-        catos_system::recovery::store::persist_record(&state_path, &record).unwrap();
+        catos_system::shared::snapshot_engine::store::persist_record(&state_path, &record).unwrap();
     }
     let mut reloaded_engine = Engine::load(
         EngineOptions {
@@ -806,8 +806,8 @@ fn record_mut_last_cleanup_is_inmemory_only_and_attach_cleanup_persists() {
         BtrfsFilesystemIdentity, BtrfsSubvolumeIdentity, FstabRootDefinition, RecoveryPlan,
         RECOVERY_PLAN_SCHEMA_VERSION,
     };
-    use catos_system::recovery::engine::{Engine, EngineOptions};
-    use catos_system::recovery::store;
+    use catos_system::shared::snapshot_engine::engine::{Engine, EngineOptions};
+    use catos_system::shared::snapshot_engine::store;
     use std::path::PathBuf;
 
     let top = std::env::temp_dir().join(format!(
@@ -850,7 +850,7 @@ fn record_mut_last_cleanup_is_inmemory_only_and_attach_cleanup_persists() {
         },
         target_catos_identity: None,
         boot_layout: Default::default(),
-        boot_consistency: catos_system::recovery::boot::evaluate_readonly_consistency(
+        boot_consistency: catos_system::shared::snapshot_engine::boot::evaluate_readonly_consistency(
             &Default::default(),
         ),
         backup_root_path:
@@ -871,8 +871,8 @@ fn record_mut_last_cleanup_is_inmemory_only_and_attach_cleanup_persists() {
         evidence: vec![],
     };
     let mut plan = plan;
-    plan.plan_digest = catos_system::recovery::plan::effective_plan_digest(&plan).unwrap();
-    plan.confirmation_token = catos_system::recovery::plan::build_confirmation_token(
+    plan.plan_digest = catos_system::shared::snapshot_engine::plan::effective_plan_digest(&plan).unwrap();
+    plan.confirmation_token = catos_system::shared::snapshot_engine::plan::build_confirmation_token(
         &plan.plan_id,
         &plan.plan_digest,
         &plan.nonce,

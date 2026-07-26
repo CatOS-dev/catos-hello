@@ -442,7 +442,7 @@ mod tests {
             },
             target_catos_identity: Some(CatosIdentity::default()),
             boot_layout: BootLayout::default(),
-            boot_consistency: crate::recovery::boot::evaluate_readonly_consistency(
+            boot_consistency: crate::shared::snapshot_engine::boot::evaluate_readonly_consistency(
                 &BootLayout::default(),
             ),
             backup_root_path: "/.catos-recovery/backups/tx-1/root-before".into(),
