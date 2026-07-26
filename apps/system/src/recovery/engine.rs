@@ -118,7 +118,7 @@ impl Engine {
             opts,
             record,
             lock: Some(lock),
-            _device_lock: Some(device_lock),
+            _device_lock: device_lock,
         };
         // Reconcile the persisted state with current disk facts BEFORE
         // any action runs. This is the load-bearing fix for the
@@ -147,7 +147,7 @@ impl Engine {
             opts,
             record,
             lock: Some(lock),
-            _device_lock: Some(device_lock),
+            _device_lock: device_lock,
         };
 
         let facts = engine.reconcile_status();
@@ -202,9 +202,9 @@ impl Engine {
     pub fn begin(opts: EngineOptions, plan: RecoveryPlan) -> Result<Self, RecoveryError> {
         let transaction_id = plan.plan_id.clone();
         ensure_target_matches_plan(&plan, &opts.validated_filesystem)?;
-        let device_lock = DeviceLock::try_acquire(&opts.device_path)?;
         let fsid = opts.validated_filesystem.fsid.clone();
         let lock = acquire_lock_guard(&opts.top_level_mount, &fsid).map_err(|e| *e)?;
+        let device_lock = DeviceLock::try_acquire_if_block_device(&opts.device_path)?;
         let plan_path = top_level_plan_path(&opts.top_level_mount, &transaction_id);
         store::persist_plan(&plan_path, &plan)?;
         let now = now_unix();
@@ -228,7 +228,7 @@ impl Engine {
             opts,
             record,
             lock: Some(lock),
-            _device_lock: Some(device_lock),
+            _device_lock: device_lock,
         };
         engine.persist_record("begin")?;
         Ok(engine)
@@ -1225,10 +1225,10 @@ fn acquire_lock_guard(
 fn load_record_under_lock(
     opts: &EngineOptions,
     transaction_id: &str,
-) -> Result<(TransactionRecord, TransactionLock, DeviceLock), RecoveryError> {
-    let device_lock = DeviceLock::try_acquire(&opts.device_path)?;
+) -> Result<(TransactionRecord, TransactionLock, Option<DeviceLock>), RecoveryError> {
     let fsid = opts.validated_filesystem.fsid.clone();
     let lock = acquire_lock_guard(&opts.top_level_mount, &fsid).map_err(|error| *error)?;
+    let device_lock = DeviceLock::try_acquire_if_block_device(&opts.device_path)?;
     let state_path = top_level_state_path(&opts.top_level_mount, transaction_id);
     let record = store::load_record(&state_path)?;
     ensure_target_matches_plan(&record.plan, &opts.validated_filesystem)?;

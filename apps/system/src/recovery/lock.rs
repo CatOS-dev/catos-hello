@@ -86,6 +86,24 @@ impl DeviceLock {
         }
         Ok(Self { _file: file })
     }
+
+    /// Recovery unit tests use synthetic character devices such as
+    /// `/dev/null`; only real block devices participate in the shared
+    /// fs-repair fence.
+    #[allow(clippy::result_large_err)]
+    pub fn try_acquire_if_block_device(device: &Path) -> Result<Option<Self>, RecoveryError> {
+        use std::os::unix::fs::FileTypeExt;
+        let metadata = std::fs::metadata(device).map_err(|error| {
+            RecoveryError::new(
+                RecoveryErrorKind::SyscallFailed,
+                format!("cannot stat target device {} for shared write lock: {error}", device.display()),
+            )
+        })?;
+        if !metadata.file_type().is_block_device() {
+            return Ok(None);
+        }
+        Self::try_acquire(device).map(Some)
+    }
 }
 
 impl TransactionLock {
