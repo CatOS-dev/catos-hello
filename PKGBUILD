@@ -2,7 +2,7 @@
 pkgname=catos-hello
 pkgver=0.1.0
 pkgrel=12
-pkgdesc="CatOS Hello - welcome application + phase-1/2 read-only system backend + phase-3 transactional Btrfs root-snapshot recovery"
+pkgdesc="CatOS Hello welcome application and mount/boot recovery backend"
 arch=('x86_64')
 url="https://github.com/Aromatic05/catOS-hello"
 license=('GPL')

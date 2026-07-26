@@ -540,17 +540,17 @@ fn parse_plan_file_path(value: &str, option: &str) -> Result<PathBuf, Error> {
 pub fn help_text() -> String {
     format!(
         "\
-catos-system {version} - CatOS system backend (phase 1 + phase 2 + phase 3)
+catos-system {version} - CatOS mount and boot recovery backend
 
 USAGE:
     catos-system <SUBCOMMAND> [OPTIONS]
 
-PHASE-1 SUBCOMMANDS (read-only environment + target inspection):
+FOUNDATION SUBCOMMANDS (read-only environment + target inspection):
     environment   Print detected runtime environment facts.
     capabilities  Print detected capabilities (read-only).
     inspect       Print combined runtime + capabilities + target inspection.
 
-PHASE-2 SUBCOMMANDS (read-only storage discovery + safe RO target mount):
+SAFE-MOUNT SUBCOMMANDS (read-only discovery + temporary target mount):
     storage scan  Walk sysfs + blkid + mountinfo; emit a StorageReport.
                   Pure read. No mounts, no writes.
     target plan   Read --root's /etc/fstab + discover devices; emit a
@@ -558,7 +558,7 @@ PHASE-2 SUBCOMMANDS (read-only storage discovery + safe RO target mount):
     target mount  Same as 'target plan' then execute the plan in a private
                   mount namespace (read-only mounts only).
 
-PHASE-3 SUBCOMMANDS (btrfs root-snapshot recovery transaction):
+SNAPSHOT-RECOVERY SUBCOMMANDS (transactional Btrfs root recovery):
     recovery list     List existing transactions on the configured root.
     recovery inspect  Read-only: show filesystem + current-root + snapshot
                       identity and the source-snapshot boot layout.
@@ -610,11 +610,11 @@ NOTES:
       'target mount' uses read-only filesystem-specific safety options
       (ext4 noload, xfs norecovery, btrfs rescue=nologreplay, ...) so
       journal replay and superblock updates are suppressed.
-    * Phase 3 (recovery apply/resume/revert) is the ONLY place that
-      writes to the target device. The writes are bounded to the
+    * In the current implementation, recovery apply/resume/revert is the
+      only target write path. The writes are bounded to the
       btrfs top-level, transactional, crash-resumable, and require
       --plan-id + --confirm (--transaction + --confirm for revert).
-      Phase 3 never touches the ESP, the bootloader, /boot,
+      Snapshot recovery never touches the ESP, the bootloader, /boot,
       initramfs images, or firmware entries.
     * 'target mount' enters a private mount namespace (CLONE_NEWNS) and
       flips / to MS_REC|MS_PRIVATE so its mounts do NOT propagate to
@@ -622,9 +622,12 @@ NOTES:
     * Phase 2 mounts are read-only with filesystem-specific safety options
       (ext4 noload, xfs norecovery, btrfs rescue=nologreplay, etc.) so journal replay
       and superblock updates are suppressed.
-    * argv[0] is honoured only for the JSON 'invocation' field and for help
-      text. The three symlinks catos-update / catos-recovery / catos-doctor
-      all accept the same subcommands and produce identical probe results.
+    * Public entry points share this binary:
+      catos-doctor  runs the diagnosis with no arguments;
+      catos-recovery handles Btrfs snapshot recovery;
+      catos-repair is the fs/mount/boot repair entry point;
+      catos-update is retained as a separate entry point.
+    * catos-doctor has no inspect or preflight subcommands.
 ",
         version = crate::PROGRAM_VERSION,
         ok = exit_code::SUCCESS,

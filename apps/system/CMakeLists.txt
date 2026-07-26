@@ -1,5 +1,5 @@
-# CatOS system backend: Rust static binary providing three multicall
-# entry points via symlinks.
+# CatOS system backend: one Rust static binary exposed through four
+# role-specific public aliases.
 #
 # The actual build is delegated to Cargo via add_custom_command. CMake tracks
 # Cargo.toml, Cargo.lock, and src/**/*.rs so incremental rebuilds work and
@@ -224,9 +224,9 @@ if(BUILD_TESTS)
     endif()
 endif()
 
-# ---- install: binary + three relative symlinks -----------------------------
-# Binary lives under /usr/lib/catos/ (not /usr/bin/) so the three symlinks can
-# be relative ("../lib/catos/catos-system") and survive being moved as a group.
+# ---- install: binary + public entry points --------------------------------
+# Binary lives under /usr/lib/catos/ (not /usr/bin/). Public aliases are
+# relative so the installation remains relocatable as a group.
 install(PROGRAMS "${CATOS_SYSTEM_BIN}"
         DESTINATION "lib/catos"
         RENAME catos-system)
@@ -236,13 +236,13 @@ install(PROGRAMS "${CATOS_SYSTEM_BIN}"
 # time and embed as a literal.
 set(_catos_install_bindir "${CMAKE_INSTALL_BINDIR}")
 
-# Create the three multicall symlinks at install time. We use install(CODE)
+# Create the four public multicall symlinks at install time. We use install(CODE)
 # so the links are produced in the staged install tree (respecting DESTDIR and
 # CMAKE_INSTALL_PREFIX) and so we can make them relative.
 install(CODE "
     set(_catos_bindir \"\$ENV{DESTDIR}\${CMAKE_INSTALL_PREFIX}/${_catos_install_bindir}\")
     file(MAKE_DIRECTORY \"\${_catos_bindir}\")
-    foreach(_name catos-update catos-recovery catos-doctor)
+    foreach(_name catos-update catos-recovery catos-doctor catos-repair)
         set(_link \"\${_catos_bindir}/\${_name}\")
         if(EXISTS \"\${_link}\" AND NOT IS_SYMLINK \"\${_link}\")
             message(FATAL_ERROR \"Refusing to overwrite non-symlink \${_link}\")

@@ -182,6 +182,22 @@ fn json_runtime_has_six_detections() {
 }
 
 #[test]
+fn public_help_describes_the_minimal_entry_point_roles() {
+    let (ok, _, stdout, _) = run(&["--help"]);
+    assert!(ok);
+    for name in [
+        "catos-update",
+        "catos-recovery",
+        "catos-doctor",
+        "catos-repair",
+    ] {
+        assert!(stdout.contains(name), "missing public entry point {name}");
+    }
+    assert!(!stdout.contains("doctor inspect"));
+    assert!(!stdout.contains("doctor preflight"));
+}
+
+#[test]
 fn help_and_version_exit_zero() {
     let (ok, code, stdout_help, _) = run(&["--help"]);
     assert!(ok);

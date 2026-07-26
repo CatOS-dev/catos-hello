@@ -1,97 +1,103 @@
 # catos-system
 
-System backend for CatOS. Phase 1 is read-only environment + target
-inspection, phase 2 is read-only storage discovery + safe RO target
-mount, and phase 3 is the explicitly-authorized, transactional,
-crash-resumable Btrfs root-snapshot recovery. The backend ships as a
-single static musl binary installed at `/usr/lib/catos/catos-system`,
-exposed through three multicall symlinks:
+`catos-system` is the shared static backend for CatOS system utilities.
+The package installs one binary:
 
+```text
+/usr/lib/catos/catos-system
 ```
+
+and four role-specific entry points:
+
+```text
 /usr/bin/catos-update   -> ../lib/catos/catos-system
 /usr/bin/catos-recovery -> ../lib/catos/catos-system
 /usr/bin/catos-doctor   -> ../lib/catos/catos-system
+/usr/bin/catos-repair   -> ../lib/catos/catos-system
 ```
 
-All three symlinks point to the same inode. There is exactly one binary
-target. `argv[0]` is honoured only for the JSON `invocation` field and for
-help text; it never gates a permission.
+Their public responsibilities are intentionally small:
 
-## Read-only vs. write scope
+- `catos-doctor` takes no functional arguments and prints the diagnosis. It
+  has no `inspect` or `preflight` subcommands.
+- `catos-recovery` handles Btrfs snapshot recovery.
+- `catos-repair` is the fs, mount, and boot repair entry point.
+- `catos-update` remains a separate public entry point. This change does not
+  define or expand its behaviour.
 
-| Phase | Writes to the target device? |
-|-------|------------------------------|
-| Phase 1 — environment + target inspection | **Never.** Pure reads of the running system and the target root. |
-| Phase 2 — storage discovery + safe target mount | **Never.** Mounts are read-only with filesystem-specific safety options (ext4 `noload`, xfs `norecovery`, btrfs `rescue=nologreplay`, ...) so journal replay and superblock updates are suppressed. Pre-existing mounts are never unmounted. |
-| Phase 3 — Btrfs root-snapshot recovery | **Yes, only on the operator's explicit authorization.** `recovery apply`, `resume`, and `revert` mount the target's btrfs top-level read-write inside a private mount namespace, perform a single `renameat2(RENAME_EXCHANGE)` root swap, and persist transaction state after every state transition. |
+All entry points share the same inode. `argv[0]` selects the user-facing role
+only and never grants permission.
 
-Phase 3 is the only place in `catos-system` that writes to the target
-device. The write path is bounded, transactional, and never touches the
-ESP, the bootloader, `/boot`, initramfs images, or firmware entries.
+## Six-stage product plan
 
-## Scope (phase 1 + phase 2 + phase 3)
+| Stage | Scope | Current state |
+|---|---|---|
+| 1 | Environment, device and CatOS target discovery | Implemented; read-only |
+| 2 | Safe read-only target mount planning and temporary mount sessions | Implemented; read-only |
+| 3 | Transactional mount-configuration repair | Not implemented |
+| 4 | Transactional Btrfs root-snapshot recovery | Implemented, with final layout/integration closeout remaining |
+| 5 | Boot topology inspection and immutable repair planning | Not implemented |
+| 6 | Transactional boot repair and Live/Polkit/GUI integration | Not implemented |
 
-This is **phase 1 + phase 2 + phase 3**. Phases 1 and 2 are read-only
-with respect to the target system. Phase 2 adds storage discovery and
-safe read-only mounting of the target system inside a private mount
-namespace; it never writes to the target device (no journal replay, no
-superblock updates, no LUKS unlock, no LVM/mdraid changes, no fsck, no
-btrfs rollback).
+## Current read/write boundary
 
-Phase 3 adds a durable, crash-resumable, explicitly-authorized Btrfs
-root-snapshot recovery transaction. It mounts the target's btrfs
-top-level (subvolid=5) read-write inside a private namespace, performs
-a single `renameat2(RENAME_EXCHANGE)` root swap between the current
-root subvolume and a fresh snapshot of the operator-selected source
-snapshot, and persists transaction state on the btrfs top-level at
-`/.catos-recovery/transactions/<id>/state.json` after every state
-transition. The transaction can be resumed at any time after a crash
-(SIGKILL, power loss) by running `recovery resume --transaction <id>`.
+The current codebase writes to a target only for explicitly authorised Btrfs
+snapshot recovery:
 
-Phase 3 will NEVER:
+```text
+recovery apply
+recovery resume
+recovery revert
+```
 
-- pacman updates
-- bootloader repair (GRUB / Limine / UKI)
-- LUKS unlock
-- LVM / mdraid manipulation
-- fsck
-- delete the pre-recovery backup automatically (it lives at
-  `/.catos-recovery/backups/<id>/root-before` and stays until the
-  operator removes it or runs `recovery revert`)
-- write to the ESP (the recovery root swap does not touch the ESP;
-  recovery does not call any bootloader tool — boot reconciliation
-  is the operator's responsibility)
-- run as a long-lived daemon or TUI
-- perform network operations
+Stages 1 and 2 are read-only. Stage 2 uses filesystem-specific options such as
+`ext4: ro,noload`, `xfs: ro,norecovery`, and
+`btrfs: ro,rescue=nologreplay` to avoid journal or tree-log replay.
 
-Phase 3 guarantees:
+The implemented snapshot-recovery path mounts the Btrfs top level read-write
+inside a private mount namespace, validates the immutable plan and target
+identity, performs a single `renameat2(RENAME_EXCHANGE)` root swap, and persists
+the transaction after every state transition. It never writes `/boot`, the
+ESP, firmware variables, initramfs images, or bootloader configuration.
 
-- Every persistent state transition is fsynced (file data + parent dir)
-  before the next action runs.
-- Crash injection is gated behind the `recovery_fault_injection` cargo
-  feature; the production binary cannot be made to inject faults.
-- A held `flock(LOCK_EX)` on `/.catos-recovery/locks/<fsid>.lock`
-  prevents two concurrent transactions on the same filesystem.
-- The pre-recovery root is preserved as a readonly subvolume at the
-  backup path; it is never deleted by `apply`, `resume`, or `Completed`
-  transitions.
+Future mount and boot repair writes must reuse the same principles: explicit
+plan, identity revalidation, confirmation, target-exclusive locking, durable
+transaction state, verification, and truthful cleanup reporting.
+
+## Snapshot-recovery guarantees
+
+- Every persistent state transition is fsynced before the next operation.
+- Fault injection is unavailable in the production binary.
+- An exclusive filesystem lock prevents concurrent recovery transactions.
+- The pre-recovery root is preserved as a read-only backup.
+- `apply`, `resume`, and `revert` do not execute package management commands.
+- Recovery never performs automatic boot repair or automatic root selection.
 
 ## CLI
 
+`catos-doctor` is intentionally argumentless:
+
+```text
+catos-doctor
 ```
-# Phase 1 — read-only environment + target inspection
+
+The currently implemented backend commands remain available through the
+canonical binary:
+
+```
+# Stage 1 — read-only environment + target inspection
 catos-system environment  [--root PATH] [--json]
 catos-system capabilities [--root PATH] [--json]
 catos-system inspect      [--root PATH] [--json]
 
-# Phase 2 — read-only storage discovery + safe RO target mount
+# Stage 2 — read-only storage discovery + safe RO target mount
 catos-system storage scan                [--root PATH] [--json]
 catos-system target plan                 [--root PATH] [--json]
     [--root-device /dev/...] [--root-subvolume PATH] [--esp-device /dev/...]
 catos-system target mount                [--root PATH] [--json]
     [--root-device /dev/...] [--root-subvolume PATH] [--esp-device /dev/...]
 
-# Phase 3 — durable, crash-resumable Btrfs root-snapshot recovery
+# Stage 4 — durable, crash-resumable Btrfs root-snapshot recovery
 catos-system recovery list              [--json]
     [--root-device /dev/...]
 catos-system recovery inspect           [--json]
@@ -116,9 +122,9 @@ catos-system --version
 catos-system --help
 ```
 
-The three symlinks accept the same subcommands and use the same probe
-core. The selected subcommand controls which report sections are
-rendered:
+The canonical backend commands below are implementation surfaces; they do not
+create `catos-doctor inspect` or `catos-doctor preflight` public syntax. The
+selected canonical subcommand controls which report sections are rendered:
 
 - `environment`: runtime facts only
 - `capabilities`: capability results only
@@ -139,9 +145,8 @@ rendered:
   (`finished` or `cleanup_incomplete`), not a stale active snapshot.
 
 ```
-catos-doctor inspect --json
+catos-system inspect --json
 catos-recovery environment --json
-catos-update capabilities --json
 catos-recovery storage scan --json
 catos-recovery target plan --json
 ```
@@ -230,12 +235,11 @@ Stable invariants of the JSON contract:
    I/O errors, and unsafe path resolution are represented as `unknown`, not
    collapsed into `false` or `missing`.
 
-Schema 2 intentionally replaces the initial internal schema 1 contract. It
-introduces subcommand-specific sections, three-state target presence, and
-three-state target tool results.
+Schema 2 introduced subcommand-specific sections, three-state target presence,
+and three-state target tool results.
 
-A formal JSON Schema file is intentionally **not** provided in phase 1. The
-above is the contract. If the report grows enough that machine validation
+A formal JSON Schema file is intentionally **not** provided yet. The above is
+the contract. If the report grows enough that machine validation
 becomes valuable, a schema file can be added without breaking this contract.
 
 ## Architecture
@@ -268,7 +272,7 @@ src/
     fs_probe.rs        filesystem abstraction + confined target-root access (openat2)
     runtime.rs         detect_runtime + six detectors (initramfs/chroot/live/snapshot/systemd/ro)
     target.rs          inspect_target + os-release parsing + tool probes
-    capability.rs      detect_capabilities (15 phase-1 capabilities)
+    capability.rs      detect_capabilities (14 foundation capabilities)
     block.rs           sysfs + mountinfo + udev DB + trusted blkid supplement
     candidate.rs       phase 2: evidence-driven root/ESP candidate identification
   mount/             state-changing layer (phase 2); only read-only mounts
@@ -463,18 +467,18 @@ info: binary size 1036992 bytes (1012 KiB)
 RESULT: OK (binary is fully static)
 ```
 
-The phase-3 backend includes the recovery transaction layer, identity
+The Stage-4 snapshot-recovery backend (currently implemented in
+`src/phase3.rs`) includes the recovery transaction layer, identity
 drift detection, SHA-256-bound plan and confirmation records, confined
 openat2 storage, durable transaction persistence, Btrfs ioctl snapshot
 creation, the renameat2 root exchange, read-only boot consistency
-reporting, and JSON + human renderers for all phase-3 outcomes. Static
+reporting, and JSON + human renderers for all snapshot-recovery outcomes. Static
 size is checked by `verify-static.sh` against the 4 MiB warning
 threshold; the exact binary size depends on the current toolchain.
 
-## What is NOT implemented (deferred to later phases)
+## What is not implemented yet
 
-- LUKS unlock (`cryptsetup` integration)
-- pacman-driven update workflow
+- Transactional repair of `/etc/fstab` and the CatOS Btrfs mount layout.
 - Bootloader repair of any kind (GRUB, Limine, UKI, sd-boot). Recovery
   swaps the root subvolume only; it does NOT call any bootloader tool
   and does NOT write to the ESP. A read-only `BootConsistencyReport`
@@ -487,3 +491,11 @@ threshold; the exact binary size depends on the current toolchain.
 - A TUI / interactive UI
 - A long-running daemon
 - Network operations of any kind
+
+## Removed from the implementation plan
+
+- a bundled static pacman/libalpm replacement
+- an independent repository database, package solver, keyring, or package
+  repair runtime
+- arbitrary chroot, shell, or target-command execution
+- formatting, partition-table editing, automatic fsck, LVM, or mdraid repair

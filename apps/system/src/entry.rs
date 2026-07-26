@@ -1,5 +1,5 @@
-//! Multicall entry. argv[0] decides the invocation name (catos-system,
-//! catos-update, catos-recovery, catos-doctor). The invocation name is
+//! Multicall entry. argv[0] selects one of the public CatOS entry points.
+//! They share one physical binary; the invocation name is
 //! **informational only** and never gates any permission.
 
 use std::fmt;
@@ -19,6 +19,7 @@ pub enum Invocation {
     CatosUpdate,
     CatosRecovery,
     CatosDoctor,
+    CatosRepair,
 }
 
 impl Invocation {
@@ -29,18 +30,19 @@ impl Invocation {
             Invocation::CatosUpdate => "catos-update",
             Invocation::CatosRecovery => "catos-recovery",
             Invocation::CatosDoctor => "catos-doctor",
+            Invocation::CatosRepair => "catos-repair",
         }
     }
 
     /// Determine invocation from argv[0]. Only the basename is considered so
-    /// both `/usr/lib/catos/catos-system` and `/usr/bin/catos-doctor`
-    /// resolve correctly.
+    /// both the canonical binary and every installed alias resolve correctly.
     pub fn from_argv0(argv0: &str) -> Invocation {
         let base = argv0.rsplit('/').next().unwrap_or(argv0);
         match base {
             "catos-update" => Invocation::CatosUpdate,
             "catos-recovery" => Invocation::CatosRecovery,
             "catos-doctor" => Invocation::CatosDoctor,
+            "catos-repair" => Invocation::CatosRepair,
             // Includes "catos-system" and any unknown caller: silently fall
             // back to the canonical name so probes still run.
             _ => Invocation::CatosSystem,
@@ -94,6 +96,28 @@ pub fn build_report(
 pub fn run(invocation: Invocation, argv: &[String]) -> i32 {
     use std::io::Write;
 
+    if invocation == Invocation::CatosDoctor {
+        match argv {
+            [arg] if matches!(arg.as_str(), "-h" | "--help") => {
+                print!(
+                    "catos-doctor {} - CatOS diagnosis\n\nUSAGE:\n    catos-doctor\n",
+                    crate::PROGRAM_VERSION
+                );
+                std::io::stdout().flush().ok();
+                return exit_code::SUCCESS;
+            }
+            [arg] if matches!(arg.as_str(), "-V" | "--version") => {
+                println!("catos-doctor {}", crate::PROGRAM_VERSION);
+                return exit_code::SUCCESS;
+            }
+            [] => {}
+            _ => {
+                eprintln!("{invocation}: argument error: catos-doctor does not accept arguments");
+                return exit_code::ARG_ERROR;
+            }
+        }
+    }
+
     // Validate the default target root. In phase 1 the default is `/`; if
     // `/` is somehow inaccessible we cannot proceed.
     let default_root = match crate::system_root::SystemRoot::from_user_input("/") {
@@ -104,7 +128,13 @@ pub fn run(invocation: Invocation, argv: &[String]) -> i32 {
         }
     };
 
-    match crate::cli::parse(argv, default_root) {
+    // Internally reuse the complete inspection report without exposing an
+    // `inspect` subcommand on the doctor interface.
+    let doctor_default = (invocation == Invocation::CatosDoctor && argv.is_empty())
+        .then(|| vec!["inspect".to_string()]);
+    let effective_argv = doctor_default.as_deref().unwrap_or(argv);
+
+    match crate::cli::parse(effective_argv, default_root) {
         Ok(crate::cli::ParseOutcome::Help(text)) => {
             // Replace the program name in the canned help text so users
             // invoking via a symlink see their invocation.

@@ -2,8 +2,8 @@
 //! the actual binary.
 //!
 //! Real risks this guards against:
-//! 1. Someone re-introduces three separate binary targets instead of one
-//!    multicall binary (defeats size budget + initramfs simplicity).
+//! 1. Someone re-introduces separate binaries instead of one multicall
+//!    binary (defeats size budget + initramfs simplicity).
 //! 2. argv[0] handling breaks so invoking via a symlink crashes or gives
 //!    a wrong invocation field that downstream tooling keys on.
 //! 3. Probe results diverge depending on the entry point (must be identical).
@@ -46,30 +46,26 @@ impl Drop for TempDir {
     }
 }
 
-/// Symlink-name -> invocation string. This is the full set of recognised
-/// multicall entry points for phase 1.
+/// Symlink-name -> invocation string. All public entry points share the
+/// same physical binary but retain distinct user-facing roles.
 const ENTRY_POINTS: &[(&str, &str)] = &[
     ("catos-system", "catos-system"),
     ("catos-update", "catos-update"),
     ("catos-recovery", "catos-recovery"),
     ("catos-doctor", "catos-doctor"),
+    ("catos-repair", "catos-repair"),
 ];
 
 #[test]
-fn each_symlink_runs_and_reports_correct_invocation() {
+fn each_symlink_is_recognised_in_help_output() {
     let bin = bin_path();
     let tmp = TempDir::new("catos-multicall").unwrap();
-    let mut links = Vec::new();
-    for (link_name, _) in ENTRY_POINTS {
+
+    for (link_name, expected_invocation) in ENTRY_POINTS {
         let link_path = tmp.path.join(link_name);
         symlink(&bin, &link_path).unwrap();
-        links.push(link_path);
-    }
-
-    for (link_path, expected_invocation) in links.iter().zip(ENTRY_POINTS.iter().map(|(_, i)| *i)) {
-        let output = Command::new(link_path)
-            .arg("inspect")
-            .arg("--json")
+        let output = Command::new(&link_path)
+            .arg("--help")
             .output()
             .unwrap_or_else(|e| panic!("spawn {}: {e}", link_path.display()));
         assert!(
@@ -80,17 +76,9 @@ fn each_symlink_runs_and_reports_correct_invocation() {
             String::from_utf8_lossy(&output.stderr)
         );
         let stdout = String::from_utf8(output.stdout).unwrap();
-        let json: serde_json::Value = serde_json::from_str(&stdout).unwrap_or_else(|e| {
-            panic!(
-                "invalid JSON from {}: {e}\nraw: {stdout}",
-                link_path.display()
-            )
-        });
-        assert_eq!(
-            json["invocation"].as_str(),
-            Some(expected_invocation),
-            "invocation mismatch for {}",
-            link_path.display()
+        assert!(
+            stdout.starts_with(expected_invocation),
+            "help output did not use invocation {expected_invocation}: {stdout}"
         );
     }
 }
@@ -101,7 +89,10 @@ fn core_probe_results_are_identical_across_entry_points() {
     let tmp = TempDir::new("catos-multicall-core").unwrap();
 
     let mut reports: Vec<serde_json::Value> = Vec::new();
-    for (link_name, _) in ENTRY_POINTS {
+    for (link_name, _) in ENTRY_POINTS
+        .iter()
+        .filter(|(name, _)| matches!(*name, "catos-system" | "catos-recovery"))
+    {
         let link_path = tmp.path.join(link_name);
         symlink(&bin, &link_path).unwrap();
         let output = Command::new(&link_path)
@@ -130,9 +121,9 @@ fn core_probe_results_are_identical_across_entry_points() {
 
 #[test]
 fn single_physical_binary_backs_all_entry_points() {
-    // Guard against regression where someone adds three `[[bin]]` targets or
-    // accidentally produces three files. After following symlinks, all four
-    // paths must report the same dev+ino.
+    // Guard against regression where someone adds separate `[[bin]]` targets
+    // or accidentally produces multiple files. After following symlinks, all
+    // recognised paths must report the same dev+ino.
     use std::os::unix::fs::MetadataExt;
     let bin = bin_path();
     let tmp = TempDir::new("catos-multicall-inode").unwrap();
@@ -152,6 +143,45 @@ fn single_physical_binary_backs_all_entry_points() {
             *m, first,
             "entry point {i} does not share dev/ino with the canonical binary"
         );
+    }
+}
+
+#[test]
+fn doctor_without_arguments_outputs_diagnosis() {
+    let bin = bin_path();
+    let tmp = TempDir::new("catos-doctor-no-args").unwrap();
+    let link = tmp.path.join("catos-doctor");
+    symlink(&bin, &link).unwrap();
+
+    let output = Command::new(&link).output().expect("spawn doctor");
+    assert!(
+        output.status.success(),
+        "doctor failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("Runtime"));
+    assert!(stdout.contains("Capabilities"));
+    assert!(stdout.contains("Target"));
+}
+
+#[test]
+fn doctor_rejects_inspect_and_preflight_parameters() {
+    let bin = bin_path();
+    let tmp = TempDir::new("catos-doctor-no-subcommands").unwrap();
+    let link = tmp.path.join("catos-doctor");
+    symlink(&bin, &link).unwrap();
+
+    for args in [["inspect"].as_slice(), ["preflight", "recovery"].as_slice()] {
+        let output = Command::new(&link)
+            .args(args)
+            .output()
+            .expect("spawn doctor");
+        assert!(
+            !output.status.success(),
+            "doctor unexpectedly accepted {args:?}"
+        );
+        assert_eq!(output.status.code(), Some(2));
     }
 }
 
