@@ -43,6 +43,9 @@ use std::path::PathBuf;
 use crate::model::evidence::Evidence;
 use crate::model::fstab::FstabSource;
 use crate::model::inspection::Warning;
+use crate::model::storage::BlockDevice;
+use crate::probe::fs_probe::RealFilesystem;
+use crate::probe::discover_devices;
 use crate::model::mount_repair::{
     default_mount_options, AppliedAction, FstabDigest, FstabTransaction, MountProblem,
     MountRepairCleanup, MountRepairOutcome, MountRepairPlan, MountRepairReport, MountVerification,
@@ -874,6 +877,39 @@ pub fn run_mount_repair_via_cli(
     esp_device: Option<&str>,
     authorised: bool,
 ) -> MountRepairReport {
+    let _ = authorised;
+    let fs = RealFilesystem;
+    let (devices, warnings) = discover_devices(&fs);
+    let Some(root) = select_cli_root(&devices, root_device) else {
+        return MountRepairReport::refused(
+            MountRepairOutcome::AmbiguousTarget,
+            "root device must name one discovered, unmounted btrfs device",
+        );
+    };
+    // Until the target-root executor owns a private mount session, do not
+    // inspect or report facts from the running host as though they belonged
+    // to the selected device.
+    let mut report = MountRepairReport::refused(
+        MountRepairOutcome::UnsupportedLayout,
+        "target-root mount-repair execution is unavailable; no target files were read or changed",
+    );
+    report.target = Some(TargetIdentity {
+        root_device: root.dev_path.clone().unwrap_or_default(),
+        root_fstype: root.filesystem.clone().unwrap_or_default(),
+        root_subvol: root_subvolume.map(str::to_string),
+        root_uuid: root.uuid.clone(),
+        esp_device: esp_device.map(PathBuf::from),
+        esp_uuid: None,
+    });
+    report.warnings = warnings;
+    report.evidence.push(Evidence::new(
+        "TARGET_EXECUTOR_REQUIRED",
+        "repair::mount",
+        "refused before reading host /etc/fstab or producing planned actions",
+    ));
+    return report;
+
+    #[allow(unreachable_code)]
     let fstab_text = std::fs::read_to_string("/etc/fstab").unwrap_or_default();
     let target = TargetIdentity {
         root_device: root_device.map(PathBuf::from).unwrap_or_default(),
@@ -904,6 +940,18 @@ pub fn run_mount_repair_via_cli(
         ));
     }
     report
+}
+
+fn select_cli_root<'a>(
+    devices: &'a [BlockDevice],
+    root_device: Option<&str>,
+) -> Option<&'a BlockDevice> {
+    let requested = root_device?;
+    devices.iter().find(|device| {
+        device.dev_path.as_ref().is_some_and(|path| path == std::path::Path::new(requested))
+            && device.filesystem.as_deref() == Some("btrfs")
+            && !device.mounted_before_session
+    })
 }
 
 fn probe_uuid(_device: Option<&str>) -> Option<String> {
