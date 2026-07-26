@@ -453,13 +453,17 @@ fn persist_real_cleanup_after_teardown(
         engine.attach_cleanup(real_cleanup)
     })();
     let session_cleanup = session.cleanup();
+    persist_outcome?;
     if !session_cleanup.all_clean {
-        eprintln!(
-            "catos-system: warning: cleanup-persistence mount session left residual mounts: {:?}",
-            session_cleanup.residual
-        );
+        return Err(RecoveryError::new(
+            RecoveryErrorKind::CleanupIncomplete,
+            format!(
+                "cleanup-persistence mount session left residual mounts: {:?}",
+                session_cleanup.residual
+            ),
+        ));
     }
-    persist_outcome
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
