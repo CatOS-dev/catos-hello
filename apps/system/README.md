@@ -603,14 +603,11 @@ pure policy is defence in depth.
 
 ### ESP and `/boot`
 
-The mount repair distinguishes the six common ESP layouts:
-
-1. ESP mounted at `/boot/efi`.
-2. ESP mounted at `/efi`.
-3. ESP mounted directly at `/boot`.
-4. Independent plain `/boot` plus an independent ESP.
-5. `/boot` as an independent Btrfs subvolume.
-6. `/boot` inside the root filesystem.
+The current executor accepts an explicitly selected discovered FAT
+device as the ESP and may correct its UUID in an existing `/boot/efi`,
+`/efi`, or direct `/boot` fstab entry. It does not yet infer the six
+common ESP and `/boot` layouts, validate GPT ESP type or EFI contents,
+or resolve multiple ESP candidates automatically.
 
 The repair fixes only mount relationships; it never runs
 `grub-install`, `limine-install`, `bootctl install`,
