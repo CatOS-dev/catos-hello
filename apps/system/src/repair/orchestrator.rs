@@ -39,7 +39,9 @@ use std::path::{Path, PathBuf};
 use crate::model::evidence::Evidence;
 use crate::model::inspection::Warning;
 use crate::model::repair::{FsRepairOutcome, FsRepairReport, RepairCleanup, RepairTool};
-use crate::model::storage::BlockDevice;
+use crate::model::runtime::DetectionStatus;
+use crate::model::storage::{BlockDevice, DeviceClass, PartitionRole, RootCandidateConfidence};
+use crate::mount::probe::probe_unmounted_candidates;
 use crate::probe::discover_devices;
 use crate::probe::fs_probe::RealFilesystem;
 use crate::repair::runner::{CommandRunner, TrustedRunner};
@@ -70,7 +72,7 @@ pub fn run_fs_repair_with<R: CommandRunner + ?Sized>(
 ) -> FsRepairReport {
     let fs = RealFilesystem;
     let (devices, device_warnings) = discover_devices(&fs);
-    let warnings: Vec<Warning> = device_warnings;
+    let mut warnings: Vec<Warning> = device_warnings;
     let running_root = read_running_root();
 
     let mut evidence = Vec::new();
@@ -80,7 +82,33 @@ pub fn run_fs_repair_with<R: CommandRunner + ?Sized>(
         format!("discovered {} block device(s)", devices.len()),
     ));
 
-    let decision = evaluate_safety(&devices, &selection, running_root.as_ref());
+    let effective_selection = if selection.explicit_device.is_some() {
+        selection
+    } else {
+        let probe = probe_unmounted_candidates(&devices, &[]);
+        warnings.extend(probe.warnings);
+        match auto_select_catos_root(&devices, &probe.roots) {
+            Ok(device) => RepairTargetSelection {
+                explicit_device: Some(device),
+            },
+            Err(candidates) => {
+                let mut report = FsRepairReport::refused(
+                    FsRepairOutcome::AmbiguousTarget,
+                    &ambiguous_message(&candidates),
+                );
+                report.warnings = warnings;
+                report.evidence = evidence;
+                report.evidence.push(Evidence::new(
+                    "AUTO_DISCOVERY_REFUSED",
+                    "repair::orchestrator",
+                    "automatic repair requires exactly one high-confidence CatOS root with a matching target fstab entry",
+                ));
+                return report;
+            }
+        }
+    };
+
+    let decision = evaluate_safety(&devices, &effective_selection, running_root.as_ref());
     evidence.extend(decision.evidence.clone());
 
     let verdict = decision.verdict.clone();
@@ -170,6 +198,36 @@ pub fn run_fs_repair_with<R: CommandRunner + ?Sized>(
             report.evidence.extend(evidence);
             report
         }
+    }
+}
+
+fn auto_select_catos_root(
+    devices: &[BlockDevice],
+    roots: &[crate::model::storage::RootCandidate],
+) -> Result<PathBuf, Vec<String>> {
+    let candidates: Vec<PathBuf> = roots
+        .iter()
+        .filter(|root| {
+            root.confidence == RootCandidateConfidence::High
+                && root.is_catos.status == DetectionStatus::Detected
+        })
+        .filter_map(|root| PathBuf::from(&root.source).is_absolute().then(|| &root.source))
+        .filter_map(|source| {
+            devices.iter().find(|device| {
+                device.dev_path.as_deref() == Some(Path::new(source))
+                    && !device.removable
+                    && device.class != DeviceClass::Disk
+                    && device.partition_role != PartitionRole::WholeDisk
+            })
+        })
+        .filter_map(|device| device.dev_path.clone())
+        .collect();
+    match candidates.as_slice() {
+        [device] => Ok(device.clone()),
+        _ => Err(candidates
+            .iter()
+            .map(|device| device.display().to_string())
+            .collect()),
     }
 }
 
