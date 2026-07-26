@@ -36,8 +36,8 @@ only and never grants permission.
 | 2 | Safe read-only target mount planning and temporary mount sessions | Implemented; read-only |
 | 3 | Transactional mount-configuration repair | Implemented for CatOS Btrfs and plain ext2/3/4, XFS, and F2FS roots |
 | 4 | Transactional Btrfs root-snapshot recovery | Implemented, including direct public recovery commands and cleanup persistence |
-| 5 | Boot topology inspection and immutable repair planning | Not implemented |
-| 6 | Transactional boot repair and Live/Polkit/GUI integration | Not implemented |
+| 5 | Bootloader-provider repair (`catos-repair boot`) | Implemented (GRUB, Limine, systemd-boot, UKI, EFI Stub); contract tests in place, full QEMU matrix pending OVMF/Secure Boot CI |
+| 6 | Live/Polkit/GUI integration, Doctor aggregation, `catos-update` workflow | Not implemented |
 
 ## Current read/write boundary
 
@@ -47,6 +47,7 @@ State-changing operations require an explicit repair or recovery entry point:
 ```text
 catos-repair fs
 catos-repair mount
+catos-repair boot
 catos-recovery apply
 catos-recovery resume
 catos-recovery revert
@@ -598,14 +599,136 @@ assemble LVM/mdraid, migrate ordinary-directory data, rebuild Snapper config,
 modify snapshot contents, install a bootloader, change Secure Boot state, or
 run arbitrary target commands.
 
+## `catos-repair boot` (stage 4)
+
+`catos-repair boot` re-applies the target's currently-selected bootloader
+provider recipe. It is a behaviour port of the Calamares `bootloadu` module to
+the static Rust backend; it does not invent a new bootloader architecture or a
+parallel transaction framework.
+
+```text
+catos-repair boot [--json]
+    [--root-device /dev/...] [--root-subvolume /@]
+    [--esp-device /dev/...]
+```
+
+Running the command itself authorises re-application of the detected
+provider's recipe. There are deliberately no `inspect`, `plan`, `apply`,
+`status`, or `resume` public subcommands, and no per-provider subcommand
+(`catos-repair boot grub` is rejected). The provider is selected from target
+evidence, never from the live host's installed tools.
+
+### Supported providers
+
+| Provider | BIOS | UEFI x86_64 | UEFI aarch64 | Partition table |
+|---|---|---|---|---|
+| GRUB | x | x | x | any (GPT or MBR) |
+| Limine | - | x | - | GPT only |
+| systemd-boot | - | x | x | GPT only |
+| UKI (FirmwareProvider method=uki) | - | x | x | GPT only |
+| EFI Stub (FirmwareProvider method=efistub) | - | x | x | GPT only |
+
+UKI and EFI Stub share a single `FirmwareProvider` implementation
+parameterised by the `method = ...` field of
+`/etc/catos/firmware-boot.conf`. They are NOT two parallel codebases.
+
+### Provider detection
+
+Detection is evidence-based and fail-closed. Authoritative signals are the
+target's own bootloadu-managed configuration files:
+
+- `/etc/default/grub.d/00-catos.cfg` (GRUB)
+- `/etc/default/limine` (Limine)
+- `/etc/kernel/install.conf.d/20-catos-bootloadu.conf` (systemd-boot)
+- `/etc/catos/firmware-boot.conf` with `method = uki|efistub` (firmware family)
+
+Corroborating signals (ESP layout, deployed artefacts, package presence) only
+support an existing authoritative signal — they cannot establish one alone. A
+leftover `EFI/CatOS/grubx64.efi` from a previous GRUB install is NOT evidence
+that the current provider is GRUB if the target's `/etc` says it now uses
+systemd-boot. Multiple authoritative sources surface as
+`ambiguous_provider` rather than a guess.
+
+### Target command executor
+
+The boot-repair orchestrator is the only place that spawns target-side
+binaries (`grub-install`, `mkinitcpio`, `bootctl`, `kernel-install`,
+`catos-firmware-boot-update`, `catos-secureboot`, `efibootmgr`, etc.). It
+replaces `libcalamares.utils.target_env_call` with a much narrower contract:
+
+- **Fixed allow-list.** Only the binaries listed in
+  `repair::boot_repair::target_exec::ALLOWED_BINARIES` may be invoked.
+- **argv only.** Every argument is a separate string; there is no `sh -c`
+  form, no shell expansion, no environment mutation surface.
+- **Bounded output drain.** stdout/stderr are drained to EOF (verbose tools
+  are not killed by SIGPIPE) but capped per stream; truncation is reported.
+- **No mount cleanup.** The executor never unmounts anything; the stage 1–3
+  mount session owns all cleanup.
+
+### Secure Boot
+
+Repair **never auto-enables** Secure Boot just because the live host has it
+on. The target's existing policy is the only authority:
+
+- The target's `/etc/catos/secureboot` marker (or a signed artefact plus the
+  `catos-secureboot` package) authorises re-applying the existing policy via
+  `catos-secureboot enable --generate-enrollment-password --json`.
+- EFI Stub is explicitly unsupported by the registry's `supportedProviders`
+  list; repair refuses before invoking `catos-secureboot`.
+- EFI variable writes, MOK enrollment, and signing operations are NOT
+  atomic. Partial success surfaces as `partially_repaired` or
+  `manual_intervention_required`, never as `repaired`.
+
+### Outcome taxonomy
+
+The boot-repair outcome model reuses the mount-repair shape where the
+semantics match and adds boot-specific variants where they do not:
+
+| Outcome | Meaning |
+|---|---|
+| `clean` | Bootloader already installed and verified; no command needed. |
+| `repaired` | Provider recipe re-applied end to end; verify passed. |
+| `partially_repaired` | Some steps completed but external side effects cannot be cleanly reverted. |
+| `unsupported` | Target platform not supported by the detected provider. |
+| `ambiguous_target` | Target could not be uniquely identified (shared with mount repair). |
+| `ambiguous_provider` | Bootloader provider could not be uniquely identified. |
+| `verification_failed` | Provider recipe ran but verification failed. |
+| `cleanup_incomplete` | Boot files written but session cleanup did not finish. |
+| `manual_intervention_required` | EFI NVRAM / MOK / signature failure requiring operator action. |
+
+### Current verification status
+
+| Layer | Status |
+|---|---|
+| Provider registry + platform matrix | Implemented; covered by contract tests |
+| Kernel cmdline builder + conflict detection | Implemented; covered by contract tests |
+| mkinitcpio config + kernel discovery | Implemented; covered by contract tests |
+| Evidence-based provider detection | Implemented; covered by contract tests |
+| Fixed-allow-list target command executor | Implemented; covered by contract tests |
+| GRUB recipe (UEFI x86_64/aarch64 + BIOS) | Implemented; covered by contract tests |
+| Limine recipe | Implemented; covered by contract tests |
+| systemd-boot recipe | Implemented; covered by contract tests |
+| UKI + EFI Stub recipe (FirmwareProvider) | Implemented; covered by contract tests |
+| Secure Boot finalisation (target-policy preserving) | Implemented; covered by contract tests |
+| Snapshot support per provider | Implemented at the mkinitcpio layer; per-provider snapshot tool invocation is wired through the provider trait |
+| Real QEMU acceptance (full matrix) | **Not yet accepted.** `scripts/boot-repair-qemu-smoke.sh` is in place but currently performs target-image construction and detection-layer verification only. A complete boot-and-reboot acceptance requires OVMF Secure Boot certificates and the full provider toolchain in CI; it is tracked as environment-missing rather than reported as passing. |
+
+### Deliberate exclusions
+
+Boot repair does not migrate providers (GRUB → systemd-boot, etc.), auto-select
+a provider based on the live host's installed tools, open LUKS, repartition
+devices, run arbitrary target commands outside the fixed allow-list, or claim
+atomic rollback for EFI NVRAM / MOK / signature operations.
+
 ## What is not implemented yet
 
-- `catos-repair boot`: provider detection and repair for GRUB, Limine,
-  systemd-boot, UKI, and EFI Stub.
 - `catos-update`: the entry point is reserved but no update workflow exists.
 - Doctor's final aggregation of fs, mount, boot, and recovery diagnostics.
 - Automatic deletion of recovery backups; they remain available for revert or
   explicit operator removal.
+- Complete boot-and-reboot QEMU acceptance for every provider/firmware
+  combination (the contract-test layer is in place; the full matrix needs
+  OVMF Secure Boot certificates and the provider toolchain in CI).
 - A TUI/GUI, long-running daemon, and network operations.
 
 ## Removed from the implementation plan

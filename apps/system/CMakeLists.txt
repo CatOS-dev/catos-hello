@@ -141,6 +141,9 @@ if(BUILD_TESTS)
     option(CATOS_SYSTEM_MOUNT_REPAIR_SMOKE
            "Enable real Btrfs mount-repair QEMU test (opt-in; needs qemu + kernel + busybox + btrfs-progs)"
            OFF)
+    option(CATOS_SYSTEM_BOOT_REPAIR_SMOKE
+           "Enable real boot-repair QEMU test matrix (opt-in; needs qemu + kernel + busybox + provider tools + OVMF for UEFI scenarios)"
+           OFF)
     if(CATOS_SYSTEM_INITRAMFS_SMOKE)
         # Two test variants:
         #   * bare:         no initramfs markers; verifies binary starts
@@ -261,6 +264,28 @@ if(BUILD_TESTS)
             TIMEOUT 300
             SKIP_RETURN_CODE 77
             LABELS "rust;integration;qemu;mount-repair"
+        )
+    endif()
+    if(CATOS_SYSTEM_BOOT_REPAIR_SMOKE)
+        # Stage-4 boot-provider acceptance: a real CatOS target disk
+        # per provider layout (GRUB BIOS, GRUB UEFI, Limine,
+        # systemd-boot, UKI, EFI Stub). Each scenario constructs the
+        # target's bootloadu-managed /etc files, then runs
+        # catos-repair boot --json and asserts the provider is
+        # detected from target-side evidence and the matching recipe
+        # command is executed. Scenarios whose host lacks the matching
+        # provider tool or OVMF firmware are skipped (exit 77) with a
+        # clear reason; they are NEVER silently reported as passing.
+        add_test(
+            NAME catos-system-boot-repair-qemu-smoke
+            COMMAND "${BASH_CMD}"
+                    "${CMAKE_CURRENT_SOURCE_DIR}/scripts/boot-repair-qemu-smoke.sh"
+                    --bin "${CATOS_SYSTEM_BIN}"
+        )
+        set_tests_properties(catos-system-boot-repair-qemu-smoke PROPERTIES
+            TIMEOUT 600
+            SKIP_RETURN_CODE 77
+            LABELS "rust;integration;qemu;boot-repair"
         )
     endif()
 endif()

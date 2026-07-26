@@ -7,9 +7,12 @@ Each directory under `apps/` owns one executable and its local build files.
   `catos-update`, `catos-recovery`, `catos-doctor`, and `catos-repair` entry
   points. `catos-doctor` is argumentless, `catos-recovery` handles durable
   Btrfs snapshot recovery, and `catos-repair` implements filesystem repair
-  plus transactional fstab/subvolume/boot-mount repair. `catos-repair boot`
-  remains reserved for the boot-provider stage. `catos-update` is installed
-  as a reserved entry point but still defines no update workflow.
+  plus transactional fstab/subvolume/boot-mount repair and boot-provider
+  repair. `catos-repair boot` re-applies the target's currently-selected
+  bootloader provider (GRUB, Limine, systemd-boot, UKI, or EFI Stub) by
+  porting the Calamares `bootloadu` module's behaviour to the static
+  backend. `catos-update` is installed as a reserved entry point but still
+  defines no update workflow.
 
 Future executables should be added as sibling directories instead of placing
 sources in the repository root.
