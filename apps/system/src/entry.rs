@@ -578,7 +578,12 @@ fn print_help(invocation: Invocation) -> i32 {
                 "catos-update {version} - CatOS update entry point (reserved)\n\nUSAGE:\n    catos-update --help\n    catos-update --version\n\nOPTIONS:\n    -h, --help    Show this help message and exit.\n    -V, --version Print program version and exit.\n\nNOTES:\n    * This entry point is intentionally recognised but defines no\n      update commands in this stage. It does NOT inherit any\n      `catos-system` subcommand (no `catos-update inspect`, etc.).\n    * Future stages will define the update workflow.\n",
             );
         }
-        Invocation::CatosRecovery | Invocation::CatosSystem => {
+        Invocation::CatosRecovery => {
+            print!(
+                "catos-recovery {version} - CatOS Btrfs snapshot recovery\n\nUSAGE:\n    catos-recovery <COMMAND> [OPTIONS]\n\nCOMMANDS:\n    list      List existing recovery transactions.\n    inspect   Inspect the selected recovery target read-only.\n    plan      Create an immutable recovery plan.\n    apply     Apply a confirmed recovery plan.\n    status    Read and reconcile a transaction record.\n    resume    Continue an in-flight transaction.\n    revert    Restore the pre-recovery root.\n\nOPTIONS:\n    -h, --help    Show this help message and exit.\n    -V, --version Print program version and exit.\n\nNOTES:\n    * Commands are direct: use `catos-recovery plan`, not\n      `catos-recovery recovery plan`.\n    * This entry point does not provide environment, capabilities,\n      storage, or target subcommands.\n",
+            );
+        }
+        Invocation::CatosSystem => {
             // These invocations intentionally reuse the full parser
             // surface, so the full help text is appropriate. The
             // leading name is rebranded so operators invoking via a
