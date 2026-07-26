@@ -108,7 +108,7 @@ fn primary_mode_label(mode: crate::shared::model::runtime::PrimaryRuntimeMode) -
 
 fn is_running_root_catos(fs: &crate::shared::probe::fs_probe::RealFilesystem) -> bool {
     use crate::shared::model::runtime::DetectionStatus;
-    let root = match crate::system_root::SystemRoot::from_user_input("/") {
+    let root = match crate::shared::system_root::SystemRoot::from_user_input("/") {
         Ok(r) => r,
         Err(_) => return false,
     };

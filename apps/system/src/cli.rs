@@ -4,7 +4,7 @@
 //! run in initramfs.
 
 use crate::shared::error::{exit_code, Error};
-use crate::system_root::SystemRoot;
+use crate::shared::system_root::SystemRoot;
 use std::path::{Component, Path, PathBuf};
 
 /// One of the phase-1, phase-2, or phase-3 commands.

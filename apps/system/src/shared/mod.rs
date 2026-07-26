@@ -13,3 +13,4 @@ pub mod parse;
 pub mod process;
 pub mod probe;
 pub mod snapshot_engine;
+pub mod system_root;

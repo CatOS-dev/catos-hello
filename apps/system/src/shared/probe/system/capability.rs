@@ -11,7 +11,7 @@ use crate::shared::probe::fs_probe::FilesystemProbe;
 use crate::shared::probe::target::{
     host_efivars_path, host_tool_exists, probe_target_tool, target_read_to_string,
 };
-use crate::system_root::SystemRoot;
+use crate::shared::system_root::SystemRoot;
 
 /// Snapshot of the current process's effective privileges that capability
 /// probes need. Captured once at the start of [`detect_capabilities`] so we
@@ -587,7 +587,7 @@ mod tests {
     use super::*;
     use crate::shared::model::capability::CapabilityStatus;
     use crate::shared::probe::fs_probe::{FixtureFilesystem, MetaData};
-    use crate::system_root::SystemRoot;
+    use crate::shared::system_root::SystemRoot;
 
     fn root() -> SystemRoot {
         SystemRoot::from_absolute_unchecked("/").unwrap()

@@ -25,7 +25,7 @@ use crate::shared::probe::capability::ProcCaps;
 use crate::shared::probe::fs_probe::{FilesystemProbe, RealFilesystem};
 use crate::shared::probe::inspect_target;
 use crate::shared::process::run_trusted_tool;
-use crate::system_root::SystemRoot;
+use crate::shared::system_root::SystemRoot;
 
 static PROBE_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 const MAX_PROBED_DEVICES: usize = 64;

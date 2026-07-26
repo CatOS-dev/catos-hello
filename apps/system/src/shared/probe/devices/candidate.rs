@@ -12,7 +12,7 @@ use crate::shared::model::storage::{
 };
 use crate::shared::probe::fs_probe::{FilesystemProbe, RealFilesystem};
 use crate::shared::probe::inspect_target;
-use crate::system_root::SystemRoot;
+use crate::shared::system_root::SystemRoot;
 
 const ESP_MIN_BYTES: u64 = 32 * 1024 * 1024;
 const ESP_MAX_BYTES: u64 = 1024 * 1024 * 1024;

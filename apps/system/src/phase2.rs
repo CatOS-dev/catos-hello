@@ -28,7 +28,7 @@ use crate::shared::parse::fstab::parse_all_with_diagnostics;
 use crate::shared::probe::candidate::candidate_ambiguities;
 use crate::shared::probe::fs_probe::{FilesystemProbe, RealFilesystem};
 use crate::shared::probe::{discover_devices, identify_candidates};
-use crate::system_root::SystemRoot;
+use crate::shared::system_root::SystemRoot;
 
 static SESSION_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 

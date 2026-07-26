@@ -70,7 +70,7 @@ use crate::repair::path_safety::{validate_directory_creation, PathObservation};
 use crate::repair::subvol_decision::{
     decide_all, history_from_entries, CatosConfirmation, SubvolDecision, SubvolFacts,
 };
-use crate::system_root::SystemRoot;
+use crate::shared::system_root::SystemRoot;
 
 /// Inputs to [`diagnose`] / [`build_plan`]. Built by the caller
 /// from the parsed fstab, the btrfs probe, and the device discovery

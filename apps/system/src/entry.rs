@@ -63,7 +63,7 @@ impl fmt::Display for Invocation {
 /// `main.rs` calls once argv has been parsed.
 pub fn build_report(
     invocation: Invocation,
-    target_root: &crate::system_root::SystemRoot,
+    target_root: &crate::shared::system_root::SystemRoot,
 ) -> Result<crate::shared::model::inspection::InspectionReport, Error> {
     use crate::shared::model::inspection::Warning;
     use crate::shared::probe::fs_probe::RealFilesystem;
@@ -202,7 +202,7 @@ fn run_via_full_parser(invocation: Invocation, argv: &[String]) -> i32 {
     use std::io::Write;
     // Validate the default target root. In phase 1 the default is `/`;
     // if `/` is somehow inaccessible we cannot proceed.
-    let default_root = match crate::system_root::SystemRoot::from_user_input("/") {
+    let default_root = match crate::shared::system_root::SystemRoot::from_user_input("/") {
         Ok(r) => r,
         Err(e) => {
             eprintln!("{invocation}: {e}");

@@ -22,7 +22,6 @@ pub mod phase2;
 pub mod phase3;
 pub mod repair;
 pub mod shared;
-pub mod system_root;
 pub mod update;
 
 pub use shared::error::{exit_code, Error, FsError};
