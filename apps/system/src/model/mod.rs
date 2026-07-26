@@ -6,6 +6,7 @@ pub mod fstab;
 pub mod inspection;
 pub mod mount;
 pub mod recovery;
+pub mod repair;
 pub mod runtime;
 pub mod storage;
 
