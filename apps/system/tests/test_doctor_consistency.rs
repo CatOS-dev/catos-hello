@@ -246,7 +246,15 @@ fn doctor_recovery_section_does_not_call_engine_drive_or_persist() {
     // `store::persist_record` as call sites. Mentions in doc
     // comments are fine; the assertion uses the call-site form
     // (`Engine::<method>(` or `store::<method>(`) to distinguish.
-    let doctor_source = include_str!("../src/doctor/mod.rs");
+    let doctor_source = format!(
+        "{}\n{}\n{}\n{}\n{}\n{}",
+        include_str!("../src/doctor/mod.rs"),
+        include_str!("../src/doctor/sections/mod.rs"),
+        include_str!("../src/doctor/sections/filesystem.rs"),
+        include_str!("../src/doctor/sections/mount.rs"),
+        include_str!("../src/doctor/sections/boot.rs"),
+        include_str!("../src/doctor/sections/recovery.rs"),
+    );
     assert!(
         doctor_source.contains("store::load_record"),
         "doctor recovery section should load records read-only via store::load_record"
