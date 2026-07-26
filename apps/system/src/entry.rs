@@ -228,6 +228,7 @@ fn run_repair(argv: &[String]) -> i32 {
             exit_code::ARG_ERROR
         }
         Some("fs") => run_repair_fs(&argv[1..]),
+        Some("mount") => run_repair_mount(&argv[1..]),
         Some(domain) if REPAIR_DOMAINS.contains(&domain) => {
             eprintln!(
                 "catos-repair: {domain}: repair domain recognised but not implemented in this stage"
@@ -363,6 +364,158 @@ fn outcome_exit_code(outcome: crate::model::repair::FsRepairOutcome) -> i32 {
     }
 }
 
+/// `catos-repair mount` parsing + dispatch. Accepted forms:
+///
+/// ```text
+/// catos-repair mount [--json]
+///                    [--root-device /dev/...] [--root-subvolume PATH]
+///                    [--esp-device /dev/...]
+/// ```
+///
+/// Running `catos-repair mount` itself expresses user authorisation
+/// to apply the repair (spec § 一). The orchestrator may build an
+/// internal plan but the spec forbids expanding internal steps into
+/// new public CLI tiers (no `mount inspect`, `mount plan`,
+/// `mount apply`, ...).
+///
+/// `--help` / `--version` are handled by the top-level dispatcher
+/// before this function is reached.
+fn run_repair_mount(argv: &[String]) -> i32 {
+    use std::io::Write;
+
+    let mut json = false;
+    let mut root_device: Option<String> = None;
+    let mut root_subvolume: Option<String> = None;
+    let mut esp_device: Option<String> = None;
+
+    let mut idx = 0;
+    while idx < argv.len() {
+        let arg = &argv[idx];
+        match arg.as_str() {
+            "--json" => {
+                json = true;
+                idx += 1;
+            }
+            "--root-device" => {
+                idx += 1;
+                if idx >= argv.len() {
+                    eprintln!(
+                        "catos-repair: argument error: --root-device requires a /dev/... value"
+                    );
+                    return exit_code::ARG_ERROR;
+                }
+                root_device = Some(argv[idx].clone());
+                idx += 1;
+            }
+            "--root-subvolume" => {
+                idx += 1;
+                if idx >= argv.len() {
+                    eprintln!(
+                        "catos-repair: argument error: --root-subvolume requires a PATH value"
+                    );
+                    return exit_code::ARG_ERROR;
+                }
+                root_subvolume = Some(argv[idx].clone());
+                idx += 1;
+            }
+            "--esp-device" => {
+                idx += 1;
+                if idx >= argv.len() {
+                    eprintln!(
+                        "catos-repair: argument error: --esp-device requires a /dev/... value"
+                    );
+                    return exit_code::ARG_ERROR;
+                }
+                esp_device = Some(argv[idx].clone());
+                idx += 1;
+            }
+            other if other.starts_with("--root-device=") => {
+                root_device = Some(other["--root-device=".len()..].to_string());
+                idx += 1;
+            }
+            other if other.starts_with("--root-subvolume=") => {
+                root_subvolume = Some(other["--root-subvolume=".len()..].to_string());
+                idx += 1;
+            }
+            other if other.starts_with("--esp-device=") => {
+                esp_device = Some(other["--esp-device=".len()..].to_string());
+                idx += 1;
+            }
+            other => {
+                eprintln!(
+                    "catos-repair: argument error: unknown flag {other:?}; expected [--json] [--root-device /dev/...] [--root-subvolume PATH] [--esp-device /dev/...]"
+                );
+                return exit_code::ARG_ERROR;
+            }
+        }
+    }
+
+    if let Some(rd) = root_device.as_deref() {
+        if !validate_repair_device_arg(std::path::Path::new(rd)) {
+            eprintln!(
+                "catos-repair: argument error: --root-device must be an absolute /dev/... path without .. or prefix components"
+            );
+            return exit_code::ARG_ERROR;
+        }
+    }
+    if let Some(ed) = esp_device.as_deref() {
+        if !validate_repair_device_arg(std::path::Path::new(ed)) {
+            eprintln!(
+                "catos-repair: argument error: --esp-device must be an absolute /dev/... path without .. or prefix components"
+            );
+            return exit_code::ARG_ERROR;
+        }
+    }
+
+    let report = crate::repair::mount_repair::run_mount_repair_via_cli(
+        root_device.as_deref(),
+        root_subvolume.as_deref(),
+        esp_device.as_deref(),
+        true,
+    );
+    let exit = mount_outcome_exit_code(report.final_outcome);
+
+    let render_result = if json {
+        crate::output::render_mount_repair_json(&report, "catos-repair", std::path::Path::new("/"))
+            .and_then(|s| {
+                write_json_stdout(&s)
+                    .map_err(|e| Error::SerializeFailed(format!("stdout write: {e}")))
+            })
+    } else {
+        let mut out = std::io::stdout();
+        crate::output::render_mount_repair_human(&report, &mut out)
+            .and_then(|_| out.flush())
+            .map_err(|e| Error::SerializeFailed(format!("stdout write: {e}")))
+    };
+    match render_result {
+        Ok(()) => exit,
+        Err(e) => {
+            eprintln!("catos-repair: {e}");
+            e.exit_code()
+        }
+    }
+}
+
+fn mount_outcome_exit_code(outcome: crate::model::mount_repair::MountRepairOutcome) -> i32 {
+    use crate::model::mount_repair::MountRepairOutcome as O;
+    match outcome {
+        O::Clean | O::Repaired | O::PartiallyRepaired => exit_code::SUCCESS,
+        O::AmbiguousTarget
+        | O::NotCatos
+        | O::UnsafePath
+        | O::ConflictingFstab
+        | O::SubvolumeConflict
+        | O::UnsupportedLayout => exit_code::ARG_ERROR,
+        O::DeviceChanged
+        | O::FstabChanged
+        | O::DataConflict
+        | O::VerificationFailed
+        | O::RollbackFailed
+        | O::CleanupIncomplete
+        | O::Unknown => exit_code::PROBE_FAILED,
+    }
+}
+
 /// Validate the positional `<device>` argument: absolute, under
 /// `/dev/`, no `..` or platform prefix. Reuses the same checks as
 /// `cli::parse_device_path` without dragging in the phase-2
@@ -417,7 +570,7 @@ fn print_help(invocation: Invocation) -> i32 {
         Invocation::CatosRepair => {
             let domain_list = REPAIR_DOMAINS.join("|");
             print!(
-                "catos-repair {version} - CatOS fs/mount/boot repair entry point\n\nUSAGE:\n    catos-repair <DOMAIN> [OPTIONS] [<DEVICE>]\n    catos-repair --help\n    catos-repair --version\n\nREPAIR DOMAINS:\n    fs      Filesystem repair domain (implemented in stage 2).\n            Routes to the matching system fsck tool after safety\n            checks. Supports ext2/ext3/ext4, vfat/fat, f2fs, xfs,\n            and btrfs.\n    mount   Mount-table / fstab repair domain (not implemented).\n    boot    Bootloader / boot topology repair domain (not implemented).\n\nOPTIONS:\n    --json     Emit a stable JSON report on stdout.\n    -h, --help    Show this help message and exit.\n    -V, --version Print program version and exit.\n\nFS DOMAIN ARGUMENTS:\n    catos-repair fs [--json] [<device>]\n        <device> is an optional positional /dev/... path. When\n        omitted, auto-discovery runs and refuses on ambiguity.\n        ESP, swap, LUKS, LVM PV, mdraid members are never auto-\n        selected; specify them explicitly if you really mean it.\n\nNOTES:\n    * Only the three domains above are recognised. Anything else is\n      rejected with ARG_ERROR; in particular `catos-repair` does NOT\n      inherit `catos-system` or `catos-recovery` subcommands\n      (no `catos-repair inspect`, `catos-repair recovery ...`, ...).\n    * `catos-repair fs` always refuses the running root and any\n      target that is already mounted. Repair is best-effort; failures\n      are reported honestly.\n    * The `mount` and `boot` domains ({domain_list} minus `fs`)\n      remain stable \"not implemented\" results.\n",
+                "catos-repair {version} - CatOS fs/mount/boot repair entry point\n\nUSAGE:\n    catos-repair <DOMAIN> [OPTIONS] [<DEVICE>]\n    catos-repair --help\n    catos-repair --version\n\nREPAIR DOMAINS:\n    fs      Filesystem repair domain (implemented in stage 2).\n            Routes to the matching system fsck tool after safety\n            checks. Supports ext2/ext3/ext4, vfat/fat, f2fs, xfs,\n            and btrfs.\n    mount   Mount-table / fstab / CatOS standard btrfs subvolume\n            layout repair domain (implemented in stage 3).\n            Repairs /etc/fstab entries, recreates missing standard\n            subvolumes when authorised, and creates missing mount-\n            point directories. Does NOT migrate existing data, does\n            NOT run bootloader tools, does NOT touch Snapper config.\n    boot    Bootloader / boot topology repair domain (not implemented).\n\nOPTIONS:\n    --json     Emit a stable JSON report on stdout.\n    -h, --help    Show this help message and exit.\n    -V, --version Print program version and exit.\n\nFS DOMAIN ARGUMENTS:\n    catos-repair fs [--json] [<device>]\n        <device> is an optional positional /dev/... path. When\n        omitted, auto-discovery runs and refuses on ambiguity.\n        ESP, swap, LUKS, LVM PV, mdraid members are never auto-\n        selected; specify them explicitly if you really mean it.\n\nMOUNT DOMAIN ARGUMENTS:\n    catos-repair mount [--json]\n        [--root-device /dev/...] [--root-subvolume PATH]\n        [--esp-device /dev/...]\n        Running `catos-repair mount` itself authorises repair.\n\nNOTES:\n    * Only the three domains above are recognised. Anything else is\n      rejected with ARG_ERROR; in particular `catos-repair` does NOT\n      inherit `catos-system` or `catos-recovery` subcommands\n      (no `catos-repair inspect`, `catos-repair recovery ...`, ...).\n    * `catos-repair fs` always refuses the running root and any\n      target that is already mounted. Repair is best-effort; failures\n      are reported honestly.\n    * `catos-repair mount` may repair the running system's own\n      /etc/fstab; it refuses unsafe confined-path operations.\n    * The `boot` domain ({domain_list} minus `fs` and `mount`)\n      remains a stable \"not implemented\" result.\n",
             );
         }
         Invocation::CatosUpdate => {
