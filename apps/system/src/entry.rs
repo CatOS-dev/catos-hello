@@ -91,23 +91,30 @@ pub fn build_report(
     })
 }
 
+/// The repair domains `catos-repair` recognises. Anything else on that
+/// entry point is rejected before any work runs. This stage routes each
+/// domain to a stable "not implemented" result; it does not implement
+/// any repair logic.
+const REPAIR_DOMAINS: &[&str] = &["fs", "mount", "boot"];
+
 /// Run the program. Returns the exit code; `main.rs` forwards it to
 /// `std::process::exit`.
 pub fn run(invocation: Invocation, argv: &[String]) -> i32 {
-    use std::io::Write;
-
+    // Per-invocation `--help` / `--version` handling.
+    //
+    // `catos-doctor` keeps its strict single-argument contract: any
+    // non-help / non-version argument is an error, and the help text is
+    // only emitted for the exact `[--help]` / `[-h]` shape. The other
+    // entry points follow the conventional Unix behaviour of
+    // short-circuiting on `--help` / `--version` appearing anywhere in
+    // argv.
     if invocation == Invocation::CatosDoctor {
         match argv {
             [arg] if matches!(arg.as_str(), "-h" | "--help") => {
-                print!(
-                    "catos-doctor {} - CatOS diagnosis\n\nUSAGE:\n    catos-doctor\n",
-                    crate::PROGRAM_VERSION
-                );
-                std::io::stdout().flush().ok();
-                return exit_code::SUCCESS;
+                return print_help(invocation);
             }
             [arg] if matches!(arg.as_str(), "-V" | "--version") => {
-                println!("catos-doctor {}", crate::PROGRAM_VERSION);
+                println!("{invocation} {}", crate::PROGRAM_VERSION);
                 return exit_code::SUCCESS;
             }
             [] => {}
@@ -116,10 +123,56 @@ pub fn run(invocation: Invocation, argv: &[String]) -> i32 {
                 return exit_code::ARG_ERROR;
             }
         }
+    } else if argv.iter().any(|a| a == "--help" || a == "-h") {
+        return print_help(invocation);
+    } else if argv.iter().any(|a| a == "--version" || a == "-V") {
+        println!("{invocation} {}", crate::PROGRAM_VERSION);
+        return exit_code::SUCCESS;
     }
 
-    // Validate the default target root. In phase 1 the default is `/`; if
-    // `/` is somehow inaccessible we cannot proceed.
+    invocation_dispatch(invocation, argv)
+}
+
+/// Per-invocation routing once help / version has been handled. Each
+/// arm owns its own dispatch surface; in particular `catos-repair` and
+/// `catos-update` never reach the generic `catos-system` parser.
+fn invocation_dispatch(invocation: Invocation, argv: &[String]) -> i32 {
+    match invocation {
+        Invocation::CatosDoctor => {
+            // Empty argv (the only shape that escapes the strict doctor
+            // contract above) runs the full diagnosis. Internally the
+            // generic parser is fed `inspect` so the existing phase-1
+            // orchestrator produces the report.
+            run_via_full_parser(invocation, &["inspect".to_string()])
+        }
+        Invocation::CatosRepair => run_repair(argv),
+        Invocation::CatosUpdate => run_update(argv),
+        Invocation::CatosRecovery => {
+            // The public recovery surface drops the duplicated
+            // `recovery` token: `catos-recovery list`, not
+            // `catos-recovery recovery list`. Internally we still feed
+            // the existing parser by re-adding the prefix. The legacy
+            // doubled form becomes argv `["recovery", "recovery", ...]`
+            // and the parser rejects the inner `recovery` token as an
+            // unknown recovery subcommand, preserving the rejection
+            // contract without requiring a duplicate parser.
+            let mut prefixed: Vec<String> = Vec::with_capacity(argv.len() + 1);
+            prefixed.push("recovery".to_string());
+            prefixed.extend(argv.iter().cloned());
+            run_via_full_parser(invocation, &prefixed)
+        }
+        Invocation::CatosSystem => run_via_full_parser(invocation, argv),
+    }
+}
+
+/// Drive the canonical `catos-system` parser + phase orchestrators.
+/// Used by every invocation that intentionally reuses the full command
+/// surface (`catos-system`, `catos-recovery`, and the argumentless
+/// `catos-doctor` diagnosis).
+fn run_via_full_parser(invocation: Invocation, argv: &[String]) -> i32 {
+    use std::io::Write;
+    // Validate the default target root. In phase 1 the default is `/`;
+    // if `/` is somehow inaccessible we cannot proceed.
     let default_root = match crate::system_root::SystemRoot::from_user_input("/") {
         Ok(r) => r,
         Err(e) => {
@@ -128,13 +181,7 @@ pub fn run(invocation: Invocation, argv: &[String]) -> i32 {
         }
     };
 
-    // Internally reuse the complete inspection report without exposing an
-    // `inspect` subcommand on the doctor interface.
-    let doctor_default = (invocation == Invocation::CatosDoctor && argv.is_empty())
-        .then(|| vec!["inspect".to_string()]);
-    let effective_argv = doctor_default.as_deref().unwrap_or(argv);
-
-    match crate::cli::parse(effective_argv, default_root) {
+    match crate::cli::parse(argv, default_root) {
         Ok(crate::cli::ParseOutcome::Help(text)) => {
             // Replace the program name in the canned help text so users
             // invoking via a symlink see their invocation.
@@ -162,6 +209,91 @@ pub fn run(invocation: Invocation, argv: &[String]) -> i32 {
             e.exit_code()
         }
     }
+}
+
+/// `catos-repair` routing. Only `fs`, `mount`, `boot` are recognised;
+/// each routes to a stable, distinct "not implemented" result. Any
+/// other name — including names that exist on `catos-system` or
+/// `catos-recovery` (inspect, recovery, plan, apply, status, ...) — is
+/// rejected with `ARG_ERROR` before any work happens. This is what
+/// keeps the repair surface from accidentally inheriting other entry
+/// points' commands.
+fn run_repair(argv: &[String]) -> i32 {
+    let domain_list = REPAIR_DOMAINS.join("|");
+    match argv.first().map(String::as_str) {
+        None => {
+            eprintln!(
+                "catos-repair: argument error: missing repair domain; expected one of {domain_list}"
+            );
+            exit_code::ARG_ERROR
+        }
+        Some(domain) if REPAIR_DOMAINS.contains(&domain) => {
+            eprintln!(
+                "catos-repair: {domain}: repair domain recognised but not implemented in this stage"
+            );
+            exit_code::ARG_ERROR
+        }
+        Some(other) => {
+            eprintln!(
+                "catos-repair: argument error: unknown repair domain {other:?}; expected one of {domain_list}"
+            );
+            exit_code::ARG_ERROR
+        }
+    }
+}
+
+/// `catos-update` routing. The entry point is intentionally recognised
+/// but defines no commands in this stage. It MUST NOT inherit any
+/// `catos-system` subcommand (no `catos-update inspect`, etc.). Future
+/// stages will define the update workflow.
+fn run_update(argv: &[String]) -> i32 {
+    if argv.is_empty() {
+        eprintln!(
+            "catos-update: no commands defined in this stage; this entry point is reserved for future update workflows"
+        );
+        return exit_code::ARG_ERROR;
+    }
+    let other = argv.first().map(String::as_str).unwrap_or("");
+    eprintln!(
+        "catos-update: argument error: unknown command {other:?}; no update commands are defined in this stage"
+    );
+    exit_code::ARG_ERROR
+}
+
+/// Print the per-invocation help. Each entry point owns a focused
+/// message describing its own surface rather than the full
+/// `catos-system` parser contract.
+fn print_help(invocation: Invocation) -> i32 {
+    use std::io::Write;
+    let version = crate::PROGRAM_VERSION;
+    match invocation {
+        Invocation::CatosDoctor => {
+            print!(
+                "catos-doctor {version} - CatOS diagnosis\n\nUSAGE:\n    catos-doctor\n\nOPTIONS:\n    -h, --help    Show this help message and exit.\n    -V, --version Print program version and exit.\n\nNOTES:\n    * catos-doctor takes no functional arguments. The full\n      diagnosis is printed with no args.\n    * catos-doctor has no `inspect` or `preflight` subcommands.\n",
+            );
+        }
+        Invocation::CatosRepair => {
+            let domain_list = REPAIR_DOMAINS.join("|");
+            print!(
+                "catos-repair {version} - CatOS fs/mount/boot repair entry point\n\nUSAGE:\n    catos-repair <DOMAIN>\n    catos-repair --help\n    catos-repair --version\n\nREPAIR DOMAINS (recognised; not implemented in this stage):\n    fs      Filesystem repair domain.\n    mount   Mount-table / fstab repair domain.\n    boot    Bootloader / boot topology repair domain.\n\nOPTIONS:\n    -h, --help    Show this help message and exit.\n    -V, --version Print program version and exit.\n\nNOTES:\n    * Only the three domains above are recognised. Anything else is\n      rejected with ARG_ERROR; in particular `catos-repair` does NOT\n      inherit `catos-system` or `catos-recovery` subcommands\n      (no `catos-repair inspect`, `catos-repair recovery ...`, ...).\n    * No repair logic is implemented in this stage; each recognised\n      domain ({domain_list}) returns a stable \"not implemented\" result.\n",
+            );
+        }
+        Invocation::CatosUpdate => {
+            print!(
+                "catos-update {version} - CatOS update entry point (reserved)\n\nUSAGE:\n    catos-update --help\n    catos-update --version\n\nOPTIONS:\n    -h, --help    Show this help message and exit.\n    -V, --version Print program version and exit.\n\nNOTES:\n    * This entry point is intentionally recognised but defines no\n      update commands in this stage. It does NOT inherit any\n      `catos-system` subcommand (no `catos-update inspect`, etc.).\n    * Future stages will define the update workflow.\n",
+            );
+        }
+        Invocation::CatosRecovery | Invocation::CatosSystem => {
+            // These invocations intentionally reuse the full parser
+            // surface, so the full help text is appropriate. The
+            // leading name is rebranded so operators invoking via a
+            // symlink see their entry point identified.
+            let text = crate::cli::help_text().replacement_help_name(invocation);
+            print!("{text}");
+        }
+    }
+    std::io::stdout().flush().ok();
+    exit_code::SUCCESS
 }
 
 /// Dispatch a phase-1 command (environment / capabilities / inspect).
