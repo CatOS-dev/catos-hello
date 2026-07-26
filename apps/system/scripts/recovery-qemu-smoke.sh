@@ -176,6 +176,7 @@ post_fault=""
 pre_fault=""
 before_fault=""
 root_subvol="/@"
+snapshot_subvol="/@snapshots/2"
 for arg in $(cat /proc/cmdline); do
     case "$arg" in
         RECOVERY_SCENARIO=*) scenario=${arg#RECOVERY_SCENARIO=} ;;
@@ -185,6 +186,7 @@ for arg in $(cat /proc/cmdline); do
         RECOVERY_PRE_FAULT_AT=*) pre_fault=${arg#RECOVERY_PRE_FAULT_AT=} ;;
         RECOVERY_BEFORE_FAULT_AT=*) before_fault=${arg#RECOVERY_BEFORE_FAULT_AT=} ;;
         RECOVERY_ROOT_SUBVOL=*) root_subvol=${arg#RECOVERY_ROOT_SUBVOL=} ;;
+        RECOVERY_SNAPSHOT_SUBVOL=*) snapshot_subvol=${arg#RECOVERY_SNAPSHOT_SUBVOL=} ;;
     esac
 done
 [ -n "$post_fault" ] && export CATOS_RECOVERY_FAULT_AT="$post_fault"
@@ -192,7 +194,7 @@ done
 [ -n "$before_fault" ] && export CATOS_RECOVERY_FAULT_BEFORE_AT="$before_fault"
 
 ROOT_ARGS="--root-device /dev/vda --root-subvolume $root_subvol"
-SNAPSHOT_ARGS="--snapshot-subvolume /@snapshots/2"
+SNAPSHOT_ARGS="--snapshot-subvolume $snapshot_subvol"
 BIN=/bin/catos-system
 case "$scenario" in
     apply_fault|resume_fault|revert_fault) BIN=/bin/catos-system-test ;;
@@ -210,6 +212,10 @@ run_and_poweroff() {
 }
 
 case "$scenario" in
+    list)
+        # shellcheck disable=SC2086
+        run_and_poweroff LIST /bin/catos-system recovery list $ROOT_ARGS --json
+        ;;
     plan)
         # shellcheck disable=SC2086
         run_and_poweroff PLAN /bin/catos-system recovery plan $ROOT_ARGS $SNAPSHOT_ARGS --json
@@ -259,8 +265,17 @@ case "$scenario" in
         if ! grep -q 'home-data-must-not-change' /mnt/@home/user-file; then
             echo "===VERIFY_FAIL=== @home changed"; ok=0
         fi
-        snapshot_path=/mnt/@snapshots/2
-        [ -e "$snapshot_path" ] || snapshot_path=/mnt/@/.snapshots/2/snapshot
+        # The source snapshot's btrfs-subvolume path varies by fixture
+        # layout: internal uses `/@snapshots/2`, the standard Snapper
+        # layout uses `/@snapshots/2/snapshot`, and the (rejected)
+        # nested layout used `/@/.snapshots/2/snapshot`. Try the
+        # cmdline-supplied path first, then fall back through the
+        # historical shapes so a single verify_* scenario works for
+        # every fixture.
+        snapshot_path="/mnt$snapshot_subvol"
+        if [ ! -e "$snapshot_path" ]; then snapshot_path=/mnt/@snapshots/2/snapshot; fi
+        if [ ! -e "$snapshot_path" ]; then snapshot_path=/mnt/@snapshots/2; fi
+        if [ ! -e "$snapshot_path" ]; then snapshot_path=/mnt/@/.snapshots/2/snapshot; fi
         snapshot_ro=$(btrfs property get "$snapshot_path" ro 2>&1)
         if ! echo "$snapshot_ro" | grep -q 'ro=true'; then
             echo "===VERIFY_FAIL=== source snapshot is not readonly: $snapshot_ro"; ok=0
@@ -350,13 +365,38 @@ create_fixture() {
         current_subvol='@'
         write_root "$TREE/@" "CatOS Recovery Current Root" current "$external" '/@'
     fi
-    if [ "$layout" = nested ]; then
-        source_dir="$TREE/@/.snapshots/2/snapshot"
-        source_subvol='@/.snapshots/2/snapshot'
-    else
-        source_dir="$TREE/@snapshots/2"
-        source_subvol='@snapshots/2'
-    fi
+    case "$layout" in
+        nested)
+            # Nested Snapper-style: source below /@. Must be REJECTED
+            # by the engine before any write.
+            source_dir="$TREE/@/.snapshots/2/snapshot"
+            source_subvol='@/.snapshots/2/snapshot'
+            ;;
+        snapper)
+            # Standard Snapper layout: read-only snapshot subvolume
+            # at `/@snapshots/<id>/snapshot`. The `@snapshots/<id>/`
+            # parent directories are regular directories on the
+            # btrfs top level (NOT nested under /@); each `<id>/`
+            # also holds the conventional Snapper metadata file.
+            source_dir="$TREE/@snapshots/2/snapshot"
+            source_subvol='@snapshots/2/snapshot'
+            mkdir -p "$TREE/@snapshots/2"
+            cat > "$TREE/@snapshots/2/info.xml" <<'EOF'
+<?xml version="1.0"?>
+<snapshot>
+  <type>single</type>
+  <num>2</num>
+  <description>CatOS recovery QEMU smoke fixture (standard Snapper layout)</description>
+  <date>2024-01-01T00:00:00Z</date>
+</snapshot>
+EOF
+            ;;
+        *)
+            # Plain layout: snapshot subvolume directly at /@snapshots/2.
+            source_dir="$TREE/@snapshots/2"
+            source_subvol='@snapshots/2'
+            ;;
+    esac
     write_root "$source_dir" "CatOS Recovery Snapshot 2" snapshot "$external" '/@'
 
     truncate -s 512M "$BTRFS_IMG"
@@ -388,9 +428,10 @@ run_guest() {
     token=${4:-}
     initramfs=${5:-$INITRAMFS_RUN}
     root_subvol=${6:-/@}
+    snapshot_subvol=${7:-/@snapshots/2}
     RUN_INDEX=$((RUN_INDEX + 1))
     LAST_LOG="$WORKDIR/serial-$(printf '%03d' "$RUN_INDEX")-$scenario.log"
-    append="console=ttyS0 panic=1 rdinit=/init RECOVERY_SCENARIO=$scenario RECOVERY_ROOT_SUBVOL=$root_subvol"
+    append="console=ttyS0 panic=1 rdinit=/init RECOVERY_SCENARIO=$scenario RECOVERY_ROOT_SUBVOL=$root_subvol RECOVERY_SNAPSHOT_SUBVOL=$snapshot_subvol"
     case "$fault" in
         post:*) append="$append RECOVERY_POST_FAULT_AT=${fault#post:}" ;;
         pre:*) append="$append RECOVERY_PRE_FAULT_AT=${fault#pre:}" ;;
@@ -525,9 +566,38 @@ assert_completed_and_verify() {
     assert_rc STATUS 0
     capture_json STATUS "$WORKDIR/status.json"
     assert_json_value "$WORKDIR/status.json" payload.reconciled_state completed
+    assert_status_persisted_real_cleanup_summary "$WORKDIR/status.json"
     run_guest verify_applied "" "$PLAN_ID" ""
     grep -q '===VERIFY_OK===' "$LAST_LOG" || fail "guest applied-state verification failed"
     assert_esp_unchanged
+}
+
+# Cleanup-summary persistence contract (stage-1 recovery closeout).
+#
+# The on-disk transaction record's `last_cleanup` is the only durable
+# evidence of whether the recovery rw mount session was clean when the
+# transaction ended. The pre-fix orchestrator persisted a placeholder
+# `{all_clean: true}` summary before tearing down the rw mount, then
+# restamped the in-memory record with the REAL outcome — leaving the
+# on-disk record stuck on the placeholder. A subsequent `status` would
+# therefore show `last_cleanup.unmounted == []` even though the real
+# cleanup always unmounts the session directory.
+#
+# CleanupSummary skips serialisation of empty `unmounted`/`residual`
+# vectors, so the placeholder produces a JSON object with NO
+# `unmounted` field at all. The real cleanup summary, by contrast,
+# always carries at least the session directory path in `unmounted`.
+# Asserting the field is present and non-empty proves the orchestrator
+# persisted the real summary, not the placeholder.
+assert_status_persisted_real_cleanup_summary() {
+    status_json=$1
+    if ! unmounted=$(json_value "$status_json" "payload.record.last_cleanup.unmounted" 2>/dev/null); then
+        fail "status $status_json: payload.record.last_cleanup.unmounted is missing (on-disk record carries the placeholder, not the real cleanup summary)"
+    fi
+    [ -n "$unmounted" ] || fail "status $status_json: payload.record.last_cleanup.unmounted is empty"
+    [ "$unmounted" != "[]" ] || fail "status $status_json: payload.record.last_cleanup.unmounted is [] (on-disk record carries the placeholder, not the real cleanup summary)"
+    all_clean=$(json_value "$status_json" "payload.record.last_cleanup.all_clean")
+    [ "$all_clean" = "true" ] || fail "status $status_json: last_cleanup.all_clean=$all_clean (expected true on the happy path)"
 }
 
 run_fault_matrix() {
@@ -658,5 +728,76 @@ run_guest verify_reverted "" "$PLAN_ID" "" "$INITRAMFS_RUN" /@root
 grep -q '===VERIFY_OK===' "$LAST_LOG" || fail "non-default-root reverted-state verification failed"
 assert_esp_unchanged
 echo "pass: non-default root subvolume /@root plan/apply/status/revert"
+
+# Standard Snapper layout (`/@snapshots/<id>/snapshot`) end-to-end:
+# the layout real-world snapper creates. Each snapshot <id> lives
+# under `/@snapshots/<id>/`, which is a regular directory on the
+# btrfs top level (NOT nested under /@); the actual read-only
+# subvolume is `/@snapshots/<id>/snapshot`. A `info.xml` metadata
+# file sits alongside the subvolume, exactly as snapper would emit.
+#
+# This guards against a regression where the recovery engine only
+# accepts flat-layout snapshots (subvolume directly at
+# `/@snapshots/<id>`) and silently rejects or mis-handles the
+# standard Snapper form. The standard form MUST be list-able,
+# inspect-able, plan-able, apply-able, status-able, and revertible,
+# and the recovery MUST preserve the source snapshot's read-only
+# flag and the original root under /.catos-recovery/backups/.
+SNAPPER_SNAPSHOT_SUBVOL="/@snapshots/2/snapshot"
+create_fixture snapper
+
+# 1. `recovery list` discovers the standard-layout snapshot.
+run_guest list "" "" "" "$INITRAMFS_PLAN" "/@" "$SNAPPER_SNAPSHOT_SUBVOL"
+assert_rc LIST 0
+capture_json LIST "$WORKDIR/snapper-list.json"
+snapper_listed=$(python3 - "$WORKDIR/snapper-list.json" "$SNAPPER_SNAPSHOT_SUBVOL" <<'PY'
+import json, sys
+report = json.load(open(sys.argv[1]))
+wanted = sys.argv[2]
+paths = [
+    sub.get("path", "")
+    for sub in report.get("payload", {}).get("readonly_snapshots", [])
+]
+print("yes" if wanted in paths else "no")
+print(" ".join(paths), file=sys.stderr)
+PY
+) || fail "could not parse snapper-list JSON"
+[ "$snapper_listed" = "yes" ] || fail "recovery list did not surface $SNAPPER_SNAPSHOT_SUBVOL in readonly_snapshots (got: $snapper_listed)"
+
+# 2. plan against the standard-layout snapshot.
+run_guest plan "" "" "" "$INITRAMFS_PLAN" "/@" "$SNAPPER_SNAPSHOT_SUBVOL"
+assert_rc PLAN 0
+capture_json PLAN "$PLAN_FILE"
+assert_json_value "$PLAN_FILE" kind recovery_plan
+assert_json_value "$PLAN_FILE" payload.schema_version 4
+assert_json_value "$PLAN_FILE" payload.source_snapshot.path "$SNAPPER_SNAPSHOT_SUBVOL"
+assert_json_value "$PLAN_FILE" payload.source_snapshot.read_only true
+assert_json_value "$PLAN_FILE" payload.boot_consistency.status consistent
+PLAN_ID=$(json_value "$PLAN_FILE" payload.plan_id)
+APPLY_TOKEN=$(json_value "$PLAN_FILE" payload.confirmation_token)
+[ -n "$PLAN_ID" ] && [ -n "$APPLY_TOKEN" ] || fail "snapper plan lacks id/token"
+build_initramfs "$PLAN_FILE" "$INITRAMFS_RUN"
+
+# 3. apply, then verify the active root and the source snapshot.
+run_guest apply "" "$PLAN_ID" "$APPLY_TOKEN" "$INITRAMFS_RUN" "/@" "$SNAPPER_SNAPSHOT_SUBVOL"
+assert_rc APPLY 0
+run_guest status "" "$PLAN_ID" "" "$INITRAMFS_RUN" "/@" "$SNAPPER_SNAPSHOT_SUBVOL"
+assert_rc STATUS 0
+capture_json STATUS "$WORKDIR/snapper-status.json"
+assert_json_value "$WORKDIR/snapper-status.json" payload.reconciled_state completed
+assert_status_persisted_real_cleanup_summary "$WORKDIR/snapper-status.json"
+run_guest verify_applied "" "$PLAN_ID" "" "$INITRAMFS_RUN" "/@" "$SNAPPER_SNAPSHOT_SUBVOL"
+grep -q '===VERIFY_OK===' "$LAST_LOG" || fail "snapper applied-state verification failed"
+assert_esp_unchanged
+
+# 4. revert restores the original root and re-verifies.
+REVERT_TOKEN_SNAPPER=$(json_value "$WORKDIR/snapper-status.json" payload.revert_confirmation_token)
+[ -n "$REVERT_TOKEN_SNAPPER" ] || fail "snapper status did not emit revert token"
+run_guest revert "" "$PLAN_ID" "$REVERT_TOKEN_SNAPPER" "$INITRAMFS_RUN" "/@" "$SNAPPER_SNAPSHOT_SUBVOL"
+assert_rc REVERT 0
+run_guest verify_reverted "" "$PLAN_ID" "" "$INITRAMFS_RUN" "/@" "$SNAPPER_SNAPSHOT_SUBVOL"
+grep -q '===VERIFY_OK===' "$LAST_LOG" || fail "snapper reverted-state verification failed"
+assert_esp_unchanged
+echo "pass: standard Snapper layout /@snapshots/2/snapshot list/plan/apply/status/revert"
 
 echo "pass: authoritative phase-3 recovery QEMU acceptance succeeded"
