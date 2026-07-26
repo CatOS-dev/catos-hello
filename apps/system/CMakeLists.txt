@@ -138,6 +138,9 @@ if(BUILD_TESTS)
     option(CATOS_SYSTEM_REPAIR_SMOKE
            "Enable real ext4+vfat+btrfs+xfs repair QEMU test (opt-in; needs qemu + kernel + busybox + mkfs/e2fsck tools)"
            OFF)
+    option(CATOS_SYSTEM_MOUNT_REPAIR_SMOKE
+           "Enable real Btrfs mount-repair QEMU test (opt-in; needs qemu + kernel + busybox + btrfs-progs)"
+           OFF)
     if(CATOS_SYSTEM_INITRAMFS_SMOKE)
         # Two test variants:
         #   * bare:         no initramfs markers; verifies binary starts
@@ -249,6 +252,19 @@ if(BUILD_TESTS)
             TIMEOUT 600
             SKIP_RETURN_CODE 77
             LABELS "rust;integration;qemu;repair"
+        )
+    endif()
+    if(CATOS_SYSTEM_MOUNT_REPAIR_SMOKE)
+        add_test(
+            NAME catos-system-mount-repair-qemu-smoke
+            COMMAND "${BASH_CMD}"
+                    "${CMAKE_CURRENT_SOURCE_DIR}/scripts/mount-repair-qemu-smoke.sh"
+                    --bin "${CATOS_SYSTEM_BIN}"
+        )
+        set_tests_properties(catos-system-mount-repair-qemu-smoke PROPERTIES
+            TIMEOUT 300
+            SKIP_RETURN_CODE 77
+            LABELS "rust;integration;qemu;mount-repair"
         )
     endif()
 endif()
