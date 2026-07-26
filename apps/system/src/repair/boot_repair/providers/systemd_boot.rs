@@ -50,7 +50,7 @@ impl<'a> BootProvider for SystemdBootProvider<'a> {
             return result;
         }
         for kernel in self.kernels {
-            let argv = vec![kernel.version.clone(), kernel.image.clone()];
+            let argv = vec!["add".into(), kernel.version.clone(), kernel.image.clone()];
             if !record_target_command(
                 runner,
                 &mut result.actions,
@@ -185,12 +185,12 @@ mod tests {
                 .filter(|inv| inv.binary == "kernel-install")
                 .collect();
         assert_eq!(kernel_install_calls.len(), 2);
-        assert_eq!(kernel_install_calls[0].argv[0], "6.18.0-arch1-1");
+        assert_eq!(kernel_install_calls[0].argv[0], "add");
         assert_eq!(
-            kernel_install_calls[0].argv[1],
+            kernel_install_calls[0].argv[2],
             "/usr/lib/modules/6.18.0-arch1-1/vmlinuz"
         );
-        assert_eq!(kernel_install_calls[1].argv[0], "6.18.0-arch1-1-lts");
+        assert_eq!(kernel_install_calls[1].argv[1], "6.18.0-arch1-1-lts");
     }
 
     #[test]
