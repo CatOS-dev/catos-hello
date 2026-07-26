@@ -907,38 +907,6 @@ pub fn run_mount_repair_via_cli(
         "repair::mount",
         "refused before reading host /etc/fstab or producing planned actions",
     ));
-    return report;
-
-    #[allow(unreachable_code)]
-    let fstab_text = std::fs::read_to_string("/etc/fstab").unwrap_or_default();
-    let target = TargetIdentity {
-        root_device: root_device.map(PathBuf::from).unwrap_or_default(),
-        root_fstype: probe_fstype_for_root(root_device).unwrap_or_default(),
-        root_subvol: root_subvolume.map(str::to_string),
-        root_uuid: probe_uuid(root_device),
-        esp_device: esp_device.map(PathBuf::from),
-        esp_uuid: probe_uuid(esp_device),
-    };
-    let inputs = MountRepairInputs {
-        fstab_text,
-        target,
-        catos_confirmation: detect_catos(),
-        subvol_facts: SubvolFacts::default(),
-        mount_point_observations: HashMap::new(),
-    };
-    let mut report = run_mount_repair_diagnosis(inputs, authorised);
-
-    if report.final_outcome == MountRepairOutcome::Repaired {
-        report.final_outcome = MountRepairOutcome::PartiallyRepaired;
-        report.fully_complete = false;
-        report.requires_human_action = true;
-        report.evidence.push(Evidence::new(
-            "PRIVILEGED_APPLY_PENDING",
-            "repair::mount",
-            "privileged disk-write apply layer is not wired in this stage; in-memory plan only"
-                .to_string(),
-        ));
-    }
     report
 }
 
@@ -954,32 +922,6 @@ fn select_cli_root<'a>(
     })
 }
 
-fn probe_uuid(_device: Option<&str>) -> Option<String> {
-    // Real device probing happens via `probe::block::discover_devices`
-    // and `probe::fs_probe`. This stage's CLI surface returns
-    // `None` for unknown UUIDs; the structured report still renders
-    // correctly. A follow-up patch wires the real probe.
-    None
-}
-
-fn probe_fstype_for_root(_device: Option<&str>) -> Option<String> {
-    // See `probe_uuid` — the real probe is wired in the privileged
-    // apply layer.
-    None
-}
-
-fn detect_catos() -> crate::repair::subvol_decision::CatosConfirmation {
-    use crate::repair::subvol_decision::CatosConfirmation;
-    if let Ok(body) = std::fs::read_to_string("/etc/os-release") {
-        if body.lines().any(|line| {
-            let line = line.trim();
-            line.starts_with("ID=") && (line.contains("catos") || line.contains("\"catos\""))
-        }) {
-            return CatosConfirmation::Confirmed;
-        }
-    }
-    CatosConfirmation::NotConfirmed
-}
 
 // ---------------------------------------------------------------------------
 // Tests
