@@ -17,7 +17,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::cli::{RecoveryArgs, RecoverySubcommand};
+use crate::shared::cli::{RecoveryArgs, RecoverySubcommand};
 use crate::shared::error::{exit_code, Error};
 use crate::shared::model::inspection::Warning;
 use crate::shared::model::recovery::{

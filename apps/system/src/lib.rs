@@ -15,7 +15,6 @@
 //! ```
 
 pub mod chroot;
-pub mod cli;
 pub mod doctor;
 pub mod entry;
 pub mod phase2;

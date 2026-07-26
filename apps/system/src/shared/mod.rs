@@ -5,6 +5,7 @@
 //! `catos-update`, `catos-chroot`). Exec-specific code lives in the
 //! top-level exec directories (`system/`, `recovery/`, ...).
 
+pub mod cli;
 pub mod error;
 pub mod model;
 pub mod mount;

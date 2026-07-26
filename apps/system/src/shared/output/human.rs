@@ -3,7 +3,7 @@
 
 use std::io::Write;
 
-use crate::cli::View;
+use crate::shared::cli::View;
 use crate::shared::model::capability::{Capability, CapabilityStatus};
 use crate::shared::model::evidence::Evidence;
 use crate::shared::model::inspection::InspectionReport;

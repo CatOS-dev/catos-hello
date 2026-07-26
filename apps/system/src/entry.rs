@@ -210,8 +210,8 @@ fn run_via_full_parser(invocation: Invocation, argv: &[String]) -> i32 {
         }
     };
 
-    match crate::cli::parse(argv, default_root) {
-        Ok(crate::cli::ParseOutcome::Help(text)) => {
+    match crate::shared::cli::parse(argv, default_root) {
+        Ok(crate::shared::cli::ParseOutcome::Help(text)) => {
             // Replace the program name in the canned help text so users
             // invoking via a symlink see their invocation.
             let text = text.replacement_help_name(invocation);
@@ -219,12 +219,12 @@ fn run_via_full_parser(invocation: Invocation, argv: &[String]) -> i32 {
             std::io::stdout().flush().ok();
             exit_code::SUCCESS
         }
-        Ok(crate::cli::ParseOutcome::Version(text)) => {
+        Ok(crate::shared::cli::ParseOutcome::Version(text)) => {
             print!("{text}");
             std::io::stdout().flush().ok();
             exit_code::SUCCESS
         }
-        Ok(crate::cli::ParseOutcome::Run(args)) => {
+        Ok(crate::shared::cli::ParseOutcome::Run(args)) => {
             if args.command.is_phase1() {
                 run_phase1(invocation, *args)
             } else if args.command.is_phase2() {
@@ -801,7 +801,7 @@ fn print_help(invocation: Invocation) -> i32 {
             // surface, so the full help text is appropriate. The
             // leading name is rebranded so operators invoking via a
             // symlink see their entry point identified.
-            let text = crate::cli::help_text().replacement_help_name(invocation);
+            let text = crate::shared::cli::help_text().replacement_help_name(invocation);
             print!("{text}");
         }
     }
@@ -811,7 +811,7 @@ fn print_help(invocation: Invocation) -> i32 {
 
 /// Dispatch a phase-1 command (environment / capabilities / inspect).
 /// Builds an InspectionReport and renders the selected view.
-fn run_phase1(invocation: Invocation, args: crate::cli::CliArgs) -> i32 {
+fn run_phase1(invocation: Invocation, args: crate::shared::cli::CliArgs) -> i32 {
     use std::io::Write;
 
     let view = args.command.view();
@@ -845,13 +845,13 @@ fn run_phase1(invocation: Invocation, args: crate::cli::CliArgs) -> i32 {
 
 /// Dispatch a phase-2 command (storage scan / target plan / target mount).
 /// Builds the phase-2 outcome and renders it via the phase-2 output layer.
-fn run_phase2(invocation: Invocation, args: crate::cli::CliArgs) -> i32 {
+fn run_phase2(invocation: Invocation, args: crate::shared::cli::CliArgs) -> i32 {
     use std::io::Write;
 
     let outcome_result = match args.command {
-        crate::cli::Command::StorageScan => crate::phase2::run_storage_scan(&args.root),
-        crate::cli::Command::TargetPlan => crate::phase2::run_target_plan(&args.root, &args.target),
-        crate::cli::Command::TargetMount => {
+        crate::shared::cli::Command::StorageScan => crate::phase2::run_storage_scan(&args.root),
+        crate::shared::cli::Command::TargetPlan => crate::phase2::run_target_plan(&args.root, &args.target),
+        crate::shared::cli::Command::TargetMount => {
             crate::phase2::run_target_mount(&args.root, &args.target)
         }
         // Phase-1 commands never reach here (is_phase1() routes them away).
@@ -911,7 +911,7 @@ fn run_phase2(invocation: Invocation, args: crate::cli::CliArgs) -> i32 {
 }
 
 /// Dispatch a phase-3 recovery command.
-fn run_phase3(invocation: Invocation, args: crate::cli::CliArgs) -> i32 {
+fn run_phase3(invocation: Invocation, args: crate::shared::cli::CliArgs) -> i32 {
     use std::io::Write;
 
     let recovery_args = match args.recovery.clone() {

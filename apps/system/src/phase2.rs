@@ -15,7 +15,7 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use crate::cli::TargetSelection;
+use crate::shared::cli::TargetSelection;
 use crate::shared::error::{exit_code, Error};
 use crate::shared::model::fstab::{FstabEntry, FstabEntryKind, FstabSource};
 use crate::shared::model::inspection::{TargetInspection, Warning};

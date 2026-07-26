@@ -4,7 +4,7 @@
 use serde::ser::SerializeMap;
 use serde::{Serialize, Serializer};
 
-use crate::cli::View;
+use crate::shared::cli::View;
 use crate::shared::error::Error;
 use crate::shared::model::inspection::InspectionReport;
 
