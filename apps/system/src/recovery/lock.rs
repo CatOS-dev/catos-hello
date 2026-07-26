@@ -259,6 +259,16 @@ mod tests {
     }
 
     #[test]
+    fn device_lock_is_non_blocking_when_held() {
+        let path = scratch_lock_path("device");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, b"lock").unwrap();
+        let _first = DeviceLock::try_acquire(&path).unwrap();
+        let error = DeviceLock::try_acquire(&path).unwrap_err();
+        assert_eq!(error.kind, RecoveryErrorKind::TransactionAlreadyActive);
+    }
+
+    #[test]
     fn lock_file_path_is_per_fsid_under_locks_dir() {
         let top = Path::new("/tmp/fake-top");
         let p = lock_file_path(top, "abc-123");
