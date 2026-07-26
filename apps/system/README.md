@@ -617,7 +617,7 @@ The repair fixes only mount relationships; it never runs
 `kernel-install`, `catos-firmware-boot-update`, `catos-secureboot`,
 or `efibootmgr`. Those are stage 5+.
 
-### Transaction semantics (in-memory, this stage)
+### Transaction semantics
 
 The plan binds to:
 
@@ -629,22 +629,19 @@ The plan binds to:
 Any drift detected at apply time aborts the plan and surfaces
 `device_changed` or `fstab_changed`.
 
-The disk-write path (atomic fstab replace, fsync, btrfs subvolume
-creation, private-namespace verification mount, target-exclusive
-per-FSID lock compatible with `catos-recovery`) is the privileged
-apply layer. In this stage the CLI runs diagnosis + in-memory plan
-+ structure-preserving fstab edit against the running system's
-`/etc/fstab`, but downgrades any `repaired` outcome to
-`partially_repaired` with an explicit `PRIVILEGED_APPLY_PENDING`
-evidence note so the report never claims success it did not earn.
-The real disk-write path is wired in a follow-up stage.
+For an explicitly selected unmounted Btrfs target with `subvol=/@`,
+the CLI mounts the target top-level in a private namespace, reads the
+target's own files, creates approved standard subvolumes and
+directories through pinned dirfds, atomically replaces target
+`/etc/fstab`, and verifies the rewritten file through a fresh private
+mount. It refuses all other layouts rather than falling back to the
+running host.
 
 ### Lock semantics
 
-The privileged apply layer (when wired) takes the same per-FSID
-lock as `catos-recovery`, preventing concurrent mount repair and
-recovery transactions against the same btrfs filesystem. The lock
-binds to filesystem identity (FSID), not to a transaction id.
+The privileged apply layer takes the shared block-device lock used by
+`catos-recovery`, preventing concurrent mount repair and recovery
+transactions for the selected target.
 
 ### Cleanup semantics
 
@@ -672,11 +669,8 @@ never claims a clean success on a dirty namespace.
 
 ## What is not implemented yet
 
-- The privileged disk-write apply layer for `catos-repair mount`
-  (atomic fstab replace, fsync, btrfs subvolume creation, private-
-  namespace verification mount). The in-memory plan, diagnosis, and
-  structure-preserving fstab edit are implemented and tested; the
-  CLI surfaces them with an honest `partially_repaired` outcome.
+- Automatic target selection, non-Btrfs target layouts, and complete
+  six-layout ESP topology detection for `catos-repair mount`.
 - Bootloader repair of any kind (GRUB, Limine, UKI, sd-boot). Recovery
   swaps the root subvolume only; it does NOT call any bootloader tool
   and does NOT write to the ESP. A read-only `BootConsistencyReport`

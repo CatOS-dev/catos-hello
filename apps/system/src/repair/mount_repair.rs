@@ -1077,6 +1077,11 @@ fn execute_mount_repair(
             &plan.unresolved_conflicts.join("; "),
         );
     }
+    if plan.fstab_edits.is_empty() && plan.subvolumes.is_empty() && plan.directories.is_empty() {
+        let mut report = MountRepairReport::clean(inputs.target.clone());
+        report.plan = Some(plan);
+        return report;
+    }
     let rewritten = match apply_in_memory(&inputs.fstab_text, &plan) {
         Ok(text) => text,
         Err(outcome) => return MountRepairReport::refused(outcome, "fstab edits could not be applied safely"),
