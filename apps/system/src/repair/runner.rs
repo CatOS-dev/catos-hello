@@ -36,12 +36,6 @@ use std::time::Duration;
 
 use crate::model::repair::ExitInterpretation;
 
-/// Default per-tool timeout. Long enough for `e2fsck -y` on a large
-/// filesystem, short enough that a hung tool does not pin the
-/// orchestrator. Real repair jobs on damaged media can take longer;
-/// the orchestrator may override per-fstype.
-pub const DEFAULT_REPAIR_TIMEOUT_SECS: u64 = 120;
-
 /// One captured invocation. The orchestrator builds
 /// [`RepairInvocation`]s to describe what it wants to run; the runner
 /// produces a [`ToolResult`] describing what happened.
@@ -52,8 +46,10 @@ pub struct RepairInvocation {
     pub binary: String,
     /// argv[1..]. Recorded verbatim in the report.
     pub argv: Vec<String>,
-    /// Deadline. The runner MUST kill the process if it expires.
-    pub timeout: Duration,
+    /// Optional deadline. Write-capable filesystem repair defaults to
+    /// no deadline: killing a tool while it updates metadata can make
+    /// an already damaged filesystem worse.
+    pub timeout: Option<Duration>,
 }
 
 impl RepairInvocation {
@@ -61,12 +57,12 @@ impl RepairInvocation {
         Self {
             binary: binary.to_string(),
             argv,
-            timeout: Duration::from_secs(DEFAULT_REPAIR_TIMEOUT_SECS),
+            timeout: None,
         }
     }
 
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
-        self.timeout = timeout;
+        self.timeout = Some(timeout);
         self
     }
 }
@@ -185,7 +181,7 @@ pub trait CommandRunner: std::fmt::Debug {
     /// * Pass `invocation.argv` as separate argv elements; no shell.
     /// * Clear the environment and set only `LC_ALL=C`, `LANG=C`,
     ///   `PATH=/usr/bin:/usr/sbin:/bin:/sbin`.
-    /// * Enforce `invocation.timeout` (kill + reap on expiry).
+    /// * Enforce `invocation.timeout` when one was explicitly set.
     /// * Cap captured stdout/stderr at the runner's safety limit
     ///   (default 64 KiB) and flag truncation.
     fn invoke(&self, invocation: &RepairInvocation) -> Result<ToolResult, RepairRunnerError>;
@@ -249,7 +245,7 @@ impl CommandRunner for TrustedRunner {
         // The trusted runner returns a structured error string for
         // spawn/pipe failures. Re-map into our error type so the
         // orchestrator sees one error type.
-        let output = crate::process::run_trusted_tool(
+        let output = crate::process::run_trusted_tool_with_optional_timeout(
             invocation.binary.as_str(),
             &argv_refs,
             invocation.timeout,

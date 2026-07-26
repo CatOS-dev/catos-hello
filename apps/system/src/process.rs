@@ -58,6 +58,18 @@ pub fn run_trusted_tool(
     timeout: Duration,
     max_output_bytes: usize,
 ) -> Result<ToolOutput, String> {
+    run_trusted_tool_with_optional_timeout(name, args, Some(timeout), max_output_bytes)
+}
+
+/// Run a trusted tool with an optional deadline. Callers that perform
+/// write-capable filesystem repair pass `None`: terminating an active
+/// metadata repair is more dangerous than waiting for it to finish.
+pub fn run_trusted_tool_with_optional_timeout(
+    name: &str,
+    args: &[&str],
+    timeout: Option<Duration>,
+    max_output_bytes: usize,
+) -> Result<ToolOutput, String> {
     let path = trusted_tool_path(name)
         .ok_or_else(|| format!("trusted tool {name:?} not found in fixed system directories"))?;
 
@@ -91,7 +103,9 @@ pub fn run_trusted_tool(
     let (status, timed_out) = loop {
         match child.try_wait() {
             Ok(Some(status)) => break (status, false),
-            Ok(None) if started.elapsed() < timeout => thread::sleep(Duration::from_millis(10)),
+            Ok(None) if timeout.map_or(true, |limit| started.elapsed() < limit) => {
+                thread::sleep(Duration::from_millis(10))
+            }
             Ok(None) => {
                 let _ = child.kill();
                 let status = child.wait().map_err(|error| {
