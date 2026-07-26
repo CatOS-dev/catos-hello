@@ -36,11 +36,19 @@
 //!   mount after a successful repair, in a private namespace, and it
 //!   is unmounted before we return.
 
+pub mod fstab_edit;
+pub mod mount_repair;
 pub mod orchestrator;
+pub mod path_safety;
 pub mod runner;
 pub mod runners;
 pub mod safety;
+pub mod subvol_decision;
 pub mod verify;
+
+pub use mount_repair::{
+    build_plan, diagnose, run_mount_repair_diagnosis, run_mount_repair_via_cli, MountRepairInputs,
+};
 
 pub use orchestrator::run_fs_repair;
 pub use runner::{
