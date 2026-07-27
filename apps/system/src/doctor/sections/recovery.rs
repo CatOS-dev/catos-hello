@@ -73,12 +73,7 @@ fn run_recovery_for_target(
         for error in errors {
             let message = format!("cannot inspect recovery transactions at {}: {error}", transaction_dir.display());
             report.limitations.push(DoctorLimitation::new(id, "RECOVERY_INSPECT_FAILED", message.clone()));
-            section.issues.push(DoctorIssue::new(
-                "RECOVERY_RECORD_UNREADABLE",
-                DoctorSeverity::Warning,
-                id,
-                message,
-            ));
+            section.issues.push(DoctorIssue::new("RECOVERY_RECORD_UNREADABLE", DoctorSeverity::Warning, id, message));
         }
         return Ok(());
     }
@@ -86,6 +81,35 @@ fn run_recovery_for_target(
         set_section(sections, id, DoctorSectionStatus::Unknown);
         report.limitations.push(DoctorLimitation::new(id, "RECOVERY_FACTS_INCOMPLETE", "validated readonly Btrfs top-level facts are unavailable"));
         return Ok(());
+    };
+    let record_ids = records.into_iter().map(|(_, record)| record.transaction_id).collect::<Vec<_>>();
+    run_recovery_for_target_with(sections, report, || Ok(record_ids), |transaction_id| {
+        let mut engine = crate::snapshot::execute::engine::Engine::load(options.clone(), transaction_id)
+            .map_err(|error| error.to_string())?;
+        engine.reconcile_status();
+        Ok(RecoveryRecordView::from_record(engine.record()))
+    })
+}
+
+fn run_recovery_for_target_with<L, R>(
+    sections: &mut [(DoctorSectionId, DoctorSection)],
+    report: &mut DoctorReport,
+    list_records: L,
+    mut load_reconcile_read: R,
+) -> Result<(), ()>
+where
+    L: FnOnce() -> Result<Vec<String>, String>,
+    R: FnMut(&str) -> Result<RecoveryRecordView, String>,
+{
+    let id = DoctorSectionId::Recovery;
+    let records = match list_records() {
+        Ok(records) => records,
+        Err(error) => {
+            let section = set_section(sections, id, DoctorSectionStatus::Unknown);
+            report.limitations.push(DoctorLimitation::new(id, "RECOVERY_INSPECT_FAILED", error.clone()));
+            section.issues.push(DoctorIssue::new("RECOVERY_RECORD_UNREADABLE", DoctorSeverity::Warning, id, error));
+            return Ok(());
+        }
     };
     if records.is_empty() {
             set_section(sections, id, DoctorSectionStatus::Healthy);
@@ -102,19 +126,14 @@ fn run_recovery_for_target(
     }
 
     let mut section_status = DoctorSectionStatus::Healthy;
-    for (_, record) in &records {
-        let reconciled = load_and_reconcile_record(&record.transaction_id, || {
-            let mut engine = crate::snapshot::execute::engine::Engine::load(options.clone(), &record.transaction_id)
-                .map_err(|error| error.to_string())?;
-            engine.reconcile_status();
-            Ok(RecoveryRecordView::from_record(engine.record()))
-        });
+    for transaction_id in &records {
+        let reconciled = load_and_reconcile_record(transaction_id, || load_reconcile_read(transaction_id));
         let reconciled = match reconciled {
             Ok(record) => record,
             Err(error) => {
                 section_status = DoctorSectionStatus::Unknown;
-                report.limitations.push(DoctorLimitation::new(id, "RECOVERY_RECONCILE_FAILED", format!("cannot load {} read-only: {error}", record.transaction_id)));
-                push_issue(sections, DoctorIssue::new("RECOVERY_RECONCILE_FAILED", DoctorSeverity::Warning, id, format!("transaction {} could not be read-only reconciled", record.transaction_id)));
+                report.limitations.push(DoctorLimitation::new(id, "RECOVERY_RECONCILE_FAILED", format!("cannot load {transaction_id} read-only: {error}")));
+                push_issue(sections, DoctorIssue::new("RECOVERY_RECONCILE_FAILED", DoctorSeverity::Warning, id, format!("transaction {transaction_id} could not be read-only reconciled")));
                 continue;
             }
         };
@@ -334,6 +353,62 @@ mod tests {
         assert_eq!(loads.get(), 1);
         assert_eq!(writes.get(), 0);
         let recovery = sections.iter().find(|(id, _)| *id == DoctorSectionId::Recovery).unwrap();
+        assert!(!recovery.1.issues.iter().any(|issue| issue.code == issue_code::RECOVERY_TRANSACTION_INTERRUPTED));
+        assert!(recovery.1.issues.iter().any(|issue| issue.code == issue_code::RECOVERY_BACKUP_PRESENT));
+    }
+
+    #[test]
+    fn full_recovery_adapter_consumes_strict_readonly_fake_pipeline() {
+        use std::cell::RefCell;
+
+        struct StrictFake {
+            calls: RefCell<Vec<&'static str>>,
+            persisted: RecoveryRecordView,
+            reconciled: RecoveryRecordView,
+        }
+        impl StrictFake {
+            fn list(&self) -> Result<Vec<String>, String> {
+                self.calls.borrow_mut().push("list");
+                Ok(vec![self.persisted.transaction_id.clone()])
+            }
+            fn load_reconcile_read(&self, id: &str) -> Result<RecoveryRecordView, String> {
+                assert_eq!(id, self.persisted.transaction_id);
+                self.calls.borrow_mut().extend(["load", "reconcile", "record"]);
+                Ok(self.reconciled.clone())
+            }
+        }
+
+        let fake = StrictFake {
+            calls: RefCell::new(Vec::new()),
+            persisted: RecoveryRecordView {
+                transaction_id: "tx-strict".into(),
+                state: crate::snapshot::model::TransactionState::Locked,
+                last_error: None,
+                last_cleanup: None,
+            },
+            reconciled: RecoveryRecordView {
+                transaction_id: "tx-strict".into(),
+                state: crate::snapshot::model::TransactionState::Completed,
+                last_error: None,
+                last_cleanup: Some(crate::snapshot::model::CleanupSummary::default()),
+            },
+        };
+        let mut sections: Vec<(DoctorSectionId, DoctorSection)> = DoctorSectionId::all()
+            .iter()
+            .map(|id| (*id, DoctorSection::new(*id, DoctorSectionStatus::Unknown)))
+            .collect();
+        let mut report = DoctorReport::default();
+        run_recovery_for_target_with(
+            &mut sections,
+            &mut report,
+            || fake.list(),
+            |id| fake.load_reconcile_read(id),
+        )
+        .unwrap();
+
+        assert_eq!(*fake.calls.borrow(), vec!["list", "load", "reconcile", "record"]);
+        let recovery = sections.iter().find(|(id, _)| *id == DoctorSectionId::Recovery).unwrap();
+        assert_eq!(recovery.1.status, DoctorSectionStatus::Healthy);
         assert!(!recovery.1.issues.iter().any(|issue| issue.code == issue_code::RECOVERY_TRANSACTION_INTERRUPTED));
         assert!(recovery.1.issues.iter().any(|issue| issue.code == issue_code::RECOVERY_BACKUP_PRESENT));
     }
