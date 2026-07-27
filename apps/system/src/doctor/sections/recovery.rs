@@ -187,3 +187,42 @@ fn worse_of(current: DoctorSectionStatus, candidate: DoctorSectionStatus) -> Doc
         current
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn corrupt_transaction_is_reported_not_silently_skipped() {
+        let root = std::env::temp_dir().join(format!(
+            "catos-doctor-recovery-test-{}-{}",
+            std::process::id(),
+            SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        let transaction = root.join(".catos-recovery/transactions/tx-00000000000000000000000000000000");
+        std::fs::create_dir_all(&transaction).unwrap();
+        std::fs::write(transaction.join("state.json"), b"not json").unwrap();
+
+        let target = TargetIdentity {
+            root: root.clone(),
+            root_fstype: Some("btrfs".to_string()),
+            root_device: Some(PathBuf::from("/dev/fixture")),
+            ..TargetIdentity::default()
+        };
+        let mut sections: Vec<(DoctorSectionId, DoctorSection)> = DoctorSectionId::all()
+            .iter()
+            .map(|id| (*id, DoctorSection::new(*id, DoctorSectionStatus::Unknown)))
+            .collect();
+        let mut report = DoctorReport::default();
+
+        run_recovery_section(&mut sections, &target, &mut report).unwrap();
+
+        let recovery = sections.iter().find(|(id, _)| *id == DoctorSectionId::Recovery).unwrap();
+        assert_eq!(recovery.1.status, DoctorSectionStatus::Unknown);
+        assert!(recovery.1.issues.iter().any(|issue| issue.code == "RECOVERY_RECORD_UNREADABLE"));
+        assert!(report.limitations.iter().any(|limitation| limitation.code == "RECOVERY_INSPECT_FAILED"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+}
