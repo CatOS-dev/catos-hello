@@ -21,6 +21,7 @@ pub mod recovery;
 pub mod repair;
 pub mod shared;
 pub mod system;
+pub mod target;
 pub mod update;
 
 pub use shared::error::{exit_code, Error, FsError};
