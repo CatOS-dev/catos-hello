@@ -128,6 +128,42 @@ pub(in crate::doctor) fn run_storage_section(
             context.candidate.filesystem_id.as_deref().unwrap_or("<unknown>")
         ),
     ));
+    section.evidence.push(Evidence::new(
+        "TARGET_INVENTORY",
+        "doctor::context",
+        format!("shared inventory contains {} block-device records", context.devices.len()),
+    ));
+    match context.boot_layout.as_ref() {
+        Ok(crate::mount::model::BootMountLayout::SeparateBootAndEsp { boot_device, .. }) => {
+            section.evidence.push(Evidence::new(
+                "BOOT_DEVICE",
+                "doctor::storage",
+                format!("separate /boot device: {}", boot_device.display()),
+            ));
+        }
+        Ok(crate::mount::model::BootMountLayout::EspAtBoot { esp_device }) => {
+            section.evidence.push(Evidence::new(
+                "BOOT_DEVICE",
+                "doctor::storage",
+                format!("FAT /boot ESP device: {}", esp_device.display()),
+            ));
+        }
+        Ok(_) => {
+            section.evidence.push(Evidence::new(
+                "BOOT_DEVICE",
+                "doctor::storage",
+                format!(
+                    "/boot is carried by root device: {}",
+                    target.root_device.as_ref().map(|path| path.display().to_string()).unwrap_or_else(|| "<unknown>".to_string())
+                ),
+            ));
+        }
+        Err(error) => report.limitations.push(DoctorLimitation::new(
+            id,
+            "BOOT_LAYOUT_INCOMPLETE",
+            error.clone(),
+        )),
+    }
     match &context.esp {
         Ok(Some(esp)) => {
             section.evidence.push(Evidence::new(
