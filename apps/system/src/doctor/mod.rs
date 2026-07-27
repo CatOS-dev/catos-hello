@@ -54,6 +54,7 @@ pub(crate) struct DoctorTargetContext {
     pub fstab: Result<String, String>,
     pub devices: Vec<crate::target::model::BlockDevice>,
     pub esp: Result<Option<DoctorEsp>, String>,
+    pub boot_layout: Result<crate::mount::model::BootMountLayout, String>,
     top_level: Result<Option<ReadonlySession>, String>,
     pub recovery_options: Result<Option<crate::snapshot::execute::engine::EngineOptions>, String>,
     session: TargetSession,
@@ -79,6 +80,17 @@ impl DoctorTargetContext {
             Ok(fstab) => open_target_esp(fstab, &devices),
             Err(error) => Err(format!("cannot resolve selected target ESP without fstab: {error}")),
         };
+        let boot_layout = match (&fstab, &esp, target.root_device.as_deref()) {
+            (Ok(fstab), Ok(esp), Some(root_device)) => crate::mount::diagnose::target::detect_boot_mount_layout(
+                &crate::mount::diagnose::fstab::parse_all(fstab),
+                &devices,
+                root_device,
+                esp.as_ref().map(|esp| esp.device.as_path()),
+            ),
+            (Err(error), _, _) => Err(format!("cannot derive target boot layout without fstab: {error}")),
+            (_, Err(error), _) => Err(format!("cannot derive target boot layout without ESP facts: {error}")),
+            (_, _, None) => Err("cannot derive target boot layout without root device".to_string()),
+        };
         let top_level = if candidate.root_fstype == "btrfs" {
             ReadonlySession::open_with_options(&candidate.root_device, "btrfs", "ro,norecovery,subvolid=5").map(Some)
         } else {
@@ -95,7 +107,7 @@ impl DoctorTargetContext {
             Ok(None) => Ok(None),
             Err(error) => Err(format!("cannot open selected Btrfs top-level: {error}")),
         };
-        Self { target, candidate, fstab, devices, esp, top_level, recovery_options, session }
+        Self { target, candidate, fstab, devices, esp, boot_layout, top_level, recovery_options, session }
     }
 
     fn cleanup(self) -> Vec<crate::target::discovery::ProbeCleanup> {

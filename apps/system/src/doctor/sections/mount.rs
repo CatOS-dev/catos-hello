@@ -99,14 +99,7 @@ fn build_mount_inputs(context: &DoctorTargetContext) -> Result<MountRepairInputs
     } else {
         SubvolFacts::default()
     };
-    let fstab_entries = crate::mount::diagnose::fstab::parse_all(&fstab_text);
-    let selected_esp = context.esp.as_ref().map_err(Clone::clone)?.as_ref().map(|esp| esp.device.as_path());
-    let boot_layout = crate::mount::diagnose::target::detect_boot_mount_layout(
-        &fstab_entries,
-        &context.devices,
-        &root_device,
-        selected_esp,
-    )?;
+    let boot_layout = context.boot_layout.as_ref().map_err(Clone::clone)?.clone();
     let (esp_device, esp_uuid) = match context.esp.as_ref().map_err(Clone::clone)?.as_ref() {
         Some(esp) => (Some(esp.device.clone()), esp.uuid.clone()),
         None => (None, None),
