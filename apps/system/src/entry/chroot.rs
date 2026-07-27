@@ -48,7 +48,7 @@ pub fn run(argv: &[String]) -> i32 {
         return exit_code::PROBE_FAILED;
     }
 
-    let devices = target_inventory_for_chroot();
+    let mut devices = target_inventory_for_chroot();
     if devices.is_empty() {
             eprintln!("catos-chroot: no usable block devices found");
             return exit_code::PROBE_FAILED;
@@ -77,6 +77,7 @@ pub fn run(argv: &[String]) -> i32 {
                 Err(error) => { eprintln!("catos-chroot: {error}"); return exit_code::PROBE_FAILED; }
             };
             let rediscovered = crate::target::discovery::discover_targets();
+            devices = target_inventory_for_chroot();
             let selected = match crate::selection_ui::select_target(&rediscovered, "catos-chroot") {
                 crate::selection_ui::Selection::Selected(candidate) => candidate,
                 crate::selection_ui::Selection::Declined => {
@@ -97,21 +98,20 @@ pub fn run(argv: &[String]) -> i32 {
         }
         crate::selection_ui::Selection::Unavailable(reason) => { eprintln!("catos-chroot: {reason}"); return exit_code::PROBE_FAILED; }
     };
-    let root_device = match devices.iter().find(|device| {
-        std::path::Path::new(&device.name) == selected_target.root_device
-            || format!("/dev/{}", device.name) == selected_target.root_device.display().to_string()
-    }) {
+    let root_device = match find_selected_device(&devices, &selected_target.root_device) {
         Some(device) => device.clone(),
         None => {
-            eprintln!("catos-chroot: selected device {} disappeared from inventory", selected_target.root_device.display());
-            return exit_code::PROBE_FAILED;
+            return fail_with_luks_cleanup(
+                opened_luks.take(), exit_code::PROBE_FAILED,
+                format!("selected device {} disappeared from fresh shared inventory", selected_target.root_device.display()),
+            );
         }
     };
 
     let selected_subvolume = if root_device.is_btrfs() {
         match (selected_target.root_subvolume.as_deref(), selected_target.root_subvolume_id) {
             (Some(path), Some(id)) => Some(Subvolume { id, name: path.trim_start_matches('/').to_string() }),
-            _ => { eprintln!("catos-chroot: selected Btrfs target has incomplete shared subvolume identity"); return exit_code::PROBE_FAILED; }
+            _ => return fail_with_luks_cleanup(opened_luks.take(), exit_code::PROBE_FAILED, "selected Btrfs target has incomplete shared subvolume identity".into()),
         }
     } else {
         None
@@ -123,8 +123,7 @@ pub fn run(argv: &[String]) -> i32 {
         match read_from_device(&root_device, selected_subvolume.as_ref()) {
             Ok(entries) => entries,
             Err(message) => {
-                eprintln!("catos-chroot: {message}");
-                return exit_code::PROBE_FAILED;
+                return fail_with_luks_cleanup(opened_luks.take(), exit_code::PROBE_FAILED, message);
             }
         }
     };
@@ -140,8 +139,7 @@ pub fn run(argv: &[String]) -> i32 {
     }) {
         Ok(plan) => plan,
         Err(error) => {
-            eprintln!("catos-chroot: {error}");
-            return exit_code::ARG_ERROR;
+            return fail_with_luks_cleanup(opened_luks.take(), exit_code::ARG_ERROR, error.to_string());
         }
     };
     for warning in &plan.warnings {
@@ -151,8 +149,7 @@ pub fn run(argv: &[String]) -> i32 {
     let session = match ChrootSessionRoot::create() {
         Ok(session) => session,
         Err(message) => {
-            eprintln!("catos-chroot: {message}");
-            return exit_code::PROBE_FAILED;
+            return fail_with_luks_cleanup(opened_luks.take(), exit_code::PROBE_FAILED, message);
         }
     };
     let mut effects = SystemChrootEffects;
@@ -181,6 +178,17 @@ pub fn run(argv: &[String]) -> i32 {
     }
 }
 
+fn fail_with_luks_cleanup(opened_luks: Option<OpenedLuks>, code: i32, message: String) -> i32 {
+    eprintln!("catos-chroot: {message}");
+    if let Some(opened) = opened_luks {
+        if let Err(error) = opened.close() {
+            eprintln!("catos-chroot: LUKS cleanup failed: {error}");
+            return exit_code::PROBE_FAILED;
+        }
+    }
+    code
+}
+
 fn target_inventory_for_chroot() -> Vec<BlockDevice> {
     crate::target::discovery::discover_inventory()
         .into_iter()
@@ -200,6 +208,10 @@ fn target_block_to_chroot(device: &crate::target::model::BlockDevice) -> Option<
         name: device.dev_path.as_ref()?.display().to_string(), fs_type: device.filesystem.clone(), uuid: device.uuid.clone(),
         partuuid: device.part_uuid.clone(), label: device.label.clone(), partlabel: device.part_label.clone(),
     })
+}
+
+fn find_selected_device(devices: &[BlockDevice], selected: &std::path::Path) -> Option<BlockDevice> {
+    devices.iter().find(|device| std::path::Path::new(&device.name) == selected).cloned()
 }
 
 pub fn print_help() {
@@ -360,5 +372,13 @@ mod tests {
     #[test]
     fn empty_argv_is_default() {
         assert_eq!(parse_argv(&[]).unwrap(), ChrootOptions::default());
+    }
+
+    #[test]
+    fn mapper_selected_after_unlock_is_resolved_from_fresh_inventory() {
+        let old = BlockDevice { name: "/dev/sda2".into(), fs_type: Some("crypto_LUKS".into()), uuid: Some("luks".into()), partuuid: None, label: None, partlabel: None };
+        let fresh = BlockDevice { name: "/dev/mapper/luks-luks".into(), fs_type: Some("btrfs".into()), uuid: Some("root".into()), partuuid: None, label: None, partlabel: None };
+        assert!(find_selected_device(&[old], std::path::Path::new("/dev/mapper/luks-luks")).is_none());
+        assert_eq!(find_selected_device(&[fresh.clone()], std::path::Path::new("/dev/mapper/luks-luks")).unwrap(), fresh);
     }
 }
