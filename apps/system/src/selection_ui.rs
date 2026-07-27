@@ -109,7 +109,7 @@ mod tests {
     use std::path::PathBuf;
     #[test]
     fn summary_includes_device_uuid_and_subvolume() {
-        let candidate = TargetCandidate { root_device: PathBuf::from("/dev/nvme0n1p3"), root_fstype: "btrfs".into(), root_uuid: Some("uuid".into()), root_subvolume: Some("/@".into()), filesystem_id: Some("fsid".into()), label: None, os_release: crate::target::model::OsRelease { pretty_name: Some("CatOS".into()), ..Default::default() }, fstab_identity: None, currently_mounted: false, running_environment_member: false, confidence: RootCandidateConfidence::High, evidence: Vec::new() };
+        let candidate = TargetCandidate { root_device: PathBuf::from("/dev/nvme0n1p3"), root_fstype: "btrfs".into(), root_uuid: Some("uuid".into()), root_subvolume: Some("/@".into()), root_subvolume_id: Some(256), filesystem_id: Some("fsid".into()), label: None, os_release: crate::target::model::OsRelease { pretty_name: Some("CatOS".into()), ..Default::default() }, fstab_identity: None, currently_mounted: false, running_environment_member: false, confidence: RootCandidateConfidence::High, evidence: Vec::new() };
         assert_eq!(summary(&candidate), "CatOS — /dev/nvme0n1p3 — btrfs UUID=uuid subvol=/@");
     }
 

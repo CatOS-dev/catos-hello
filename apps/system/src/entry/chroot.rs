@@ -2,12 +2,11 @@
 
 use std::io::{IsTerminal, Write};
 
-use crate::chroot::diagnose::btrfs::list_subvolumes;
 use crate::chroot::diagnose::fstab::read_from_device;
 use crate::chroot::execute::{
     authorize, execute_plan, open_luks, ChrootPrivilegeEvidence, OpenedLuks, SystemChrootEffects,
 };
-use crate::chroot::model::{BlockDevice, ChrootExecutionOutcome};
+use crate::chroot::model::{BlockDevice, ChrootExecutionOutcome, Subvolume};
 use crate::chroot::plan::{build_plan, ChrootPlanInputs, ExtraMountSelection};
 use crate::chroot::session::{establish_private_namespace, ChrootSessionRoot};
 use crate::error::exit_code;
@@ -80,8 +79,18 @@ pub fn run(argv: &[String]) -> i32 {
             let rediscovered = crate::target::discovery::discover_targets();
             let selected = match crate::selection_ui::select_target(&rediscovered, "catos-chroot") {
                 crate::selection_ui::Selection::Selected(candidate) => candidate,
-                crate::selection_ui::Selection::Declined => { eprintln!("catos-chroot: target selection declined"); return exit_code::ARG_ERROR; }
-                crate::selection_ui::Selection::Unavailable(error) => { eprintln!("catos-chroot: unlocked mapper did not yield a CatOS candidate: {error}"); return exit_code::PROBE_FAILED; }
+                crate::selection_ui::Selection::Declined => {
+                    let cleanup = opened.close();
+                    eprintln!("catos-chroot: target selection declined");
+                    if let Err(error) = cleanup { eprintln!("catos-chroot: LUKS cleanup failed: {error}"); return exit_code::PROBE_FAILED; }
+                    return exit_code::ARG_ERROR;
+                }
+                crate::selection_ui::Selection::Unavailable(error) => {
+                    let cleanup = opened.close();
+                    eprintln!("catos-chroot: unlocked mapper did not yield a CatOS candidate: {error}");
+                    if let Err(error) = cleanup { eprintln!("catos-chroot: LUKS cleanup failed: {error}"); }
+                    return exit_code::PROBE_FAILED;
+                }
             };
             opened_luks = Some(opened);
             selected
@@ -100,22 +109,9 @@ pub fn run(argv: &[String]) -> i32 {
     };
 
     let selected_subvolume = if root_device.is_btrfs() {
-        let subvolumes = match list_subvolumes(&root_device, options.show_btrfs_dot_snapshots) {
-            Ok(subvolumes) => subvolumes,
-            Err(message) => {
-                eprintln!("catos-chroot: {message}");
-                return exit_code::PROBE_FAILED;
-            }
-        };
-        match selected_target.root_subvolume.as_deref() {
-            Some(path) => match subvolumes.into_iter().find(|subvolume| subvolume.name == path.trim_start_matches('/')) {
-                Some(subvolume) => Some(subvolume),
-                None => { eprintln!("catos-chroot: selected Btrfs subvolume {path} disappeared"); return exit_code::PROBE_FAILED; }
-            },
-            None => {
-                eprintln!("catos-chroot: selected Btrfs target has no discovered root subvolume");
-                return exit_code::PROBE_FAILED;
-            }
+        match (selected_target.root_subvolume.as_deref(), selected_target.root_subvolume_id) {
+            (Some(path), Some(id)) => Some(Subvolume { id, name: path.trim_start_matches('/').to_string() }),
+            _ => { eprintln!("catos-chroot: selected Btrfs target has incomplete shared subvolume identity"); return exit_code::PROBE_FAILED; }
         }
     } else {
         None
