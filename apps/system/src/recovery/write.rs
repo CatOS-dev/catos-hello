@@ -5,7 +5,6 @@
 
 use std::path::Path;
 
-use crate::mount::session::cleanup::MountSessionError;
 use crate::mount::session::BtrfsTopLevelRwSession;
 use crate::shared::cli::RecoveryArgs;
 use crate::snapshot::diagnose::identity::{
@@ -23,22 +22,6 @@ use crate::snapshot::verify::require_boot_consistency;
 use super::read::probe_existing_transaction_readonly;
 use super::{ensure_cli_root_matches_plan, require_root, require_transaction_id};
 use crate::snapshot::diagnose::enumerate::probe_target_readonly;
-
-// Bridge the `mount` capability's session error/cleanup taxonomy into
-// the recovery domain. These live here (in the recovery application
-// layer) because the `mount` capability is forbidden from depending
-// on the recovery-domain model; the consumer owns the adaptation.
-impl From<MountSessionError> for SnapshotError {
-    fn from(error: MountSessionError) -> Self {
-        SnapshotError::new(
-            SnapshotErrorKind::SyscallFailed,
-            format!(
-                "btrfs top-level rw session: {} (kind={:?})",
-                error.message, error.kind
-            ),
-        )
-    }
-}
 
 // ---------------------------------------------------------------------------
 // apply

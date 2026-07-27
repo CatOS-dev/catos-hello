@@ -14,8 +14,8 @@
 //! entry   <- main.rs glue: argv[0] multicall + dispatch
 //! ```
 
-pub mod boot;
-pub mod chroot;
+pub use catos_boot as boot;
+pub use catos_chroot as chroot;
 pub mod doctor;
 pub mod entry;
 pub use catos_fs as fs;
@@ -23,7 +23,7 @@ pub use catos_mount as mount;
 pub mod recovery;
 pub mod repair;
 pub mod shared;
-pub mod snapshot;
+pub use catos_snapshot as snapshot;
 pub mod system;
 pub use catos_target as target;
 pub mod update;

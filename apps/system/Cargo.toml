@@ -5,6 +5,9 @@ members = [
     "crates/catos-target",
     "crates/catos-mount",
     "crates/catos-fs",
+    "crates/catos-boot",
+    "crates/catos-snapshot",
+    "crates/catos-chroot",
 ]
 resolver = "2"
 
@@ -41,6 +44,9 @@ catos-process = { path = "crates/catos-process" }
 catos-target = { path = "crates/catos-target" }
 catos-mount = { path = "crates/catos-mount" }
 catos-fs = { path = "crates/catos-fs" }
+catos-boot = { path = "crates/catos-boot" }
+catos-snapshot = { path = "crates/catos-snapshot" }
+catos-chroot = { path = "crates/catos-chroot" }
 # No async runtime, TLS, D-Bus, libalpm, or heavyweight CLI framework.
 # `sha2` binds the immutable effective plan; `getrandom` is the only
 # accepted nonce/id source and fails closed when the kernel RNG fails.
@@ -60,11 +66,11 @@ libc = { version = "0.2", default-features = false }
 # crash/resume matrix. NEVER enable in release builds.
 [features]
 default = []
-recovery_fault_injection = []
+recovery_fault_injection = ["catos-snapshot/recovery_fault_injection"]
 # Test-only helpers (subprocess lock holders, etc.). NEVER enable in
 # release builds; the feature gates test scaffolding that ships no
 # production value.
-test-helpers = []
+test-helpers = ["catos-snapshot/test-helpers"]
 
 # Release profile tuned for size. Comparison recorded in apps/system/README.md:
 #   opt-level = "z" produced a smaller stripped static binary than "s" on this
