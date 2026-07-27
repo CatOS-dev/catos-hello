@@ -87,7 +87,14 @@ pub(in crate::doctor) fn run_boot_section(
                     format!("provider={} method={:?}", provider.as_str(), method),
                 ),
             );
-            let assets_ok = inspect_provider_assets(context, provider);
+            let assets_ok = match inspect_provider_assets(context, provider) {
+                Ok(value) => value,
+                Err(message) => {
+                    set_section(sections, id, DoctorSectionStatus::Unknown);
+                    report.limitations.push(DoctorLimitation::new(id, "BOOT_ASSETS_INCOMPLETE", message));
+                    return Ok(());
+                }
+            };
             if assets_ok {
                 set_section(sections, id, DoctorSectionStatus::Healthy);
             } else {
@@ -149,16 +156,6 @@ pub(in crate::doctor) fn run_boot_section(
 
 fn collect_detection_inputs(context: &DoctorTargetContext) -> Result<DetectionInputs, String> {
     let root = target_root_path(&context.target);
-    let fstab = context.fstab.as_ref().map_err(Clone::clone)?;
-    if fstab_has_external_boot(fstab)
-        || matches!(
-            context.boot_layout.as_ref(),
-            Ok(crate::mount::model::BootMountLayout::SeparateBootAndEsp { .. }
-                | crate::mount::model::BootMountLayout::BootBtrfsSubvolume { .. })
-        )
-    {
-        return Err("target /boot is a separate filesystem and is not mounted in Doctor's selected readonly session".to_string());
-    }
     let esp = context.esp.as_ref().map_err(Clone::clone)?.as_ref();
     Ok(DetectionInputs {
         grub_defaults_catos: read_target_file(&root, "etc/default/grub.d/00-catos.cfg"),
@@ -169,19 +166,12 @@ fn collect_detection_inputs(context: &DoctorTargetContext) -> Result<DetectionIn
         ),
         firmware_boot_conf: read_target_file(&root, "etc/catos/firmware-boot.conf"),
         kernel_cmdline: read_target_file(&root, "etc/kernel/cmdline"),
-        has_boot_grub: has_target_path(&root, "boot/grub"),
+        has_boot_grub: boot_asset_exists(context, "grub")?,
         has_esp_limine_conf: esp.is_some_and(|esp| target_path_exists(esp.root.root(), "limine.conf")),
         has_systemd_boot_loader: esp.is_some_and(|esp| target_path_exists(esp.root.root(), "loader/loader.conf") || target_path_exists(esp.root.root(), "loader/entries")),
         has_catos_uki_deployed: esp.is_some_and(|esp| target_path_exists(esp.root.root(), "EFI/CatOS")),
         has_efistub_deployed: esp.is_some_and(|esp| target_path_exists(esp.root.root(), "EFI/CatOS")),
         installed_packages: installed_packages(&root)?,
-    })
-}
-
-fn fstab_has_external_boot(fstab: &str) -> bool {
-    crate::target::fstab::parse_all(fstab).iter().any(|entry| {
-        entry.target == "/boot"
-            && !matches!(entry.fstype.as_str(), "btrfs" | "vfat" | "fat" | "fat32" | "fat16" | "fat12")
     })
 }
 
@@ -204,11 +194,11 @@ fn installed_packages(root: &Path) -> Result<Vec<String>, String> {
 fn inspect_provider_assets(
     context: &DoctorTargetContext,
     provider: crate::boot::model::ProviderId,
-) -> bool {
+) -> Result<bool, String> {
     let root = target_root_path(&context.target);
     let esp = context.esp.as_ref().ok().and_then(|esp| esp.as_ref());
-    match provider {
-        crate::boot::model::ProviderId::Grub => has_target_path(&root, "boot/grub"),
+    Ok(match provider {
+        crate::boot::model::ProviderId::Grub => boot_asset_exists(context, "grub")?,
         crate::boot::model::ProviderId::Limine => {
             esp.is_some_and(|esp| target_path_exists(esp.root.root(), "limine.conf"))
         }
@@ -216,9 +206,61 @@ fn inspect_provider_assets(
             esp.is_some_and(|esp| target_path_exists(esp.root.root(), "loader/loader.conf") || target_path_exists(esp.root.root(), "loader/entries"))
         }
         crate::boot::model::ProviderId::Uki | crate::boot::model::ProviderId::Efistub => {
-            esp.is_some_and(|esp| target_path_exists(esp.root.root(), "EFI/CatOS"))
+            let Some(esp) = esp else { return Ok(false) };
+            provider_firmware_asset_present(esp.root.root(), provider, read_target_file(&root, "etc/catos/firmware-boot.conf").as_deref())
         }
+    })
+}
+
+fn boot_asset_exists(context: &DoctorTargetContext, relative: &str) -> Result<bool, String> {
+    use crate::mount::model::BootMountLayout;
+
+    match context.boot_layout.as_ref().map_err(Clone::clone)? {
+        BootMountLayout::SeparateBootAndEsp { .. } | BootMountLayout::BootBtrfsSubvolume { .. } => {
+            let session = context.boot.as_ref().map_err(Clone::clone)?
+                .as_ref().ok_or_else(|| "selected target has an external /boot but no readonly boot session".to_string())?;
+            Ok(target_path_exists(session.root(), relative))
+        }
+        BootMountLayout::EspAtBoot { .. } => {
+            let esp = context.esp.as_ref().map_err(Clone::clone)?
+                .as_ref().ok_or_else(|| "selected target has FAT /boot but no readonly ESP session".to_string())?;
+            Ok(target_path_exists(esp.root.root(), relative))
+        }
+        BootMountLayout::BootInsideRoot
+        | BootMountLayout::EspAtBootEfi { .. }
+        | BootMountLayout::EspAtEfi { .. } => Ok(has_target_path(&context.target.root, &format!("boot/{relative}"))),
     }
+}
+
+fn provider_firmware_asset_present(
+    esp_root: &Path,
+    provider: crate::boot::model::ProviderId,
+    firmware_boot_conf: Option<&str>,
+) -> bool {
+    let Some(firmware_boot_conf) = firmware_boot_conf else { return false };
+    match provider {
+        crate::boot::model::ProviderId::Uki => {
+            firmware_boot_conf.contains("method=uki")
+                && target_path_exists(esp_root, "EFI/Linux")
+                && has_efi_file(esp_root.join("EFI/Linux"))
+        }
+        crate::boot::model::ProviderId::Efistub => {
+            firmware_boot_conf.contains("method=efistub")
+                && target_path_exists(esp_root, "EFI/CatOS")
+                && has_efi_file(esp_root.join("EFI/CatOS"))
+        }
+        _ => false,
+    }
+}
+
+fn has_efi_file(directory: std::path::PathBuf) -> bool {
+    std::fs::read_dir(directory)
+        .ok()
+        .into_iter()
+        .flatten()
+        .filter_map(Result::ok)
+        .any(|entry| entry.file_type().ok().is_some_and(|kind| kind.is_file())
+            && entry.file_name().to_str().is_some_and(|name| name.ends_with(".efi")))
 }
 
 fn provider_evidence_to_evidence(ev: crate::boot::model::ProviderEvidence) -> Evidence {
@@ -367,17 +409,35 @@ fn secure_boot_enabled_from_efivar(body: &[u8]) -> Option<bool> {
 
 #[cfg(test)]
 mod tests {
-    use super::fstab_has_external_boot;
+    use super::provider_firmware_asset_present;
+    use crate::boot::model::ProviderId;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
-    fn separate_boot_requires_a_target_session_not_live_root_paths() {
-        assert!(fstab_has_external_boot(
-            "UUID=boot /boot ext4 defaults 0 2\nUUID=esp /boot/efi vfat defaults 0 2\n"
-        ));
+    fn uki_requires_uki_config_and_an_efi_file_in_efi_linux() {
+        let root = scratch("uki");
+        std::fs::create_dir_all(root.join("EFI/Linux")).unwrap();
+        std::fs::write(root.join("EFI/Linux/catos.efi"), b"efi").unwrap();
+
+        assert!(provider_firmware_asset_present(&root, ProviderId::Uki, Some("method=uki")));
+        assert!(!provider_firmware_asset_present(&root, ProviderId::Efistub, Some("method=uki")));
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
-    fn fat_boot_is_an_esp_not_an_unmounted_boot_filesystem() {
-        assert!(!fstab_has_external_boot("UUID=esp /boot vfat defaults 0 2\n"));
+    fn efistub_rejects_an_empty_catos_directory() {
+        let root = scratch("efistub-empty");
+        std::fs::create_dir_all(root.join("EFI/CatOS")).unwrap();
+
+        assert!(!provider_firmware_asset_present(&root, ProviderId::Efistub, Some("method=efistub")));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    fn scratch(name: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!(
+            "catos-doctor-boot-{name}-{}-{}",
+            std::process::id(),
+            SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()
+        ))
     }
 }
