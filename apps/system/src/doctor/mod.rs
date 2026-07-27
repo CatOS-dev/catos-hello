@@ -53,6 +53,7 @@ pub(crate) struct DoctorTargetContext {
     pub candidate: TargetCandidate,
     pub fstab: Result<String, String>,
     top_level: Result<Option<ReadonlySession>, String>,
+    pub recovery_options: Result<Option<crate::snapshot::execute::engine::EngineOptions>, String>,
     session: TargetSession,
 }
 
@@ -66,7 +67,18 @@ impl DoctorTargetContext {
         } else {
             Ok(None)
         };
-        Self { target, candidate, fstab, top_level, session }
+        let recovery_options = match &top_level {
+            Ok(Some(top_level)) => crate::snapshot::diagnose::identity::validate_mounted_filesystem(top_level.root(), &candidate.root_device)
+                .map(|validated| Some(crate::snapshot::execute::engine::EngineOptions {
+                    top_level_mount: top_level.root().to_path_buf(),
+                    device_path: validated.canonical_device,
+                    validated_filesystem: validated.filesystem,
+                }))
+                .map_err(|error| format!("cannot validate selected Btrfs top-level: {error}")),
+            Ok(None) => Ok(None),
+            Err(error) => Err(format!("cannot open selected Btrfs top-level: {error}")),
+        };
+        Self { target, candidate, fstab, top_level, recovery_options, session }
     }
 
     fn cleanup(self) -> Vec<crate::target::discovery::ProbeCleanup> {
@@ -103,6 +115,13 @@ pub fn run_doctor() -> DoctorReport {
         report.limitations.push(crate::doctor::model::DoctorLimitation::new(
             DoctorSectionId::Mount,
             "MOUNT_FACTS_INCOMPLETE",
+            error.clone(),
+        ));
+    }
+    if let Err(error) = &context.recovery_options {
+        report.limitations.push(crate::doctor::model::DoctorLimitation::new(
+            DoctorSectionId::Recovery,
+            "RECOVERY_FACTS_INCOMPLETE",
             error.clone(),
         ));
     }
