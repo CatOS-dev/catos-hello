@@ -95,6 +95,15 @@ pub(in crate::doctor) fn run_boot_section(
                     return Ok(());
                 }
             };
+            push_evidence(
+                sections,
+                id,
+                Evidence::new(
+                    "PROVIDER_ASSET_PATHS",
+                    "doctor::boot-assets",
+                    provider_asset_summary(context, provider),
+                ),
+            );
             if assets_ok {
                 set_section(sections, id, DoctorSectionStatus::Healthy);
             } else {
@@ -179,6 +188,55 @@ fn target_path_exists(root: &Path, relative: &str) -> bool {
     std::fs::symlink_metadata(root.join(relative)).is_ok()
 }
 
+fn nonempty_regular_file(root: &Path, relative: &str) -> bool {
+    let path = root.join(relative);
+    std::fs::metadata(path).ok().is_some_and(|meta| meta.is_file() && meta.len() > 0)
+}
+
+fn valid_grub_config(root: &Path) -> bool {
+    let path = root.join("boot/grub/grub.cfg");
+    let Ok(body) = std::fs::read_to_string(path) else { return false };
+    !body.trim().is_empty() && body.lines().any(|line| line.contains("menuentry") || line.contains("linux"))
+}
+
+fn valid_limine_config(root: &Path) -> bool {
+    let Ok(body) = std::fs::read_to_string(root.join("limine.conf")) else { return false };
+    !body.trim().is_empty() && body.lines().any(|line| {
+        let line = line.trim();
+        !line.is_empty() && !line.starts_with('#') && line.contains('=')
+    })
+}
+
+fn valid_systemd_loader(root: &Path) -> bool {
+    let loader = nonempty_regular_file(root, "loader/loader.conf");
+    let entries = root.join("loader/entries");
+    let entry = std::fs::read_dir(entries).ok().into_iter().flatten().filter_map(Result::ok).any(|entry| {
+        let path = entry.path();
+        let Ok(body) = std::fs::read_to_string(path) else { return false };
+        !body.trim().is_empty() && body.lines().any(|line| line.trim_start().starts_with("title "))
+    });
+    loader || entry
+}
+
+fn efi_asset(root: &Path, needle: &str) -> Option<String> {
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(path) = stack.pop() {
+        let entries = std::fs::read_dir(&path).ok()?;
+        for entry in entries.filter_map(Result::ok) {
+            let path = entry.path();
+            let kind = entry.file_type().ok()?;
+            if kind.is_dir() {
+                stack.push(path);
+            } else if kind.is_file() && path.file_name().and_then(|name| name.to_str()).is_some_and(|name| {
+                name.to_ascii_lowercase().ends_with(".efi") && name.to_ascii_lowercase().contains(needle)
+            }) {
+                return path.to_str().map(str::to_string);
+            }
+        }
+    }
+    None
+}
+
 fn installed_packages(root: &Path) -> Result<Vec<String>, String> {
     let db = root.join("var/lib/pacman/local");
     let entries = std::fs::read_dir(&db)
@@ -213,18 +271,31 @@ fn inspect_provider_assets(
     let root = target_root_path(&context.target);
     let esp = context.esp.as_ref().ok().and_then(|esp| esp.as_ref());
     Ok(match provider {
-        crate::boot::model::ProviderId::Grub => boot_asset_exists(context, "grub")?,
+        crate::boot::model::ProviderId::Grub => {
+            valid_grub_config(&root) && esp.is_some_and(|esp| efi_asset(esp.root.root(), "grub").is_some())
+        }
         crate::boot::model::ProviderId::Limine => {
-            esp.is_some_and(|esp| target_path_exists(esp.root.root(), "limine.conf"))
+            esp.is_some_and(|esp| valid_limine_config(esp.root.root()) && efi_asset(esp.root.root(), "limine").is_some())
         }
         crate::boot::model::ProviderId::SystemdBoot => {
-            esp.is_some_and(|esp| target_path_exists(esp.root.root(), "loader/loader.conf") || target_path_exists(esp.root.root(), "loader/entries"))
+            esp.is_some_and(|esp| valid_systemd_loader(esp.root.root()) && efi_asset(esp.root.root(), "systemd-boot").is_some())
         }
         crate::boot::model::ProviderId::Uki | crate::boot::model::ProviderId::Efistub => {
             let Some(esp) = esp else { return Ok(false) };
             provider_firmware_asset_present(esp.root.root(), provider, read_target_file(&root, "etc/catos/firmware-boot.conf").as_deref())
         }
     })
+}
+
+fn provider_asset_summary(context: &DoctorTargetContext, provider: crate::boot::model::ProviderId) -> String {
+    let root = target_root_path(&context.target);
+    let esp = context.esp.as_ref().ok().and_then(|esp| esp.as_ref()).map(|esp| esp.root.root());
+    match provider {
+        crate::boot::model::ProviderId::Grub => format!("config={} asset={:?}", root.join("boot/grub/grub.cfg").display(), esp.and_then(|root| efi_asset(root, "grub"))),
+        crate::boot::model::ProviderId::Limine => format!("config={} asset={:?}", esp.map(|root| root.join("limine.conf").display().to_string()).unwrap_or_else(|| "<unknown>".into()), esp.and_then(|root| efi_asset(root, "limine"))),
+        crate::boot::model::ProviderId::SystemdBoot => format!("loader={} entry={} asset={:?}", esp.map(|root| root.join("loader/loader.conf").display().to_string()).unwrap_or_else(|| "<unknown>".into()), esp.map(|root| root.join("loader/entries").display().to_string()).unwrap_or_else(|| "<unknown>".into()), esp.and_then(|root| efi_asset(root, "systemd-boot"))),
+        _ => "firmware provider asset paths are checked from target firmware-boot.conf and ESP".into(),
+    }
 }
 
 fn boot_asset_exists(context: &DoctorTargetContext, relative: &str) -> Result<bool, String> {
@@ -424,7 +495,7 @@ fn secure_boot_enabled_from_efivar(body: &[u8]) -> Option<bool> {
 
 #[cfg(test)]
 mod tests {
-    use super::{pacman_package_name, provider_firmware_asset_present};
+    use super::{pacman_package_name, provider_firmware_asset_present, valid_grub_config, valid_limine_config, valid_systemd_loader, efi_asset};
     use crate::boot::model::ProviderId;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -454,6 +525,45 @@ mod tests {
             pacman_package_name("%NAME%\nlimine\n\n%VERSION%\n8.0-1\n"),
             Some("limine".to_string())
         );
+    }
+
+    #[test]
+    fn grub_asset_matrix_requires_config_and_efi_binary() {
+        let root = scratch("grub-matrix");
+        std::fs::create_dir_all(root.join("boot/grub")).unwrap();
+        std::fs::create_dir_all(root.join("EFI/GRUB")).unwrap();
+        std::fs::write(root.join("boot/grub/grub.cfg"), "menuentry 'CatOS' { linux /vmlinuz; }").unwrap();
+        std::fs::write(root.join("EFI/GRUB/grubx64.efi"), b"efi").unwrap();
+        assert!(valid_grub_config(&root));
+        assert!(efi_asset(&root, "grub").is_some());
+        std::fs::write(root.join("boot/grub/grub.cfg"), b"\n").unwrap();
+        assert!(!valid_grub_config(&root));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn limine_asset_matrix_rejects_empty_config_or_missing_binary() {
+        let root = scratch("limine-matrix");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("limine.conf"), "TIMEOUT=5\n:CatOS\n").unwrap();
+        assert!(valid_limine_config(&root));
+        assert!(efi_asset(&root, "limine").is_none());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn systemd_boot_matrix_requires_entry_and_binary() {
+        let root = scratch("systemd-matrix");
+        std::fs::create_dir_all(root.join("loader/entries")).unwrap();
+        std::fs::create_dir_all(root.join("EFI")).unwrap();
+        std::fs::write(root.join("loader/loader.conf"), "default catos.conf\n").unwrap();
+        std::fs::write(root.join("loader/entries/catos.conf"), "title CatOS\nlinux /vmlinuz\n").unwrap();
+        std::fs::write(root.join("EFI/systemd-bootx64.efi"), b"efi").unwrap();
+        assert!(valid_systemd_loader(&root));
+        assert!(efi_asset(&root, "systemd-boot").is_some());
+        std::fs::remove_file(root.join("EFI/systemd-bootx64.efi")).unwrap();
+        assert!(efi_asset(&root, "systemd-boot").is_none());
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     fn scratch(name: &str) -> std::path::PathBuf {
