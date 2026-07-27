@@ -46,19 +46,72 @@
 
 use std::path::PathBuf;
 
-use catos_system::shared::model::repair::{AttemptKind, FsRepairOutcome, RepairTool};
+use catos_system::fs::command::{FsCommandRunner, FsRunnerError, RecordedRunner, ToolResult};
+use catos_system::fs::diagnose::BtrfsTopology;
+use catos_system::fs::execute::{execute_repair_plan, FlowOutcome, FlowResult};
+use catos_system::fs::model::{AttemptKind, FsRepairOutcome, RepairTool};
+use catos_system::fs::plan::{build_repair_plan, supports_filesystem};
+use catos_system::fs::safety::{
+    authorize_repair_plan, evaluate_safety, RepairTargetSelection, RunningRootDevice, SafetyVerdict,
+};
 use catos_system::target::model::{BlockDevice, DeviceClass, DiskKind, PartitionRole};
-use catos_system::repair::runner::{RecordedRunner, ToolResult};
-use catos_system::repair::fs_flows::{
-    btrfs_flow, e2fsck_flow, f2fs_flow, fat_flow, supports_filesystem, xfs_flow, FlowOutcome,
-};
-use catos_system::repair::safety::{
-    evaluate_safety, RepairTargetSelection, RunningRootDevice, SafetyVerdict,
-};
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+fn run_planned<R: FsCommandRunner + ?Sized>(
+    fstype: &str,
+    runner: &R,
+    device: &str,
+) -> Result<FlowResult, FsRunnerError> {
+    let topology = (fstype == "btrfs").then_some(BtrfsTopology::SingleDevice);
+    let plan = build_repair_plan(fstype, device, topology)
+        .expect("test plan must be valid")
+        .expect("test fstype must be supported");
+    let target = make_device("test", device, fstype);
+    let decision = evaluate_safety(
+        std::slice::from_ref(&target),
+        &RepairTargetSelection {
+            explicit_device: Some(PathBuf::from(device)),
+        },
+        None,
+    );
+    let authorization =
+        authorize_repair_plan(&decision, &plan).expect("safe test target must authorize the plan");
+    execute_repair_plan(runner, &plan, &authorization)
+}
+
+fn e2fsck_flow<R: FsCommandRunner + ?Sized>(
+    runner: &R,
+    device: &str,
+) -> Result<FlowResult, FsRunnerError> {
+    run_planned("ext4", runner, device)
+}
+fn fat_flow<R: FsCommandRunner + ?Sized>(
+    runner: &R,
+    device: &str,
+) -> Result<FlowResult, FsRunnerError> {
+    run_planned("vfat", runner, device)
+}
+fn f2fs_flow<R: FsCommandRunner + ?Sized>(
+    runner: &R,
+    device: &str,
+) -> Result<FlowResult, FsRunnerError> {
+    run_planned("f2fs", runner, device)
+}
+fn xfs_flow<R: FsCommandRunner + ?Sized>(
+    runner: &R,
+    device: &str,
+) -> Result<FlowResult, FsRunnerError> {
+    run_planned("xfs", runner, device)
+}
+fn btrfs_flow<R: FsCommandRunner + ?Sized>(
+    runner: &R,
+    device: &str,
+) -> Result<FlowResult, FsRunnerError> {
+    run_planned("btrfs", runner, device)
+}
 
 fn make_device(name: &str, dev: &str, fstype: &str) -> BlockDevice {
     BlockDevice {
@@ -398,7 +451,7 @@ fn multiple_equally_plausible_candidates_are_refused() {
     ];
     let selection = RepairTargetSelection::default();
     let decision = evaluate_safety(&devices, &selection, None);
-    match decision.verdict {
+    match decision.verdict() {
         SafetyVerdict::AmbiguousTarget { candidates } => {
             assert!(candidates.is_empty());
         }
@@ -422,7 +475,7 @@ fn running_root_is_refused_even_with_explicit_selection() {
     };
     let decision = evaluate_safety(&devices, &selection, Some(&running));
     assert!(matches!(
-        decision.verdict,
+        decision.verdict(),
         SafetyVerdict::RunningRoot { .. }
     ));
 }
@@ -439,7 +492,7 @@ fn pre_existing_mount_is_refused() {
         explicit_device: Some(PathBuf::from("/dev/sda1")),
     };
     let decision = evaluate_safety(&devices, &selection, None);
-    assert!(matches!(decision.verdict, SafetyVerdict::Mounted { .. }));
+    assert!(matches!(decision.verdict(), SafetyVerdict::Mounted { .. }));
 }
 
 #[test]
@@ -454,7 +507,7 @@ fn esp_swap_luks_lvm_mdraid_are_not_auto_selected() {
     let decision = evaluate_safety(&devices, &selection, None);
     // With no plausible root candidate, we get AmbiguousTarget with
     // an empty candidate list (no auto-pick of ESP or swap).
-    match decision.verdict {
+    match decision.verdict() {
         SafetyVerdict::AmbiguousTarget { candidates } => {
             assert!(candidates.is_empty());
         }
@@ -474,7 +527,7 @@ fn explicit_esp_selection_is_allowed_for_repair() {
         explicit_device: Some(PathBuf::from("/dev/sda1")),
     };
     let decision = evaluate_safety(&devices, &selection, None);
-    assert!(matches!(decision.verdict, SafetyVerdict::Proceed { .. }));
+    assert!(matches!(decision.verdict(), SafetyVerdict::Proceed { .. }));
 }
 
 #[test]
@@ -488,7 +541,7 @@ fn explicit_swap_selection_is_refused() {
     };
     let decision = evaluate_safety(&devices, &selection, None);
     assert!(matches!(
-        decision.verdict,
+        decision.verdict(),
         SafetyVerdict::UnsupportedRole { .. }
     ));
 }
@@ -534,7 +587,7 @@ fn outcome_taxonomy_covers_all_required_states() {
 // Section 4: cleanup failure handling
 // ===========================================================================
 //
-// The orchestrator's cleanup comes from `repair::verify`, which uses
+// The orchestrator's cleanup comes from `fs::verify`, which uses
 // `mount::session::Session`. The session's cleanup-residual contract
 // is already pinned by phase-2 tests; here we pin the orchestrator's
 // promise that a cleanup failure surfaces as
@@ -554,7 +607,7 @@ fn cleanup_residuals_flip_repaired_to_verification_failed_at_outcome_level() {
     // mount; we cannot exercise it without root. So we test the
     // invariant at the model level: a report with cleanup residuals
     // MUST NOT be Clean/Repaired.
-    use catos_system::shared::model::repair::{
+    use catos_system::fs::model::{
         AttemptKind, ExitInterpretation, FsRepairReport, RepairAttempt, RepairCleanup,
         VerificationMount,
     };

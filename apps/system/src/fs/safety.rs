@@ -45,11 +45,11 @@ pub struct RepairTargetSelection {
 /// `verdict` to decide whether to proceed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SafetyDecision {
-    pub verdict: SafetyVerdict,
+    verdict: SafetyVerdict,
     /// Evidence trail explaining the verdict. Always populated;
     /// refusals include the reason verbatim so the report can show
     /// "we refused because X".
-    pub evidence: Vec<Evidence>,
+    evidence: Vec<Evidence>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -86,6 +86,92 @@ pub enum SafetyVerdict {
     UnsupportedRole { requested: PathBuf, reason: String },
 }
 
+impl SafetyDecision {
+    pub fn verdict(&self) -> &SafetyVerdict {
+        &self.verdict
+    }
+
+    pub fn evidence(&self) -> &[Evidence] {
+        &self.evidence
+    }
+}
+
+/// Opaque ticket proving that the filesystem safety policy authorized one
+/// concrete repair plan. Its fields are private, so callers cannot construct
+/// or alter a ticket directly.
+#[derive(Debug)]
+pub struct FsRepairAuthorization {
+    device: PathBuf,
+    tool: crate::fs::model::RepairTool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FsAuthorizationError {
+    pub message: String,
+}
+
+impl std::fmt::Display for FsAuthorizationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "filesystem authorization error: {}", self.message)
+    }
+}
+
+impl std::error::Error for FsAuthorizationError {}
+
+pub fn authorize_repair_plan(
+    decision: &SafetyDecision,
+    plan: &crate::fs::plan::FsRepairPlan,
+) -> Result<FsRepairAuthorization, FsAuthorizationError> {
+    let SafetyVerdict::Proceed {
+        device,
+        filesystem,
+        was_mounted_before_session,
+    } = decision.verdict()
+    else {
+        return Err(FsAuthorizationError {
+            message: "safety policy did not authorize repair".to_string(),
+        });
+    };
+
+    if *was_mounted_before_session {
+        return Err(FsAuthorizationError {
+            message: "target was mounted before the repair session".to_string(),
+        });
+    }
+    if device != Path::new(plan.device()) {
+        return Err(FsAuthorizationError {
+            message: format!(
+                "authorized device {} does not match planned device {}",
+                device.display(),
+                plan.device()
+            ),
+        });
+    }
+    let diagnosed_tool = filesystem
+        .as_deref()
+        .and_then(crate::fs::plan::supports_filesystem);
+    if diagnosed_tool != Some(plan.tool()) {
+        return Err(FsAuthorizationError {
+            message: format!(
+                "authorized filesystem {:?} does not match planned tool {:?}",
+                filesystem,
+                plan.tool()
+            ),
+        });
+    }
+
+    Ok(FsRepairAuthorization {
+        device: device.clone(),
+        tool: plan.tool(),
+    })
+}
+
+impl FsRepairAuthorization {
+    pub(crate) fn permits(&self, plan: &crate::fs::plan::FsRepairPlan) -> bool {
+        self.device == Path::new(plan.device()) && self.tool == plan.tool()
+    }
+}
+
 impl SafetyVerdict {
     pub fn is_proceed(&self) -> bool {
         matches!(self, SafetyVerdict::Proceed { .. })
@@ -117,7 +203,7 @@ pub fn evaluate_safety(
     if let Some(explicit) = &selection.explicit_device {
         evidence.push(Evidence::new(
             "EXPLICIT_TARGET",
-            "repair::safety",
+            "fs::safety",
             "operator supplied explicit block device".to_string(),
         ));
         return decide_explicit(devices, explicit, running_root_device, evidence);
@@ -125,7 +211,7 @@ pub fn evaluate_safety(
 
     evidence.push(Evidence::new(
         "AUTO_DISCOVERY",
-        "repair::safety",
+        "fs::safety",
         "raw block-device discovery is insufficient for automatic repair; a verified CatOS root must be selected by the orchestrator",
     ));
     SafetyDecision {
@@ -149,7 +235,7 @@ fn decide_explicit(
     }) else {
         evidence.push(Evidence::new(
             "DEVICE_NOT_FOUND",
-            "repair::safety",
+            "fs::safety",
             format!(
                 "explicit device {} was not in the discovered device set",
                 requested.display()
@@ -170,7 +256,7 @@ fn decide_explicit(
         if fs == "swap" {
             evidence.push(Evidence::new(
                 "REFUSED_SWAP",
-                "repair::safety",
+                "fs::safety",
                 format!(
                     "device {} reports fstype=swap; swap has no fsck surface and we do not format",
                     requested.display()
@@ -200,7 +286,7 @@ fn refuse_unsafe_running_root_or_mounted(
     let Some(dev_path) = device.dev_path.clone() else {
         evidence.push(Evidence::new(
             "DEVICE_HAS_NO_DEV_PATH",
-            "repair::safety",
+            "fs::safety",
             format!(
                 "device {} has no stable /dev path; cannot address it for repair",
                 device.name
@@ -225,7 +311,7 @@ fn refuse_unsafe_running_root_or_mounted(
         {
             evidence.push(Evidence::new(
                 "REFUSED_RUNNING_ROOT",
-                "repair::safety",
+                "fs::safety",
                 format!(
                     "device {} is the running root (mounted at {}); refusing to repair",
                     dev_path.display(),
@@ -245,7 +331,7 @@ fn refuse_unsafe_running_root_or_mounted(
         if let Some(mount_point) = device.mount_point.clone() {
             evidence.push(Evidence::new(
                 "REFUSED_MOUNTED",
-                "repair::safety",
+                "fs::safety",
                 format!(
                     "device {} is mounted at {}; target must be unmounted before repair",
                     dev_path.display(),
@@ -266,7 +352,7 @@ fn refuse_unsafe_running_root_or_mounted(
         // unsafe.
         evidence.push(Evidence::new(
             "REFUSED_MOUNT_STATE_UNKNOWN",
-            "repair::safety",
+            "fs::safety",
             format!(
                 "device {} reports mounted_before_session but we have no mount_point; treating as mounted and refusing",
                 dev_path.display()
@@ -283,7 +369,7 @@ fn refuse_unsafe_running_root_or_mounted(
 
     evidence.push(Evidence::new(
         "PROCEED",
-        "repair::safety",
+        "fs::safety",
         format!(
             "target {} fstype={:?} is unmounted and is not the running root; clearing for repair",
             dev_path.display(),
@@ -407,13 +493,13 @@ mod tests {
             explicit_device: Some(PathBuf::from("/dev/sda1")),
         };
         let decision = evaluate_safety(&devices, &selection, None);
-        match decision.verdict {
+        match decision.verdict() {
             SafetyVerdict::Proceed {
                 device,
                 filesystem,
                 was_mounted_before_session,
             } => {
-                assert_eq!(device, PathBuf::from("/dev/sda1"));
+                assert_eq!(device.as_path(), Path::new("/dev/sda1"));
                 assert_eq!(filesystem.as_deref(), Some("ext4"));
                 assert!(!was_mounted_before_session);
             }
@@ -429,7 +515,7 @@ mod tests {
         };
         let decision = evaluate_safety(&devices, &selection, None);
         assert!(matches!(
-            decision.verdict,
+            decision.verdict(),
             SafetyVerdict::DeviceNotFound { .. }
         ));
     }
@@ -442,7 +528,7 @@ mod tests {
         };
         let decision = evaluate_safety(&devices, &selection, Some(&running_root()));
         assert!(matches!(
-            decision.verdict,
+            decision.verdict(),
             SafetyVerdict::RunningRoot { .. }
         ));
     }
@@ -463,7 +549,7 @@ mod tests {
         devices[0].dev_path = Some(PathBuf::from("/dev/disk/by-uuid/abc"));
         let decision = evaluate_safety(&devices, &selection, Some(&running_root()));
         assert!(matches!(
-            decision.verdict,
+            decision.verdict(),
             SafetyVerdict::RunningRoot { .. }
         ));
     }
@@ -477,13 +563,13 @@ mod tests {
             explicit_device: Some(PathBuf::from("/dev/sda1")),
         };
         let decision = evaluate_safety(&devices, &selection, None);
-        match decision.verdict {
+        match decision.verdict() {
             SafetyVerdict::Mounted {
                 device,
                 mount_point,
             } => {
-                assert_eq!(device, PathBuf::from("/dev/sda1"));
-                assert_eq!(mount_point, PathBuf::from("/mnt/target"));
+                assert_eq!(device.as_path(), Path::new("/dev/sda1"));
+                assert_eq!(mount_point.as_path(), Path::new("/mnt/target"));
             }
             other => panic!("expected Mounted, got {other:?}"),
         }
@@ -500,7 +586,7 @@ mod tests {
         };
         let decision = evaluate_safety(&devices, &selection, None);
         assert!(matches!(
-            decision.verdict,
+            decision.verdict(),
             SafetyVerdict::UnsupportedRole { .. }
         ));
     }
@@ -511,7 +597,7 @@ mod tests {
         let selection = RepairTargetSelection::default();
         let decision = evaluate_safety(&devices, &selection, None);
         assert!(
-            matches!(decision.verdict, SafetyVerdict::AmbiguousTarget { candidates } if candidates.is_empty())
+            matches!(decision.verdict(), SafetyVerdict::AmbiguousTarget { candidates } if candidates.is_empty())
         );
     }
 
@@ -524,7 +610,7 @@ mod tests {
         let selection = RepairTargetSelection::default();
         let decision = evaluate_safety(&devices, &selection, None);
         assert!(
-            matches!(decision.verdict, SafetyVerdict::AmbiguousTarget { candidates } if candidates.is_empty())
+            matches!(decision.verdict(), SafetyVerdict::AmbiguousTarget { candidates } if candidates.is_empty())
         );
     }
 
@@ -536,7 +622,7 @@ mod tests {
         let devices = vec![];
         let selection = RepairTargetSelection::default();
         let decision = evaluate_safety(&devices, &selection, None);
-        match decision.verdict {
+        match decision.verdict() {
             SafetyVerdict::AmbiguousTarget { candidates } => {
                 assert!(candidates.is_empty());
             }
@@ -552,7 +638,7 @@ mod tests {
         let selection = RepairTargetSelection::default();
         let decision = evaluate_safety(&devices, &selection, None);
         assert!(matches!(
-            decision.verdict,
+            decision.verdict(),
             SafetyVerdict::AmbiguousTarget { .. }
         ));
     }
@@ -567,7 +653,7 @@ mod tests {
             explicit_device: Some(PathBuf::from("/dev/sda1")),
         };
         let decision = evaluate_safety(&devices, &selection, None);
-        match decision.verdict {
+        match decision.verdict() {
             SafetyVerdict::Proceed { filesystem, .. } => {
                 assert_eq!(filesystem.as_deref(), Some("vfat"));
             }
@@ -587,6 +673,6 @@ mod tests {
             explicit_device: Some(PathBuf::from("/dev/sda1")),
         };
         let decision = evaluate_safety(&devices, &selection, None);
-        assert!(matches!(decision.verdict, SafetyVerdict::Mounted { .. }));
+        assert!(matches!(decision.verdict(), SafetyVerdict::Mounted { .. }));
     }
 }

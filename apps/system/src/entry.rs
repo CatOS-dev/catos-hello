@@ -329,11 +329,11 @@ fn run_repair_fs(argv: &[String]) -> i32 {
                 );
                 return exit_code::ARG_ERROR;
             }
-            crate::repair::safety::RepairTargetSelection {
+            crate::fs::safety::RepairTargetSelection {
                 explicit_device: Some(path.to_path_buf()),
             }
         }
-        None => crate::repair::safety::RepairTargetSelection::default(),
+        None => crate::fs::safety::RepairTargetSelection::default(),
     };
 
     let report = crate::repair::run_fs_repair(selection);
@@ -378,8 +378,8 @@ fn run_repair_fs(argv: &[String]) -> i32 {
 ///   "missing argument" and "you must disambiguate" are the same
 ///   user-facing class.
 /// * `5` for Unknown (defensive; should never appear in practice).
-fn outcome_exit_code(outcome: crate::shared::model::repair::FsRepairOutcome) -> i32 {
-    use crate::shared::model::repair::FsRepairOutcome;
+fn outcome_exit_code(outcome: crate::fs::model::FsRepairOutcome) -> i32 {
+    use crate::fs::model::FsRepairOutcome;
     match outcome {
         FsRepairOutcome::Clean | FsRepairOutcome::Repaired | FsRepairOutcome::RepairedWithRisk => {
             exit_code::SUCCESS

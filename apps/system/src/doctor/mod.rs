@@ -4,7 +4,7 @@
 //!
 //! * environment / target discovery: phase 1 (`entry::build_report`,
 //!   phase2 storage scan)
-//! * filesystem: stage 2 (`repair::fs_flows::check_only_for`)
+//! * filesystem: stage 2 (`fs::diagnose::check_only_for`)
 //! * mount layout / fstab: stage 3 (`repair::mount_repair::diagnose`)
 //! * boot provider: stage 4 (`repair::boot_repair::detect::detect`)
 //! * recovery: stage 4 (`recovery::engine::Engine::load` +
@@ -39,17 +39,17 @@ use crate::shared::model::doctor::{
     DoctorSectionId, DoctorSectionStatus, DoctorSeverity,
 };
 use crate::shared::model::evidence::Evidence;
-use crate::repair::runner::CommandRunner;
+use crate::fs::command::FsCommandRunner;
 
 pub mod target_selection;
 use target_selection::TargetSelection;
 
 pub fn run_doctor() -> DoctorReport {
-    let runner = crate::repair::runner::TrustedRunner::new();
+    let runner = crate::fs::command::TrustedRunner::new();
     run_doctor_with(&runner)
 }
 
-pub fn run_doctor_with<R: CommandRunner + ?Sized>(runner: &R) -> DoctorReport {
+pub fn run_doctor_with<R: FsCommandRunner + ?Sized>(runner: &R) -> DoctorReport {
     let mut report = DoctorReport::default();
 
     let environment = sections::capture_environment();
@@ -74,7 +74,7 @@ pub fn run_doctor_with<R: CommandRunner + ?Sized>(runner: &R) -> DoctorReport {
     report
 }
 
-fn run_sections<R: CommandRunner + ?Sized>(
+fn run_sections<R: FsCommandRunner + ?Sized>(
     runner: &R,
     target: &crate::target::model::TargetIdentity,
     env: &DoctorEnvironment,

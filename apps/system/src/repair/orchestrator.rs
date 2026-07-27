@@ -5,15 +5,15 @@
 //! effects that the per-fstype flows deliberately do NOT:
 //!
 //! * device discovery (reused from `probe::block`),
-//! * safety evaluation (reused from `repair::safety`),
-//! * repair tool dispatch (per-fstype flows in `repair::fs_flows`),
-//! * verification mount (`repair::verify`),
+//! * safety evaluation (reused from `fs::safety`),
+//! * repair tool dispatch (per-fstype flows in `fs::{diagnose,plan,execute}`),
+//! * verification mount (`fs::verify`),
 //! * final outcome synthesis.
 //!
 //! ## Hard contract: no shell, no format, no auto-mount-of-preexisting
 //!
-//! Every tool invocation goes through the [`CommandRunner`] trait,
-//! which the real implementation (`TrustedRunner`) backs with
+//! Every tool invocation goes through the [`FsCommandRunner`] trait,
+//! which the real implementation (`RepairRunner`) backs with
 //! [`crate::shared::process::run_trusted_tool`]'s fixed-path / minimal-env /
 //! bounded-output / deadline contract. There is no `sh -c`, no
 //! string-concatenated argv, no auto-format, no auto-unmount of
@@ -37,39 +37,39 @@
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
-use crate::shared::model::evidence::Evidence;
-use crate::target::model::Warning;
-use crate::shared::model::repair::{FsRepairOutcome, FsRepairReport, RepairCleanup, RepairTool};
-use crate::target::model::DetectionStatus;
-use crate::target::model::{BlockDevice, DeviceClass, PartitionRole, RootCandidateConfidence};
+use crate::fs::command::FsCommandRunner;
+use crate::fs::diagnose::{self, BtrfsTopology};
+use crate::fs::execute::{execute_repair_plan, FlowOutcome, RepairRunner};
+use crate::fs::model::{FsRepairOutcome, FsRepairReport, RepairCleanup, RepairTool};
+use crate::fs::plan::{build_repair_plan, supports_filesystem};
+use crate::fs::safety::{
+    authorize_repair_plan, evaluate_safety, RepairTargetSelection, RunningRootDevice,
+    SafetyDecision, SafetyVerdict,
+};
+use crate::fs::verify::{verify, VerificationOutcome};
 use crate::mount::plan::session::probe_unmounted_candidates;
+use crate::shared::model::evidence::Evidence;
+use crate::shared::snapshot_engine::lock::DeviceLock;
 use crate::target::diagnose::block::discover_devices;
 use crate::target::diagnose::filesystem::RealFilesystem;
-use crate::shared::snapshot_engine::lock::DeviceLock;
-use crate::repair::runner::{CommandRunner, TrustedRunner};
-use crate::repair::fs_flows::{
-    btrfs_flow, btrfs_topology, e2fsck_flow, f2fs_flow, fat_flow, supports_filesystem, xfs_flow,
-    BtrfsTopology, FlowOutcome,
-};
-use crate::repair::safety::{
-    evaluate_safety, RepairTargetSelection, RunningRootDevice, SafetyVerdict,
-};
-use crate::repair::verify::{verify, VerificationOutcome};
+use crate::target::model::DetectionStatus;
+use crate::target::model::Warning;
+use crate::target::model::{BlockDevice, DeviceClass, PartitionRole, RootCandidateConfidence};
 
 /// Run the full `catos-repair fs` flow with the default
-/// `TrustedRunner`. Used by the CLI in production. Tests call
+/// `RepairRunner`. Used by the CLI in production. Tests call
 /// [`run_fs_repair_with`] to inject a fake runner.
 pub fn run_fs_repair(selection: RepairTargetSelection) -> FsRepairReport {
-    let runner = TrustedRunner::new();
+    let runner = RepairRunner::new();
     run_fs_repair_with(&runner, selection)
 }
 
-/// Testable form: takes any `CommandRunner` so behaviour tests can
+/// Testable form: takes any `FsCommandRunner` so behaviour tests can
 /// drive the entire flow against fakes. The runner is the ONLY
 /// injection point; device discovery, safety evaluation, and
 /// verification all use their real implementations because they are
 /// pure or use well-bounded helpers.
-pub fn run_fs_repair_with<R: CommandRunner + ?Sized>(
+pub fn run_fs_repair_with<R: FsCommandRunner + ?Sized>(
     runner: &R,
     selection: RepairTargetSelection,
 ) -> FsRepairReport {
@@ -112,9 +112,9 @@ pub fn run_fs_repair_with<R: CommandRunner + ?Sized>(
     };
 
     let decision = evaluate_safety(&devices, &effective_selection, running_root.as_ref());
-    evidence.extend(decision.evidence.clone());
+    evidence.extend(decision.evidence().iter().cloned());
 
-    let verdict = decision.verdict.clone();
+    let verdict = decision.verdict().clone();
     match verdict {
         SafetyVerdict::Proceed {
             device,
@@ -128,6 +128,7 @@ pub fn run_fs_repair_with<R: CommandRunner + ?Sized>(
             devices,
             evidence,
             warnings,
+            &decision,
         ),
         SafetyVerdict::AmbiguousTarget { candidates } => {
             let mut report = FsRepairReport::refused(
@@ -191,7 +192,7 @@ pub fn run_fs_repair_with<R: CommandRunner + ?Sized>(
                 requires_human_action: true,
                 evidence: std::iter::once(Evidence::new(
                     "UNSUPPORTED_ROLE",
-                    "repair::safety",
+                    "fs::safety",
                     reason.clone(),
                 ))
                 .collect(),
@@ -243,7 +244,7 @@ fn auto_select_catos_root(
 /// type, routes to the matching per-fstype flow, runs verification,
 /// and synthesises the final outcome.
 #[allow(clippy::too_many_arguments)]
-fn proceed_with_repair<R: CommandRunner + ?Sized>(
+fn proceed_with_repair<R: FsCommandRunner + ?Sized>(
     runner: &R,
     device: PathBuf,
     filesystem: Option<&str>,
@@ -251,6 +252,7 @@ fn proceed_with_repair<R: CommandRunner + ?Sized>(
     all_devices: Vec<BlockDevice>,
     mut evidence: Vec<Evidence>,
     warnings: Vec<Warning>,
+    safety_decision: &SafetyDecision,
 ) -> FsRepairReport {
     let device_str = match device.to_str() {
         Some(s) => s.to_string(),
@@ -349,22 +351,20 @@ fn proceed_with_repair<R: CommandRunner + ?Sized>(
         }
     };
 
-    if tool == RepairTool::BtrfsCheck {
-        match btrfs_topology(runner, &device_str) {
-            Ok(BtrfsTopology::SingleDevice) => {}
+    let btrfs_topology = if tool == RepairTool::BtrfsCheck {
+        match diagnose::btrfs::topology(runner, &device_str) {
+            Ok(BtrfsTopology::SingleDevice) => Some(BtrfsTopology::SingleDevice),
             Ok(topology) => {
                 let reason = match topology {
-                    BtrfsTopology::MultiDevice => {
-                        "btrfs filesystem has multiple devices; multi-device Btrfs repair requires manual intervention"
-                    }
-                    BtrfsTopology::Unknown => {
-                        "could not verify Btrfs device count; refusing repair rather than risk a multi-device filesystem"
-                    }
+                    BtrfsTopology::MultiDevice =>
+                        "btrfs filesystem has multiple devices; multi-device Btrfs repair requires manual intervention",
+                    BtrfsTopology::Unknown =>
+                        "could not verify Btrfs device count; refusing repair rather than risk a multi-device filesystem",
                     BtrfsTopology::SingleDevice => unreachable!(),
                 };
                 evidence.push(Evidence::new(
                     "BTRFS_TOPOLOGY_REFUSED",
-                    "repair::orchestrator",
+                    "fs::diagnose::btrfs",
                     reason,
                 ));
                 return FsRepairReport {
@@ -384,7 +384,7 @@ fn proceed_with_repair<R: CommandRunner + ?Sized>(
             Err(error) => {
                 evidence.push(Evidence::new(
                     "BTRFS_TOPOLOGY_REFUSED",
-                    "repair::orchestrator",
+                    "fs::diagnose::btrfs",
                     format!("could not inspect Btrfs device count: {error}"),
                 ));
                 return FsRepairReport {
@@ -402,7 +402,9 @@ fn proceed_with_repair<R: CommandRunner + ?Sized>(
                 };
             }
         }
-    }
+    } else {
+        None
+    };
 
     evidence.push(Evidence::new(
         "ROUTING",
@@ -410,13 +412,50 @@ fn proceed_with_repair<R: CommandRunner + ?Sized>(
         format!("routed fstype={fstype:?} to tool={:?}", tool),
     ));
 
-    let flow_result = match tool {
-        RepairTool::E2fsck => e2fsck_flow(runner, &device_str),
-        RepairTool::FsckFat => fat_flow(runner, &device_str),
-        RepairTool::FsckF2fs => f2fs_flow(runner, &device_str),
-        RepairTool::XfsRepair => xfs_flow(runner, &device_str),
-        RepairTool::BtrfsCheck => btrfs_flow(runner, &device_str),
+    let plan = match build_repair_plan(fstype, &device_str, btrfs_topology) {
+        Ok(Some(plan)) => plan,
+        Ok(None) => unreachable!("supported filesystem lost its plan route"),
+        Err(error) => {
+            evidence.push(Evidence::new("FS_PLAN_REFUSED", "fs::plan", error.message));
+            return FsRepairReport {
+                target_device: Some(device),
+                filesystem_type: Some(fstype.to_string()),
+                was_mounted_before_session,
+                selected_tool: Some(tool),
+                attempts: Vec::new(),
+                verification_mount: None,
+                cleanup: RepairCleanup::default(),
+                final_outcome: FsRepairOutcome::Unsupported,
+                requires_human_action: true,
+                evidence,
+                warnings,
+            };
+        }
     };
+    let authorization = match authorize_repair_plan(safety_decision, &plan) {
+        Ok(authorization) => authorization,
+        Err(error) => {
+            evidence.push(Evidence::new(
+                "FS_AUTHORIZATION_REFUSED",
+                "fs::safety",
+                error.message,
+            ));
+            return FsRepairReport {
+                target_device: Some(device),
+                filesystem_type: Some(fstype.to_string()),
+                was_mounted_before_session,
+                selected_tool: Some(tool),
+                attempts: Vec::new(),
+                verification_mount: None,
+                cleanup: RepairCleanup::default(),
+                final_outcome: FsRepairOutcome::Unknown,
+                requires_human_action: true,
+                evidence,
+                warnings,
+            };
+        }
+    };
+    let flow_result = execute_repair_plan(runner, &plan, &authorization);
     let flow_result = match flow_result {
         Ok(r) => r,
         Err(runner_error) => {
@@ -436,7 +475,7 @@ fn proceed_with_repair<R: CommandRunner + ?Sized>(
                     let mut e = evidence;
                     e.push(Evidence::new(
                         "RUNNER_ERROR",
-                        "repair::runner",
+                        "fs::execute::runner",
                         runner_error.message,
                     ));
                     e

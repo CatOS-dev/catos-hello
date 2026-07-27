@@ -2,14 +2,14 @@
 
 use std::path::Path;
 
+use crate::fs::command::FsCommandRunner;
+use crate::fs::diagnose::{check_only_for, ReadonlyOutcome, ReadonlyResult};
 use crate::shared::model::doctor::{
     issue_code, recommendation_code, DoctorEnvironment, DoctorIssue, DoctorLimitation,
     DoctorReport, DoctorSection, DoctorSectionId, DoctorSectionStatus, DoctorSeverity,
 };
 use crate::shared::model::evidence::Evidence;
 use crate::target::model::TargetIdentity;
-use crate::repair::fs_flows::{check_only_for, ReadonlyOutcome, ReadonlyResult};
-use crate::repair::runner::CommandRunner;
 
 use super::{is_device_mounted_rw, push_evidence, set_section};
 
@@ -99,7 +99,7 @@ pub(in crate::doctor) fn run_storage_section(
     Ok(())
 }
 
-pub(in crate::doctor) fn run_filesystem_section<R: CommandRunner + ?Sized>(
+pub(in crate::doctor) fn run_filesystem_section<R: FsCommandRunner + ?Sized>(
     runner: &R,
     sections: &mut [(DoctorSectionId, DoctorSection)],
     target: &TargetIdentity,
@@ -233,7 +233,7 @@ fn push_fs_evidence(
         id,
         Evidence::new(
             "FS_CHECK",
-            format!("repair::fs_flows::{}", result.tool),
+            format!("fs::diagnose::{}", result.tool),
             format!("argv: {argv}"),
         )
         .with_value(format!("exit={}", result.exit_code)),

@@ -12,8 +12,8 @@
 //!    NOT.
 //! 3. The f2fs read-only flow picks up `-a` instead of `--dry-run`.
 
-use catos_system::repair::runner::{RecordedRunner, ToolResult};
-use catos_system::repair::fs_flows::{
+use catos_system::fs::command::{RecordedRunner, ToolResult};
+use catos_system::fs::diagnose::{
     btrfs_check_only, check_only_for, e2fsck_check_only, f2fs_check_only, fat_check_only,
     xfs_check_only, ReadonlyOutcome,
 };

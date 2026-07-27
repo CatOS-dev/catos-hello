@@ -17,6 +17,7 @@
 pub mod chroot;
 pub mod doctor;
 pub mod entry;
+pub mod fs;
 pub mod mount;
 pub mod recovery;
 pub mod repair;

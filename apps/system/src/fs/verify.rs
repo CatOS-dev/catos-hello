@@ -34,13 +34,13 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::shared::model::evidence::Evidence;
+use crate::fs::model::VerificationMount;
+use crate::mount::diagnose::mountinfo;
+use crate::mount::execute::secure_dir::SESSION_ROOT_PARENT;
 use crate::mount::model::{CleanupReport, MountError, MountPlan};
-use crate::shared::model::repair::VerificationMount;
 use crate::mount::plan::session::build_probe_plan;
 use crate::mount::session::ReadOnlyMountSession;
-use crate::mount::execute::secure_dir::SESSION_ROOT_PARENT;
-use crate::mount::diagnose::mountinfo;
+use crate::shared::model::evidence::Evidence;
 
 /// Outcome of the verification mount. Distinct from
 /// [`VerificationMount`] (the model) because the orchestrator needs
@@ -65,14 +65,14 @@ pub struct VerificationOutcome {
 /// type we believe the device has (from blkid); we pass it to
 /// `build_probe_plan` so the right safety options are applied.
 pub fn verify(device: &Path, fstype: &str) -> VerificationOutcome {
-    let runner = RealRepairProbe;
+    let runner = RealFsVerificationProbe;
     verify_with(&runner, device, fstype)
 }
 
 /// Testable form: takes an explicit probe runner so we can inject a
 /// fake "what does /proc/self/mountinfo look like now?" for unit
-/// tests. The default `RealRepairProbe` reads real `/proc`.
-pub fn verify_with<R: RepairRunnerProbe>(
+/// tests. The default `RealFsVerificationProbe` reads real `/proc`.
+pub fn verify_with<R: FsVerificationProbe>(
     runner: &R,
     device: &Path,
     fstype: &str,
@@ -91,7 +91,7 @@ pub fn verify_with<R: RepairRunnerProbe>(
                 cleanup: CleanupReport::default(),
                 evidence: vec![Evidence::new(
                     "VERIFICATION_REFUSED",
-                    "repair::verify",
+                    "fs::verify",
                     "device path is not valid UTF-8".to_string(),
                 )],
             };
@@ -112,7 +112,7 @@ pub fn verify_with<R: RepairRunnerProbe>(
                 cleanup: CleanupReport::default(),
                 evidence: vec![Evidence::new(
                     "VERIFICATION_SESSION_REFUSED",
-                    "repair::verify",
+                    "fs::verify",
                     message,
                 )],
             };
@@ -134,7 +134,7 @@ pub fn verify_with<R: RepairRunnerProbe>(
                 cleanup: CleanupReport::default(),
                 evidence: vec![Evidence::new(
                     "VERIFICATION_PLAN_REFUSED",
-                    "repair::verify",
+                    "fs::verify",
                     format!("fstype={fstype} refused by mount::plan::FstypePolicy"),
                 )],
             };
@@ -167,7 +167,7 @@ pub fn verify_with<R: RepairRunnerProbe>(
                 cleanup,
                 evidence: vec![Evidence::new(
                     "VERIFICATION_MOUNT_FAILED",
-                    "repair::verify",
+                    "fs::verify",
                     format!("mount error kind={:?}", error.kind),
                 )],
             };
@@ -203,7 +203,7 @@ pub fn verify_with<R: RepairRunnerProbe>(
             } else {
                 "VERIFICATION_FSTYPE_MISMATCH"
             },
-            "repair::verify",
+            "fs::verify",
             format!(
                 "target {device_str} mounted read-only and unmounted cleanly; observed_fstype={:?}",
                 observed_fstype_for_evidence
@@ -214,22 +214,22 @@ pub fn verify_with<R: RepairRunnerProbe>(
 
 /// Trait the verification module uses to talk to `/proc` (so tests
 /// can inject a fake). The default implementation,
-/// [`RealRepairProbe`], reads real `/proc/self/mountinfo`. There is
+/// [`RealFsVerificationProbe`], reads real `/proc/self/mountinfo`. There is
 /// no `CommandRunner`-style fake for the mount itself: the mount
 /// uses real `mount(2)` syscalls via `mount::session::Session`, so
 /// tests that exercise a failure path run as root in the QEMU smoke
 /// harness. Unit tests use the safety/fs_flows/orchestrator flow
 /// without a real mount.
-pub trait RepairRunnerProbe: Default {
+pub trait FsVerificationProbe: Default {
     /// Read the fstype the kernel reports for `target` in
     /// `/proc/self/mountinfo`. `None` if not found.
     fn read_fstype_at(&self, target: &Path) -> Option<String>;
 }
 
 #[derive(Default, Debug, Clone, Copy)]
-pub struct RealRepairProbe;
+pub struct RealFsVerificationProbe;
 
-impl RepairRunnerProbe for RealRepairProbe {
+impl FsVerificationProbe for RealFsVerificationProbe {
     fn read_fstype_at(&self, target: &Path) -> Option<String> {
         let body = std::fs::read_to_string("/proc/self/mountinfo").ok()?;
         mountinfo::parse_all(&body)
@@ -274,7 +274,7 @@ mod tests {
     #[derive(Default, Debug, Clone, Copy)]
     struct StubProbe {}
 
-    impl RepairRunnerProbe for StubProbe {
+    impl FsVerificationProbe for StubProbe {
         fn read_fstype_at(&self, _target: &Path) -> Option<String> {
             None
         }

@@ -10,11 +10,11 @@
 
 #![allow(clippy::field_reassign_with_default)]
 
-use catos_system::shared::model::boot_repair::ProviderId;
+use catos_system::mount::diagnose::subvolume::CatosConfirmation;
 use catos_system::mount::model::{MountProblem, MountTargetIdentity};
 use catos_system::repair::boot_repair::detect::{detect, DetectionInputs, DetectionVerdict};
 use catos_system::repair::mount::{diagnose as mount_diagnose, MountRepairInputs};
-use catos_system::mount::diagnose::subvolume::CatosConfirmation;
+use catos_system::shared::model::boot_repair::ProviderId;
 use std::path::PathBuf;
 
 fn btrfs_target() -> MountTargetIdentity {
@@ -32,6 +32,46 @@ fn btrfs_target() -> MountTargetIdentity {
 // ---------------------------------------------------------------------------
 // Mount diagnosis ⇄ mount repair plan
 // ---------------------------------------------------------------------------
+
+fn run_btrfs_repair<R: catos_system::fs::command::FsCommandRunner + ?Sized>(
+    runner: &R,
+    device: &str,
+) -> Result<catos_system::fs::execute::FlowResult, catos_system::fs::command::FsRunnerError> {
+    let plan = build_repair_plan("btrfs", device, Some(BtrfsTopology::SingleDevice))
+        .unwrap()
+        .unwrap();
+    let target = BlockDevice {
+        name: "test".into(),
+        dev_path: Some(PathBuf::from(device)),
+        major_minor: Some("8:1".into()),
+        parent: "sda".into(),
+        class: DeviceClass::Partition,
+        disk_kind: DiskKind::Gpt,
+        partition_role: PartitionRole::LinuxFilesystem,
+        partition_number: Some(1),
+        size_sectors: Some(1_000_000),
+        read_only: false,
+        removable: false,
+        filesystem: Some("btrfs".into()),
+        uuid: None,
+        part_uuid: None,
+        label: None,
+        part_label: None,
+        mount_point: None,
+        mounts: vec![],
+        mounted_before_session: false,
+        evidence: vec![],
+    };
+    let decision = evaluate_safety(
+        std::slice::from_ref(&target),
+        &RepairTargetSelection {
+            explicit_device: target.dev_path.clone(),
+        },
+        None,
+    );
+    let authorization = authorize_repair_plan(&decision, &plan).unwrap();
+    execute_repair_plan(runner, &plan, &authorization)
+}
 
 #[test]
 fn same_fstab_fixture_produces_same_mount_problems() {
@@ -168,8 +208,12 @@ fn doctor_and_repair_agree_on_ambiguous_provider() {
 // Btrfs checksum diagnostic ⇄ fs repair initial diagnosis
 // ---------------------------------------------------------------------------
 
-use catos_system::repair::runner::{RecordedRunner, ToolResult};
-use catos_system::repair::fs_flows::{btrfs_check_only, btrfs_flow, ReadonlyOutcome};
+use catos_system::fs::command::{RecordedRunner, ToolResult};
+use catos_system::fs::diagnose::{btrfs, BtrfsTopology, ReadonlyOutcome};
+use catos_system::fs::execute::execute_repair_plan;
+use catos_system::fs::plan::build_repair_plan;
+use catos_system::fs::safety::{authorize_repair_plan, evaluate_safety, RepairTargetSelection};
+use catos_system::target::model::{BlockDevice, DeviceClass, DiskKind, PartitionRole};
 
 #[test]
 fn doctor_and_fs_repair_agree_on_checksum_diagnostic_label() {
@@ -182,7 +226,7 @@ fn doctor_and_fs_repair_agree_on_checksum_diagnostic_label() {
         b"checksum verify failed on 30605312 wanted 0x1 found 0x2".to_vec(),
         b"".to_vec(),
     );
-    let doctor_result = btrfs_check_only(&doctor_runner, "/dev/sda1").unwrap();
+    let doctor_result = btrfs::check(&doctor_runner, "/dev/sda1").unwrap();
     assert_eq!(doctor_result.outcome, ReadonlyOutcome::CorruptionDetected);
 
     let repair_runner = RecordedRunner::new()
@@ -193,7 +237,7 @@ fn doctor_and_fs_repair_agree_on_checksum_diagnostic_label() {
         )
         .queue_raw(0, b"repaired".to_vec(), b"".to_vec())
         .queue_raw(0, b"clean".to_vec(), b"".to_vec());
-    let repair_result = btrfs_flow(&repair_runner, "/dev/sda1").unwrap();
+    let repair_result = run_btrfs_repair(&repair_runner, "/dev/sda1").unwrap();
     // The repair flow's first attempt MUST be the read-only check,
     // and its label MUST mirror Doctor's corruption verdict.
     assert_eq!(
@@ -208,7 +252,7 @@ fn doctor_does_not_escalate_but_repair_does() {
     // Same first-attempt corruption verdict; Doctor stops, repair
     // escalates. The contrast is the contract.
     let doctor_runner = RecordedRunner::new().queue_raw(1, b"errors".to_vec(), b"".to_vec());
-    let doctor_result = btrfs_check_only(&doctor_runner, "/dev/sda1").unwrap();
+    let doctor_result = btrfs::check(&doctor_runner, "/dev/sda1").unwrap();
     assert_eq!(doctor_result.outcome, ReadonlyOutcome::CorruptionDetected);
     assert_eq!(doctor_runner.invocations().len(), 1);
     assert!(!doctor_runner.any_invocation_with_flag("--repair"));
@@ -217,7 +261,7 @@ fn doctor_does_not_escalate_but_repair_does() {
         .queue_raw(1, b"errors".to_vec(), b"".to_vec())
         .queue_raw(0, b"repaired".to_vec(), b"".to_vec())
         .queue_raw(0, b"clean".to_vec(), b"".to_vec());
-    let _ = btrfs_flow(&repair_runner, "/dev/sda1").unwrap();
+    let _ = run_btrfs_repair(&repair_runner, "/dev/sda1").unwrap();
     assert!(repair_runner.any_invocation_with_flag("--repair"));
     assert_eq!(repair_runner.invocations().len(), 3);
 }
@@ -225,11 +269,11 @@ fn doctor_does_not_escalate_but_repair_does() {
 #[test]
 fn doctor_and_fs_repair_agree_on_tool_missing() {
     let doctor_runner = RecordedRunner::new().queue(ToolResult::binary_missing());
-    let doctor_result = btrfs_check_only(&doctor_runner, "/dev/sda1").unwrap();
+    let doctor_result = btrfs::check(&doctor_runner, "/dev/sda1").unwrap();
     assert_eq!(doctor_result.outcome, ReadonlyOutcome::ToolMissing);
 
     let repair_runner = RecordedRunner::new().queue(ToolResult::binary_missing());
-    let repair_result = btrfs_flow(&repair_runner, "/dev/sda1").unwrap();
+    let repair_result = run_btrfs_repair(&repair_runner, "/dev/sda1").unwrap();
     assert!(repair_result.attempts[0].exit.binary_missing);
 }
 

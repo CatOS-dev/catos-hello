@@ -6,8 +6,8 @@
 
 use std::io::Write;
 
+use crate::fs::model::FsRepairReport;
 use crate::shared::error::Error;
-use crate::shared::model::repair::FsRepairReport;
 
 /// Render the repair report as JSON. Uses the same envelope as
 /// phase-2 and phase-3 reports so consumers parse one shape.
@@ -173,7 +173,7 @@ fn indent_block(text: &str, prefix: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::shared::model::repair::{
+    use crate::fs::model::{
         AttemptKind, ExitInterpretation, FsRepairOutcome, RepairAttempt, RepairCleanup, RepairTool,
         VerificationMount,
     };
