@@ -19,20 +19,22 @@
 //! The QEMU crash-resume test in scripts/recovery-qemu-smoke.sh
 //! exercises the same invariants under real SIGKILL.
 
-use catos_system::shared::model::recovery::TransactionState as S;
-use catos_system::shared::model::recovery::{
+use catos_system::snapshot::model::TransactionState as S;
+use catos_system::snapshot::model::{
     BootLayout, BtrfsFilesystemIdentity, BtrfsSubvolumeIdentity, CatosIdentity, CompletedStep,
-    DiskFacts, FstabRootDefinition, RecoveryErrorKind, RecoveryPlan, SubvolumeFacts,
+    DiskFacts, FstabRootDefinition, SnapshotErrorKind, RecoveryPlan, SubvolumeFacts,
     TransactionPaths, TransactionRecord, TransactionState, RECOVERY_PLAN_SCHEMA_VERSION,
     TX_RECORD_SCHEMA_VERSION,
 };
-use catos_system::shared::snapshot_engine::identity::{
-    drift_between, is_protected_recovery_path, safe_join, target_is_running_root,
-    validate_plan_shape, verify_confirmation_token, RunningRoot, SubvolumePath,
+use catos_system::snapshot::diagnose::consistency::drift_between;
+use catos_system::snapshot::diagnose::identity::{
+    is_protected_recovery_path, safe_join, target_is_running_root, RunningRoot, SubvolumePath,
 };
-use catos_system::shared::snapshot_engine::plan::{build_confirmation_token, effective_plan_digest, PlanInputs};
-use catos_system::shared::snapshot_engine::state::{reconcile_with_disk_facts, AdvanceAction, Intent};
-use catos_system::shared::snapshot_engine::store;
+use catos_system::snapshot::verify::{validate_plan_shape, verify_confirmation_token};
+use catos_system::snapshot::plan::{build_confirmation_token, effective_plan_digest, PlanInputs};
+use catos_system::snapshot::plan::reconcile::reconcile_with_disk_facts;
+use catos_system::snapshot::transaction::{AdvanceAction, Intent};
+use catos_system::snapshot::store;
 use catos_system::target::execute::confined;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -68,7 +70,7 @@ fn sample_plan() -> RecoveryPlan {
         },
         target_catos_identity: Some(CatosIdentity::default()),
         boot_layout: BootLayout::default(),
-        boot_consistency: catos_system::shared::snapshot_engine::boot::evaluate_readonly_consistency(
+        boot_consistency: catos_system::snapshot::diagnose::boot::evaluate_readonly_consistency(
             &BootLayout::default(),
         ),
         backup_root_path:
@@ -142,7 +144,7 @@ fn stale_plan_error_carries_structured_drift_detail() {
         &plan.source_snapshot,
     );
     let error = drift.into_error().expect("drift should produce an error");
-    assert_eq!(error.kind, RecoveryErrorKind::StalePlan);
+    assert_eq!(error.kind, SnapshotErrorKind::StalePlan);
     assert!(error.message.contains("fsid changed"));
     assert!(!error.resume_possible);
 }
@@ -218,7 +220,7 @@ fn load_record_rejects_truncated_json() {
     let path = record_path(&dir);
     confined::atomic_write(&path, b"{\"schema_version\":3,\"transaction_", 0o600).unwrap();
     let err = store::load_record(&path).unwrap_err();
-    assert_eq!(err.kind, RecoveryErrorKind::StateRecordCorrupt);
+    assert_eq!(err.kind, SnapshotErrorKind::StateRecordCorrupt);
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -232,7 +234,7 @@ fn load_record_rejects_future_schema_version() {
     let body = serde_json::to_vec(&record).unwrap();
     confined::atomic_write(&path, &body, 0o600).unwrap();
     let err = store::load_record(&path).unwrap_err();
-    assert_eq!(err.kind, RecoveryErrorKind::UnsupportedTransactionSchema);
+    assert_eq!(err.kind, SnapshotErrorKind::UnsupportedTransactionSchema);
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -252,7 +254,7 @@ fn load_record_rejects_v1_schema_as_unsupported_not_corrupt() {
     )
     .unwrap();
     let err = store::load_record(&path).unwrap_err();
-    assert_eq!(err.kind, RecoveryErrorKind::UnsupportedTransactionSchema);
+    assert_eq!(err.kind, SnapshotErrorKind::UnsupportedTransactionSchema);
     assert!(err.message.contains("found 1"), "message: {}", err.message);
     assert!(
         err.message.contains("supported 3"),
@@ -280,7 +282,7 @@ fn load_record_rejects_v2_schema_as_unsupported_not_corrupt() {
     )
     .unwrap();
     let err = store::load_record(&path).unwrap_err();
-    assert_eq!(err.kind, RecoveryErrorKind::UnsupportedTransactionSchema);
+    assert_eq!(err.kind, SnapshotErrorKind::UnsupportedTransactionSchema);
     assert!(err.message.contains("found 2"), "message: {}", err.message);
     assert!(
         err.message.contains("supported 3"),
@@ -295,7 +297,7 @@ fn load_record_rejects_missing_file() {
     let dir = scratch("missing");
     std::fs::create_dir_all(&dir).unwrap();
     let err = store::load_record(&record_path(&dir)).unwrap_err();
-    assert_eq!(err.kind, RecoveryErrorKind::TransactionNotFound);
+    assert_eq!(err.kind, SnapshotErrorKind::TransactionNotFound);
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -334,7 +336,7 @@ fn validate_plan_shape_rejects_non_readonly_snapshot() {
     let mut plan = sample_plan();
     plan.source_snapshot.read_only = false;
     let err = validate_plan_shape(&plan).unwrap_err();
-    assert_eq!(err.kind, RecoveryErrorKind::SnapshotNotReadonly);
+    assert_eq!(err.kind, SnapshotErrorKind::SnapshotNotReadonly);
 }
 
 #[test]
@@ -342,7 +344,7 @@ fn validate_plan_shape_rejects_identical_paths() {
     let mut plan = sample_plan();
     plan.source_snapshot.path = plan.current_root.path.clone();
     let err = validate_plan_shape(&plan).unwrap_err();
-    assert_eq!(err.kind, RecoveryErrorKind::TargetChanged);
+    assert_eq!(err.kind, SnapshotErrorKind::TargetChanged);
 }
 
 #[test]
@@ -350,7 +352,7 @@ fn validate_plan_shape_rejects_unsupported_schema_version() {
     let mut plan = sample_plan();
     plan.schema_version = 99;
     let err = validate_plan_shape(&plan).unwrap_err();
-    assert_eq!(err.kind, RecoveryErrorKind::UnsupportedPlanSchema);
+    assert_eq!(err.kind, SnapshotErrorKind::UnsupportedPlanSchema);
 }
 
 // ---------------------------------------------------------------------------
@@ -586,7 +588,7 @@ fn recovery_paths_layout_is_namespaced_under_top_level() {
 
 #[test]
 fn plan_builder_emits_no_boot_finalization_step() {
-    use catos_system::shared::snapshot_engine::build_recovery_plan;
+    use catos_system::snapshot::plan::build_plan as build_recovery_plan;
     let inputs = PlanInputs {
         filesystem: BtrfsFilesystemIdentity {
             fsid: "fsid-A".into(),
@@ -628,6 +630,7 @@ fn plan_builder_emits_no_boot_finalization_step() {
             options: vec!["subvol=/@".into()],
         },
         plan_id: "tx-00000000000000000000000000000003".into(),
+        generated_at_unix: 1,
         generated_on_host: None,
         confirmation_token_entropy: vec![1u8; 32],
     };

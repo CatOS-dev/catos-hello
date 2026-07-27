@@ -22,6 +22,7 @@ pub mod mount;
 pub mod recovery;
 pub mod repair;
 pub mod shared;
+pub mod snapshot;
 pub mod system;
 pub mod target;
 pub mod update;

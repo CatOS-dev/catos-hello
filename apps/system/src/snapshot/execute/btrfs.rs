@@ -11,17 +11,15 @@
 //!   * [`exchange_rooted_paths`]
 //!
 //! They call into the migrated helpers via `crate::target::execute::confined`
-//! and map [`FsError`] back to [`RecoveryError`] at the seam. This forms a
-//! transitional dependency `shared::snapshot_engine -> target` that will be
+//! and map [`FsError`] back to [`SnapshotError`] at the seam. This forms a
+//! former cross-layer dependency; generic confined filesystem operations are
 //! eliminated in phase 4 when `snapshot_engine` is deleted.
 
-use std::ffi::CString;
 use std::os::fd::AsRawFd;
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 
-use crate::shared::error::FsError;
-use crate::shared::model::snapshot::recovery::{RecoveryError, RecoveryErrorKind};
+use crate::snapshot::model::{fs_to_snapshot, SnapshotError, SnapshotErrorKind};
 use crate::target::execute::confined::{
     cstring_pub, entry_type_pub, fsync_fd_pub, list_rooted_directory_names_pub,
     open_rooted_directory_pub, open_rooted_parent_pub, unsafe_path_pub, PubRootedEntry,
@@ -51,20 +49,6 @@ struct BtrfsIoctlVolArgs {
     name: [u8; BTRFS_PATH_NAME_MAX + 1],
 }
 
-/// Map a [`FsError`] from the migrated confined layer into a
-/// [`RecoveryError`]. Public so other `snapshot_engine` callers that
-/// previously relied on `?`-propagation of `RecoveryError` from the
-/// confined functions can adapt.
-pub fn fs_to_recovery(error: FsError) -> RecoveryError {
-    match error {
-        FsError::NotFound => RecoveryError::new(RecoveryErrorKind::TransactionNotFound, error.to_string()),
-        FsError::PermissionDenied => RecoveryError::new(RecoveryErrorKind::StateRecordCorrupt, error.to_string()),
-        FsError::NotUtf8 => RecoveryError::new(RecoveryErrorKind::StateRecordCorrupt, error.to_string()),
-        FsError::OutsideRoot(msg) => RecoveryError::new(RecoveryErrorKind::UnsafeRecoveryPath, msg),
-        FsError::Io(msg) => RecoveryError::new(RecoveryErrorKind::StateRecordCorrupt, msg),
-    }
-}
-
 /// Create a btrfs snapshot through pinned source and destination
 /// directory file descriptors.
 pub fn create_btrfs_snapshot(
@@ -72,29 +56,28 @@ pub fn create_btrfs_snapshot(
     source_subvolume: &str,
     destination_subvolume: &str,
     read_only: bool,
-) -> Result<(), RecoveryError> {
-    let source = open_rooted_directory_pub(top_level, source_subvolume, false).map_err(fs_to_recovery)?;
+) -> Result<(), SnapshotError> {
+    let source =
+        open_rooted_directory_pub(top_level, source_subvolume, false).map_err(fs_to_snapshot)?;
     let destination =
-        open_rooted_parent_pub(top_level, destination_subvolume, true).map_err(fs_to_recovery)?;
+        open_rooted_parent_pub(top_level, destination_subvolume, true).map_err(fs_to_snapshot)?;
 
     match entry_type_pub(
         destination.parent.as_raw_fd(),
         &destination.name,
         &destination.display,
     )
-    .map_err(fs_to_recovery)?
+    .map_err(fs_to_snapshot)?
     {
         None => {}
         Some(libc::S_IFLNK) => {
-            return Err(unsafe_path_pub(
-                &destination.display,
-                "snapshot destination is a symlink",
-            )
-            .into());
+            return Err(
+                unsafe_path_pub(&destination.display, "snapshot destination is a symlink").into(),
+            );
         }
         Some(_) => {
-            return Err(RecoveryError::new(
-                RecoveryErrorKind::RootSwitchConflict,
+            return Err(SnapshotError::new(
+                SnapshotErrorKind::RootSwitchConflict,
                 format!(
                     "snapshot destination {} already exists",
                     destination.display.display()
@@ -131,11 +114,11 @@ pub fn create_btrfs_snapshot(
     };
     if result != 0 {
         let error = std::io::Error::last_os_error();
-        let mut recovery_error = RecoveryError::new(
+        let mut recovery_error = SnapshotError::new(
             if error.raw_os_error() == Some(libc::EEXIST) {
-                RecoveryErrorKind::RootSwitchConflict
+                SnapshotErrorKind::RootSwitchConflict
             } else {
-                RecoveryErrorKind::SyscallFailed
+                SnapshotErrorKind::SyscallFailed
             },
             format!(
                 "BTRFS_IOC_SNAP_CREATE_V2 {} -> {} failed: {error}",
@@ -150,18 +133,19 @@ pub fn create_btrfs_snapshot(
         &destination.display,
         "fsync snapshot destination parent",
     )
-    .map_err(fs_to_recovery)
+    .map_err(fs_to_snapshot)
 }
 
 /// Create an empty Btrfs subvolume below a pinned parent directory fd.
-pub fn create_btrfs_subvolume(top_level: &Path, rooted_path: &str) -> Result<(), RecoveryError> {
-    let destination = open_rooted_parent_pub(top_level, rooted_path, false).map_err(fs_to_recovery)?;
+pub fn create_btrfs_subvolume(top_level: &Path, rooted_path: &str) -> Result<(), SnapshotError> {
+    let destination =
+        open_rooted_parent_pub(top_level, rooted_path, false).map_err(fs_to_snapshot)?;
     match entry_type_pub(
         destination.parent.as_raw_fd(),
         &destination.name,
         &destination.display,
     )
-    .map_err(fs_to_recovery)?
+    .map_err(fs_to_snapshot)?
     {
         None => {}
         Some(libc::S_IFLNK) => {
@@ -172,8 +156,8 @@ pub fn create_btrfs_subvolume(top_level: &Path, rooted_path: &str) -> Result<(),
             .into());
         }
         Some(_) => {
-            return Err(RecoveryError::new(
-                RecoveryErrorKind::RootSwitchConflict,
+            return Err(SnapshotError::new(
+                SnapshotErrorKind::RootSwitchConflict,
                 format!(
                     "subvolume destination {} already exists",
                     destination.display.display()
@@ -208,11 +192,11 @@ pub fn create_btrfs_subvolume(top_level: &Path, rooted_path: &str) -> Result<(),
     };
     if result != 0 {
         let error = std::io::Error::last_os_error();
-        let mut recovery_error = RecoveryError::new(
+        let mut recovery_error = SnapshotError::new(
             if error.raw_os_error() == Some(libc::EEXIST) {
-                RecoveryErrorKind::RootSwitchConflict
+                SnapshotErrorKind::RootSwitchConflict
             } else {
-                RecoveryErrorKind::SyscallFailed
+                SnapshotErrorKind::SyscallFailed
             },
             format!(
                 "BTRFS_IOC_SUBVOL_CREATE_V2 {} failed: {error}",
@@ -227,23 +211,23 @@ pub fn create_btrfs_subvolume(top_level: &Path, rooted_path: &str) -> Result<(),
         &destination.display,
         "fsync subvolume destination parent",
     )
-    .map_err(fs_to_recovery)
+    .map_err(fs_to_snapshot)
 }
 
 /// Delete a Btrfs subvolume only after proving its directory is empty.
 pub fn delete_empty_btrfs_subvolume(
     top_level: &Path,
     rooted_path: &str,
-) -> Result<(), RecoveryError> {
-    let names =
-        list_rooted_directory_names_pub(top_level, rooted_path).map_err(fs_to_recovery)?;
+) -> Result<(), SnapshotError> {
+    let names = list_rooted_directory_names_pub(top_level, rooted_path).map_err(fs_to_snapshot)?;
     if !names.is_empty() {
-        return Err(RecoveryError::new(
-            RecoveryErrorKind::RootSwitchConflict,
+        return Err(SnapshotError::new(
+            SnapshotErrorKind::RootSwitchConflict,
             format!("refusing to delete non-empty Btrfs subvolume {rooted_path}"),
         ));
     }
-    let destination = open_rooted_parent_pub(top_level, rooted_path, false).map_err(fs_to_recovery)?;
+    let destination =
+        open_rooted_parent_pub(top_level, rooted_path, false).map_err(fs_to_snapshot)?;
     require_directory_entry(&destination)?;
     let name = destination.name.as_bytes();
     if name.is_empty() || name.len() > BTRFS_PATH_NAME_MAX || name.contains(&0) {
@@ -268,8 +252,8 @@ pub fn delete_empty_btrfs_subvolume(
     };
     if result != 0 {
         let error = std::io::Error::last_os_error();
-        let mut recovery_error = RecoveryError::new(
-            RecoveryErrorKind::SyscallFailed,
+        let mut recovery_error = SnapshotError::new(
+            SnapshotErrorKind::SyscallFailed,
             format!(
                 "BTRFS_IOC_SNAP_DESTROY {} failed: {error}",
                 destination.display.display()
@@ -283,24 +267,27 @@ pub fn delete_empty_btrfs_subvolume(
         &destination.display,
         "fsync Btrfs subvolume parent after rollback",
     )
-    .map_err(fs_to_recovery)
+    .map_err(fs_to_snapshot)
 }
 
 pub fn exchange_rooted_paths(
     top_level: &Path,
     left: &str,
     right: &str,
-) -> Result<(), RecoveryError> {
-    let left = open_rooted_parent_pub(top_level, left, false).map_err(fs_to_recovery)?;
-    let right = open_rooted_parent_pub(top_level, right, false).map_err(fs_to_recovery)?;
+) -> Result<(), SnapshotError> {
+    let left = open_rooted_parent_pub(top_level, left, false).map_err(fs_to_snapshot)?;
+    let right = open_rooted_parent_pub(top_level, right, false).map_err(fs_to_snapshot)?;
     require_directory_entry(&left)?;
     require_directory_entry(&right)?;
     exchange_open_entries(&left, &right)
 }
 
-fn exchange_open_entries(left: &PubRootedEntry, right: &PubRootedEntry) -> Result<(), RecoveryError> {
-    let left_name = cstring_pub(&left.name, &left.display).map_err(fs_to_recovery)?;
-    let right_name = cstring_pub(&right.name, &right.display).map_err(fs_to_recovery)?;
+fn exchange_open_entries(
+    left: &PubRootedEntry,
+    right: &PubRootedEntry,
+) -> Result<(), SnapshotError> {
+    let left_name = cstring_pub(&left.name, &left.display).map_err(fs_to_snapshot)?;
+    let right_name = cstring_pub(&right.name, &right.display).map_err(fs_to_snapshot)?;
     let result = unsafe {
         libc::syscall(
             libc::SYS_renameat2,
@@ -313,8 +300,8 @@ fn exchange_open_entries(left: &PubRootedEntry, right: &PubRootedEntry) -> Resul
     };
     if result != 0 {
         let error = std::io::Error::last_os_error();
-        let mut recovery_error = RecoveryError::new(
-            RecoveryErrorKind::SyscallFailed,
+        let mut recovery_error = SnapshotError::new(
+            SnapshotErrorKind::SyscallFailed,
             format!(
                 "renameat2(RENAME_EXCHANGE) {} <-> {} failed: {error}",
                 left.display.display(),
@@ -324,60 +311,50 @@ fn exchange_open_entries(left: &PubRootedEntry, right: &PubRootedEntry) -> Resul
         recovery_error.errno = error.raw_os_error();
         return Err(recovery_error);
     }
-    fsync_fd_pub(left.parent.as_raw_fd(), &left.display, "fsync left exchange parent")
-        .map_err(fs_to_recovery)?;
+    fsync_fd_pub(
+        left.parent.as_raw_fd(),
+        &left.display,
+        "fsync left exchange parent",
+    )
+    .map_err(fs_to_snapshot)?;
     if left.parent.as_raw_fd() != right.parent.as_raw_fd() {
-        fsync_fd_pub(right.parent.as_raw_fd(), &right.display, "fsync right exchange parent")
-            .map_err(fs_to_recovery)?;
+        fsync_fd_pub(
+            right.parent.as_raw_fd(),
+            &right.display,
+            "fsync right exchange parent",
+        )
+        .map_err(fs_to_snapshot)?;
     }
     Ok(())
 }
 
-fn require_directory_entry(entry: &PubRootedEntry) -> Result<(), RecoveryError> {
+fn require_directory_entry(entry: &PubRootedEntry) -> Result<(), SnapshotError> {
     match entry_type_pub(entry.parent.as_raw_fd(), &entry.name, &entry.display)
-        .map_err(fs_to_recovery)?
+        .map_err(fs_to_snapshot)?
     {
         Some(libc::S_IFDIR) => Ok(()),
-        Some(libc::S_IFLNK) => Err(unsafe_path_pub(
-            &entry.display,
-            "root exchange entry is a symlink",
-        )
-        .into()),
-        Some(_) => Err(RecoveryError::new(
-            RecoveryErrorKind::RootSwitchConflict,
+        Some(libc::S_IFLNK) => {
+            Err(unsafe_path_pub(&entry.display, "root exchange entry is a symlink").into())
+        }
+        Some(_) => Err(SnapshotError::new(
+            SnapshotErrorKind::RootSwitchConflict,
             format!(
                 "root exchange entry {} is not a directory",
                 entry.display.display()
             ),
         )),
-        None => Err(RecoveryError::new(
-            RecoveryErrorKind::RootSwitchConflict,
+        None => Err(SnapshotError::new(
+            SnapshotErrorKind::RootSwitchConflict,
             format!("root exchange entry {} is missing", entry.display.display()),
         )),
-    }
-}
-
-// Re-export the migrated public API so existing `confined::read_file` etc.
-// callers keep resolving through this module. The functions now return
-// `FsError`; callers that need `RecoveryError` use `fs_to_recovery`.
-//
-// NOTE: phase-1 blocking fix — the facade re-export below was removed.
-// All production callers now resolve migrated functions directly through
-// `crate::target::execute::confined::*`. Only the btrfs-specific
-// operations remain in this module.
-
-impl From<FsError> for RecoveryError {
-    fn from(error: FsError) -> Self {
-        fs_to_recovery(error)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::target::execute::confined::{
-        atomic_write_rooted, remove_empty_rooted_directory,
-    };
+    use crate::shared::error::FsError;
+    use crate::target::execute::confined::{atomic_write_rooted, remove_empty_rooted_directory};
     use std::os::unix::fs::symlink;
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -410,7 +387,7 @@ mod tests {
             false,
         )
         .unwrap_err();
-        assert_eq!(error.kind, RecoveryErrorKind::UnsafeRecoveryPath);
+        assert_eq!(error.kind, SnapshotErrorKind::UnsafeRecoveryPath);
         assert!(!outside.join("new-root").exists());
         let _ = std::fs::remove_dir_all(top);
         let _ = std::fs::remove_dir_all(outside);
@@ -430,7 +407,7 @@ mod tests {
             &format!("/.catos-recovery/staging/{TX_ID}/new-root"),
         )
         .unwrap_err();
-        assert_eq!(error.kind, RecoveryErrorKind::UnsafeRecoveryPath);
+        assert_eq!(error.kind, SnapshotErrorKind::UnsafeRecoveryPath);
         assert!(top.join("@").is_dir());
         assert!(outside.join("new-root").is_dir());
         let _ = std::fs::remove_dir_all(top);
@@ -462,7 +439,7 @@ mod tests {
         std::fs::write(top.join("candidate/data"), b"keep").unwrap();
 
         let error = delete_empty_btrfs_subvolume(&top, "/candidate").unwrap_err();
-        assert_eq!(error.kind, RecoveryErrorKind::RootSwitchConflict);
+        assert_eq!(error.kind, SnapshotErrorKind::RootSwitchConflict);
         assert_eq!(std::fs::read(top.join("candidate/data")).unwrap(), b"keep");
         let _ = std::fs::remove_dir_all(top);
     }

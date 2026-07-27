@@ -9,8 +9,8 @@ use crate::shared::model::doctor::{
 };
 use crate::shared::model::evidence::Evidence;
 use crate::target::model::TargetIdentity;
-use crate::shared::model::recovery::TransactionRecord;
-use crate::shared::snapshot_engine::store;
+use crate::snapshot::model::TransactionRecord;
+use crate::snapshot::store;
 
 use super::{push_evidence, push_issue, set_section};
 
@@ -95,12 +95,12 @@ fn inspect_single_record(
     if record.state.is_terminal() {
         if matches!(
             record.state,
-            crate::shared::model::recovery::TransactionState::Completed
-                | crate::shared::model::recovery::TransactionState::Reverted
+            crate::snapshot::model::TransactionState::Completed
+                | crate::snapshot::model::TransactionState::Reverted
         ) {
             if matches!(
                 record.state,
-                crate::shared::model::recovery::TransactionState::Completed
+                crate::snapshot::model::TransactionState::Completed
             ) {
                 if let Some(cleanup) = record.last_cleanup.as_ref() {
                     if !cleanup.residual.is_empty() {

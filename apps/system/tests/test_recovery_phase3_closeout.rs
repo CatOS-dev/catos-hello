@@ -41,8 +41,8 @@
 use std::path::PathBuf;
 use std::process::Command;
 
-use catos_system::shared::model::recovery::{
-    CleanupSummary, RecoveryError, RecoveryErrorKind, TransactionRecord, TransactionState,
+use catos_system::snapshot::model::{
+    CleanupSummary, SnapshotError, SnapshotErrorKind, TransactionRecord, TransactionState,
     TX_RECORD_SCHEMA_VERSION,
 };
 
@@ -144,7 +144,7 @@ fn recovery_plan_rejects_explicit_esp_with_stable_error() {
     assert_eq!(value["kind"], "error");
     assert_eq!(
         value["payload"]["kind"],
-        RecoveryErrorKind::UnsupportedExplicitEsp.code()
+        SnapshotErrorKind::UnsupportedExplicitEsp.code()
     );
 }
 
@@ -166,7 +166,7 @@ fn recovery_inspect_rejects_explicit_esp_before_probe() {
     let value: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap();
     assert_eq!(
         value["payload"]["kind"],
-        RecoveryErrorKind::UnsupportedExplicitEsp.code()
+        SnapshotErrorKind::UnsupportedExplicitEsp.code()
     );
     assert!(
         value["payload"]
@@ -225,7 +225,7 @@ fn recovery_apply_rejects_explicit_esp_before_persistent_write() {
     let value: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap();
     assert_eq!(
         value["payload"]["kind"],
-        RecoveryErrorKind::UnsupportedExplicitEsp.code(),
+        SnapshotErrorKind::UnsupportedExplicitEsp.code(),
         "payload: {value}"
     );
     assert!(
@@ -295,7 +295,7 @@ fn every_phase3_subcommand_rejects_explicit_esp() {
             .unwrap_or_else(|err| panic!("non-JSON stdout for {args:?}: {err}\n{stdout}"));
         assert_eq!(
             value["payload"]["kind"],
-            RecoveryErrorKind::UnsupportedExplicitEsp.code(),
+            SnapshotErrorKind::UnsupportedExplicitEsp.code(),
             "wrong error kind for {args:?}: {value}"
         );
     }
@@ -312,7 +312,7 @@ fn every_phase3_subcommand_rejects_explicit_esp() {
 // ability to triage a dirty recovery environment after the fact.
 
 fn sample_record_with_cleanup(summary: Option<CleanupSummary>) -> TransactionRecord {
-    use catos_system::shared::model::recovery::{
+    use catos_system::snapshot::model::{
         BtrfsFilesystemIdentity, BtrfsSubvolumeIdentity, FstabRootDefinition, RecoveryPlan,
         RECOVERY_PLAN_SCHEMA_VERSION,
     };
@@ -346,7 +346,7 @@ fn sample_record_with_cleanup(summary: Option<CleanupSummary>) -> TransactionRec
         },
         target_catos_identity: None,
         boot_layout: Default::default(),
-        boot_consistency: catos_system::shared::snapshot_engine::boot::evaluate_readonly_consistency(
+        boot_consistency: catos_system::snapshot::diagnose::boot::evaluate_readonly_consistency(
             &Default::default(),
         ),
         backup_root_path: "/.catos-recovery/backups/tx-1/root-before".into(),
@@ -395,25 +395,25 @@ fn cleanup_summary_round_trips_through_record_json() {
 
 #[test]
 fn unsupported_explicit_esp_kind_round_trips() {
-    let kind = RecoveryErrorKind::UnsupportedExplicitEsp;
+    let kind = SnapshotErrorKind::UnsupportedExplicitEsp;
     let j = serde_json::to_string(&kind).unwrap();
-    let back: RecoveryErrorKind = serde_json::from_str(&j).unwrap();
+    let back: SnapshotErrorKind = serde_json::from_str(&j).unwrap();
     assert_eq!(kind, back);
     assert_eq!(kind.code(), "unsupported_explicit_esp");
 }
 
 #[test]
 fn cleanup_incomplete_error_kind_is_distinct_from_syscall_failed() {
-    let err = RecoveryError::new(
-        RecoveryErrorKind::CleanupIncomplete,
+    let err = SnapshotError::new(
+        SnapshotErrorKind::CleanupIncomplete,
         "umount failed and detach also failed",
     );
     let j = serde_json::to_string(&err.kind).unwrap();
     assert!(j.contains("cleanup_incomplete"));
     assert!(!j.contains("syscall_failed"));
     assert_ne!(
-        RecoveryErrorKind::CleanupIncomplete.code(),
-        RecoveryErrorKind::SyscallFailed.code()
+        SnapshotErrorKind::CleanupIncomplete.code(),
+        SnapshotErrorKind::SyscallFailed.code()
     );
 }
 
@@ -421,22 +421,22 @@ fn cleanup_incomplete_error_kind_is_distinct_from_syscall_failed() {
 fn session_directory_error_kinds_have_distinct_stable_codes() {
     let cases = [
         (
-            RecoveryErrorKind::SessionDirectoryNotSecure,
+            SnapshotErrorKind::SessionDirectoryNotSecure,
             "session_directory_not_secure",
         ),
         (
-            RecoveryErrorKind::SessionDirectoryConflict,
+            SnapshotErrorKind::SessionDirectoryConflict,
             "session_directory_conflict",
         ),
         (
-            RecoveryErrorKind::SessionDirectoryCleanupFailed,
+            SnapshotErrorKind::SessionDirectoryCleanupFailed,
             "session_directory_cleanup_failed",
         ),
     ];
     let mut seen = std::collections::HashSet::new();
     for (kind, expected) in cases {
         let j = serde_json::to_string(&kind).unwrap();
-        let back: RecoveryErrorKind = serde_json::from_str(&j).unwrap();
+        let back: SnapshotErrorKind = serde_json::from_str(&j).unwrap();
         assert_eq!(kind, back);
         assert_eq!(kind.code(), expected);
         assert!(
@@ -446,16 +446,16 @@ fn session_directory_error_kinds_have_distinct_stable_codes() {
         );
     }
     assert_ne!(
-        RecoveryErrorKind::SessionDirectoryNotSecure.code(),
-        RecoveryErrorKind::SyscallFailed.code()
+        SnapshotErrorKind::SessionDirectoryNotSecure.code(),
+        SnapshotErrorKind::SyscallFailed.code()
     );
     assert_ne!(
-        RecoveryErrorKind::SessionDirectoryConflict.code(),
-        RecoveryErrorKind::SyscallFailed.code()
+        SnapshotErrorKind::SessionDirectoryConflict.code(),
+        SnapshotErrorKind::SyscallFailed.code()
     );
     assert_ne!(
-        RecoveryErrorKind::SessionDirectoryCleanupFailed.code(),
-        RecoveryErrorKind::SyscallFailed.code()
+        SnapshotErrorKind::SessionDirectoryCleanupFailed.code(),
+        SnapshotErrorKind::SyscallFailed.code()
     );
 }
 
@@ -555,10 +555,10 @@ fn exit_code_for_completed_apply_with_clean_cleanup_is_success() {
 /// versa).
 #[test]
 fn attach_cleanup_does_not_clear_last_error() {
-    use catos_system::shared::model::recovery::{
+    use catos_system::snapshot::model::{
         BtrfsFilesystemIdentity, CompletedStep, RecoveryPlan, RECOVERY_PLAN_SCHEMA_VERSION,
     };
-    use catos_system::shared::snapshot_engine::engine::{Engine, EngineOptions};
+    use catos_system::snapshot::execute::engine::{Engine, EngineOptions};
     use std::path::PathBuf;
 
     let top = std::env::temp_dir().join(format!(
@@ -581,7 +581,7 @@ fn attach_cleanup_does_not_clear_last_error() {
             device_major_minor: "259:0".into(),
             label: None,
         },
-        current_root: catos_system::shared::model::recovery::BtrfsSubvolumeIdentity {
+        current_root: catos_system::snapshot::model::BtrfsSubvolumeIdentity {
             path: "/@".into(),
             subvolume_id: 256,
             generation: 10,
@@ -590,7 +590,7 @@ fn attach_cleanup_does_not_clear_last_error() {
             read_only: false,
             evidence: vec![],
         },
-        source_snapshot: catos_system::shared::model::recovery::BtrfsSubvolumeIdentity {
+        source_snapshot: catos_system::snapshot::model::BtrfsSubvolumeIdentity {
             path: "/@snapshots/1".into(),
             subvolume_id: 300,
             generation: 8,
@@ -601,14 +601,14 @@ fn attach_cleanup_does_not_clear_last_error() {
         },
         target_catos_identity: None,
         boot_layout: Default::default(),
-        boot_consistency: catos_system::shared::snapshot_engine::boot::evaluate_readonly_consistency(
+        boot_consistency: catos_system::snapshot::diagnose::boot::evaluate_readonly_consistency(
             &Default::default(),
         ),
         backup_root_path:
             "/.catos-recovery/backups/tx-00000000000000000000000000000009/root-before".into(),
         staging_root_path: "/.catos-recovery/staging/tx-00000000000000000000000000000009/new-root"
             .into(),
-        fstab_root_definition: catos_system::shared::model::recovery::FstabRootDefinition {
+        fstab_root_definition: catos_system::snapshot::model::FstabRootDefinition {
             source: "/dev/null".into(),
             fstype: "btrfs".into(),
             options: vec!["subvol=/@".into()],
@@ -621,8 +621,8 @@ fn attach_cleanup_does_not_clear_last_error() {
         confirmation_token: String::new(),
         evidence: vec![],
     };
-    plan.plan_digest = catos_system::shared::snapshot_engine::plan::effective_plan_digest(&plan).unwrap();
-    plan.confirmation_token = catos_system::shared::snapshot_engine::plan::build_confirmation_token(
+    plan.plan_digest = catos_system::snapshot::plan::effective_plan_digest(&plan).unwrap();
+    plan.confirmation_token = catos_system::snapshot::plan::build_confirmation_token(
         &plan.plan_id,
         &plan.plan_digest,
         &plan.nonce,
@@ -637,8 +637,8 @@ fn attach_cleanup_does_not_clear_last_error() {
     )
     .expect("Engine::begin must persist the initial record");
 
-    let injected_error = RecoveryError::new(
-        RecoveryErrorKind::TargetChanged,
+    let injected_error = SnapshotError::new(
+        SnapshotErrorKind::TargetChanged,
         "synthetic operation failure for the cleanup-preservation test",
     );
 
@@ -647,10 +647,10 @@ fn attach_cleanup_does_not_clear_last_error() {
     {
         let state_path =
             top.join(".catos-recovery/transactions/tx-00000000000000000000000000000009/state.json");
-        let mut record = catos_system::shared::snapshot_engine::store::load_record(&state_path).unwrap();
+        let mut record = catos_system::snapshot::store::load_record(&state_path).unwrap();
         record.last_error = Some(injected_error);
-        record.state = catos_system::shared::model::recovery::TransactionState::FailedRecoverable;
-        catos_system::shared::snapshot_engine::store::persist_record(&state_path, &record).unwrap();
+        record.state = catos_system::snapshot::model::TransactionState::FailedRecoverable;
+        catos_system::snapshot::store::persist_record(&state_path, &record).unwrap();
     }
     let mut reloaded_engine = Engine::load(
         EngineOptions {
@@ -666,7 +666,7 @@ fn attach_cleanup_does_not_clear_last_error() {
         .last_error
         .clone()
         .expect("failure state must have been persisted");
-    assert_eq!(persisted_error.kind, RecoveryErrorKind::TargetChanged);
+    assert_eq!(persisted_error.kind, SnapshotErrorKind::TargetChanged);
 
     let summary = CleanupSummary {
         unmounted: vec!["/run/catos-system/sessions/recovery-rw-test".into()],
@@ -683,7 +683,7 @@ fn attach_cleanup_does_not_clear_last_error() {
     );
     assert_eq!(
         reloaded_engine.record().last_error.as_ref().map(|e| e.kind),
-        Some(RecoveryErrorKind::TargetChanged),
+        Some(SnapshotErrorKind::TargetChanged),
         "attach_cleanup must NOT clear last_error"
     );
 
@@ -808,12 +808,12 @@ fn secure_dir_remove_session_dir_refuses_symlink() {
 
 #[test]
 fn record_mut_last_cleanup_is_inmemory_only_and_attach_cleanup_persists() {
-    use catos_system::shared::model::recovery::{
+    use catos_system::snapshot::model::{
         BtrfsFilesystemIdentity, BtrfsSubvolumeIdentity, FstabRootDefinition, RecoveryPlan,
         RECOVERY_PLAN_SCHEMA_VERSION,
     };
-    use catos_system::shared::snapshot_engine::engine::{Engine, EngineOptions};
-    use catos_system::shared::snapshot_engine::store;
+    use catos_system::snapshot::execute::engine::{Engine, EngineOptions};
+    use catos_system::snapshot::store;
     use std::path::PathBuf;
 
     let top = std::env::temp_dir().join(format!(
@@ -856,7 +856,7 @@ fn record_mut_last_cleanup_is_inmemory_only_and_attach_cleanup_persists() {
         },
         target_catos_identity: None,
         boot_layout: Default::default(),
-        boot_consistency: catos_system::shared::snapshot_engine::boot::evaluate_readonly_consistency(
+        boot_consistency: catos_system::snapshot::diagnose::boot::evaluate_readonly_consistency(
             &Default::default(),
         ),
         backup_root_path:
@@ -877,8 +877,8 @@ fn record_mut_last_cleanup_is_inmemory_only_and_attach_cleanup_persists() {
         evidence: vec![],
     };
     let mut plan = plan;
-    plan.plan_digest = catos_system::shared::snapshot_engine::plan::effective_plan_digest(&plan).unwrap();
-    plan.confirmation_token = catos_system::shared::snapshot_engine::plan::build_confirmation_token(
+    plan.plan_digest = catos_system::snapshot::plan::effective_plan_digest(&plan).unwrap();
+    plan.confirmation_token = catos_system::snapshot::plan::build_confirmation_token(
         &plan.plan_id,
         &plan.plan_digest,
         &plan.nonce,

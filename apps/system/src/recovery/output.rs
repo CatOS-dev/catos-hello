@@ -5,12 +5,10 @@
 
 use std::io::Write;
 
-use crate::shared::error::Error;
-use crate::shared::model::recovery::{
-    RecoveryError, RecoveryInspectReport, RecoveryListReport, RecoveryPlan, RecoveryStatusReport,
-    TransactionRecord,
-};
+use crate::recovery::model::{RecoveryInspectReport, RecoveryListReport, RecoveryStatusReport};
 use crate::recovery::Phase3Outcome;
+use crate::shared::error::Error;
+use crate::snapshot::model::{RecoveryPlan, SnapshotError, TransactionRecord};
 
 pub fn render_phase3_json(
     outcome: &Phase3Outcome,
@@ -272,7 +270,7 @@ fn render_plan<W: Write>(out: &mut W, plan: &RecoveryPlan) -> std::io::Result<()
 
 fn render_boot_consistency<W: Write>(
     out: &mut W,
-    report: &crate::shared::model::recovery::BootConsistencyReport,
+    report: &crate::snapshot::model::BootConsistencyReport,
 ) -> std::io::Result<()> {
     writeln!(out, "  boot consistency : {:?}", report.status)?;
     writeln!(
@@ -351,7 +349,7 @@ fn render_status<W: Write>(out: &mut W, report: &RecoveryStatusReport) -> std::i
     render_warnings(out, &report.warnings)
 }
 
-fn render_error<W: Write>(out: &mut W, error: &RecoveryError) -> std::io::Result<()> {
+fn render_error<W: Write>(out: &mut W, error: &SnapshotError) -> std::io::Result<()> {
     writeln!(out, "Recovery error")?;
     writeln!(out, "  kind             : {}", error.kind.code())?;
     writeln!(out, "  message          : {}", error.message)?;
@@ -404,10 +402,11 @@ fn json_envelope(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::shared::model::recovery::{
+    use crate::recovery::model::{RecoveryRecommendation, RecoveryStatusReport};
+    use crate::snapshot::model::{
         BootLayout, BtrfsFilesystemIdentity, BtrfsSubvolumeIdentity, CatosIdentity, CompletedStep,
-        DiskFacts, FstabRootDefinition, RecoveryRecommendation, RecoveryStatusReport,
-        SubvolumeFacts, TransactionState, RECOVERY_PLAN_SCHEMA_VERSION, TX_RECORD_SCHEMA_VERSION,
+        DiskFacts, FstabRootDefinition, SubvolumeFacts, TransactionState,
+        RECOVERY_PLAN_SCHEMA_VERSION, TX_RECORD_SCHEMA_VERSION,
     };
     use std::path::PathBuf;
 
@@ -442,7 +441,7 @@ mod tests {
             },
             target_catos_identity: Some(CatosIdentity::default()),
             boot_layout: BootLayout::default(),
-            boot_consistency: crate::shared::snapshot_engine::boot::evaluate_readonly_consistency(
+            boot_consistency: crate::snapshot::diagnose::boot::evaluate_readonly_consistency(
                 &BootLayout::default(),
             ),
             backup_root_path: "/.catos-recovery/backups/tx-1/root-before".into(),
@@ -477,8 +476,8 @@ mod tests {
 
     #[test]
     fn json_error_envelope_carries_structured_fields() {
-        let error = RecoveryError::new(
-            crate::shared::model::recovery::RecoveryErrorKind::StalePlan,
+        let error = SnapshotError::new(
+            crate::snapshot::model::SnapshotErrorKind::StalePlan,
             "fsid drifted",
         );
         let outcome = Phase3Outcome::Error(Box::new(error));
@@ -561,7 +560,7 @@ mod tests {
                 source_snapshot: None,
             },
             recommendation: RecoveryRecommendation::None,
-            mount_cleanup: Some(crate::shared::model::recovery::CleanupSummary {
+            mount_cleanup: Some(crate::snapshot::model::CleanupSummary {
                 unmounted: vec!["/run/catos-system/sessions/status/root".into()],
                 residual: vec![],
                 all_clean: true,

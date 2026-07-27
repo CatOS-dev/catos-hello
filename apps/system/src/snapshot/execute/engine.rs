@@ -10,7 +10,7 @@
 //! Every transition is persisted *before* the next one starts. The
 //! on-disk record is the source of truth after a crash. On resume
 //! the engine re-reads the record, reconciles it with disk facts
-//! via [`crate::shared::snapshot_engine::state::reconcile_with_disk_facts`], and
+//! via [`crate::snapshot::plan::reconcile::reconcile_with_disk_facts`], and
 //! continues from the reconciled state.
 //!
 //! ## Test-only fault injection
@@ -32,20 +32,23 @@
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::shared::model::recovery::{
-    BtrfsFilesystemIdentity, CompletedStep, DiskFacts, RecoveryError, RecoveryErrorKind,
-    RecoveryPlan, SubvolumeFacts, TransactionPaths, TransactionRecord, TransactionState,
+use crate::snapshot::diagnose::consistency::drift_between;
+use crate::snapshot::diagnose::enumerate as btrfs;
+use crate::snapshot::diagnose::identity::{
+    ensure_target_is_not_running_root, is_protected_recovery_path,
+};
+use crate::snapshot::execute::btrfs as btrfs_ops;
+use crate::snapshot::model::{
+    BtrfsFilesystemIdentity, CompletedStep, DiskFacts, RecoveryPlan, SnapshotError,
+    SnapshotErrorKind, SubvolumeFacts, TransactionPaths, TransactionRecord, TransactionState,
     TX_RECORD_SCHEMA_VERSION,
 };
-use crate::shared::snapshot_engine::confined;
-use crate::shared::snapshot_engine::external as btrfs;
-use crate::shared::snapshot_engine::identity::{
-    drift_between, ensure_target_is_not_running_root, is_protected_recovery_path,
-};
-use crate::shared::snapshot_engine::lock::{lock_file_path, DeviceLock, TransactionLock};
-use crate::shared::snapshot_engine::plan::verify_revert_confirmation_token;
-use crate::shared::snapshot_engine::state::{reconcile_with_disk_facts, resume_checkpoint, AdvanceAction, Intent};
-use crate::shared::snapshot_engine::store;
+use crate::snapshot::plan::reconcile::reconcile_with_disk_facts;
+use crate::snapshot::plan::verify_revert_confirmation_token;
+use crate::snapshot::store;
+use crate::snapshot::transaction::{lock_file_path, TransactionLock};
+use crate::snapshot::transaction::{resume_checkpoint, AdvanceAction, Intent};
+use crate::target::execute::lock::{DeviceLock, DeviceLockError, DeviceLockErrorKind};
 
 /// Engine options. Built by the orchestrator (phase3.rs) before the
 /// engine runs. All paths are absolute; the orchestrator validates
@@ -76,7 +79,7 @@ impl Engine {
     /// Load an existing transaction record from disk for READ-ONLY
     /// access. Used by `status`. Does NOT acquire the per-FSID lock;
     /// concurrent write transactions are not blocked.
-    pub fn load(opts: EngineOptions, transaction_id: &str) -> Result<Self, RecoveryError> {
+    pub fn load(opts: EngineOptions, transaction_id: &str) -> Result<Self, SnapshotError> {
         let state_path = top_level_state_path(&opts.top_level_mount, transaction_id);
         let record = store::load_record(&state_path)?;
         ensure_target_matches_plan(&record.plan, &opts.validated_filesystem)?;
@@ -94,14 +97,14 @@ impl Engine {
     /// another process holds the lock for the same FSID — the call
     /// does NOT block.
     //
-    // Local allow: RecoveryError's size is the existing Phase-3
+    // Local allow: SnapshotError's size is the existing Phase-3
     // baseline trade-off (the task permits keeping structured
     // operator-facing fields rather than Boxing them away). All
-    // other Result<_, RecoveryError> returns in this crate carry the
+    // other Result<_, SnapshotError> returns in this crate carry the
     // same warning; this new entry point inherits the same
     // allowance rather than shrink the error type.
     //
-    // Boxing alternative considered and rejected: `Box<RecoveryError>`
+    // Boxing alternative considered and rejected: `Box<SnapshotError>`
     // would silence this warning but would force every caller in
     // phase3.rs and main.rs to dereference the box to read
     // `last_error.kind`, `last_error.resume_possible`, etc. — fields
@@ -112,7 +115,7 @@ impl Engine {
     pub fn load_for_write(
         opts: EngineOptions,
         transaction_id: &str,
-    ) -> Result<Self, RecoveryError> {
+    ) -> Result<Self, SnapshotError> {
         let (record, lock, device_lock) = load_record_under_lock(&opts, transaction_id)?;
         let mut engine = Self {
             opts,
@@ -141,7 +144,7 @@ impl Engine {
         opts: EngineOptions,
         transaction_id: &str,
         presented_confirmation: &str,
-    ) -> Result<Self, RecoveryError> {
+    ) -> Result<Self, SnapshotError> {
         let (record, lock, device_lock) = load_record_under_lock(&opts, transaction_id)?;
         let mut engine = Self {
             opts,
@@ -161,7 +164,7 @@ impl Engine {
         )?;
         if engine.record.state == TransactionState::FailedManualIntervention {
             return Err(engine.failure(
-                RecoveryErrorKind::RootSwitchConflict,
+                SnapshotErrorKind::RootSwitchConflict,
                 "transaction facts require manual intervention; explicit revert is not safe",
                 false,
                 false,
@@ -177,7 +180,7 @@ impl Engine {
     /// read-only and drift-tolerant) in that it MUST persist the
     /// reconciled state, because `drive()` and `revert()` consult
     /// `record.state` to pick their next action.
-    fn reconcile_state_for_write(&mut self, reason: &str) -> Result<(), RecoveryError> {
+    fn reconcile_state_for_write(&mut self, reason: &str) -> Result<(), SnapshotError> {
         let facts = self.observe_disk_facts();
         let checkpoint =
             resume_checkpoint(&self.record).unwrap_or(TransactionState::FailedManualIntervention);
@@ -199,12 +202,14 @@ impl Engine {
     /// BEFORE the initial record is written, so two concurrent
     /// `apply` invocations against the same FSID cannot both reach
     /// the persist step.
-    pub fn begin(opts: EngineOptions, plan: RecoveryPlan) -> Result<Self, RecoveryError> {
+    pub fn begin(opts: EngineOptions, plan: RecoveryPlan) -> Result<Self, SnapshotError> {
+        crate::snapshot::verify::validate_plan_shape(&plan)?;
         let transaction_id = plan.plan_id.clone();
         ensure_target_matches_plan(&plan, &opts.validated_filesystem)?;
         let fsid = opts.validated_filesystem.fsid.clone();
         let lock = acquire_lock_guard(&opts.top_level_mount, &fsid).map_err(|e| *e)?;
-        let device_lock = DeviceLock::try_acquire_if_block_device(&opts.device_path)?;
+        let device_lock = DeviceLock::try_acquire_if_block_device(&opts.device_path)
+            .map_err(snapshot_device_lock_error)?;
         let plan_path = top_level_plan_path(&opts.top_level_mount, &transaction_id);
         store::persist_plan(&plan_path, &plan)?;
         let now = now_unix();
@@ -251,8 +256,8 @@ impl Engine {
     ///   cleanup actually happened.
     pub fn attach_cleanup(
         &mut self,
-        summary: crate::shared::model::recovery::CleanupSummary,
-    ) -> Result<(), RecoveryError> {
+        summary: crate::snapshot::model::CleanupSummary,
+    ) -> Result<(), SnapshotError> {
         self.record.last_cleanup = Some(summary);
         self.record.last_updated_unix = now_unix();
         self.persist_record("attach-cleanup")
@@ -281,7 +286,7 @@ impl Engine {
     /// and `resume` observe `failed_recoverable` /
     /// `failed_manual_intervention` rather than the last
     /// successfully-persisted pre-failure state.
-    pub fn drive(&mut self) -> Result<TransactionState, RecoveryError> {
+    pub fn drive(&mut self) -> Result<TransactionState, SnapshotError> {
         match self.drive_inner() {
             Ok(state) => Ok(state),
             Err(error) => {
@@ -292,12 +297,12 @@ impl Engine {
         }
     }
 
-    // Private helper: returns `Box<RecoveryError>` so the result fits
+    // Private helper: returns `Box<SnapshotError>` so the result fits
     // in a single machine word. Boxing here has zero API cost (the
     // caller is `drive`, which immediately dereferences via
     // `attach_transaction_context`) and silences clippy's
     // large-result lint without weakening structured error info.
-    fn drive_inner(&mut self) -> Result<TransactionState, Box<RecoveryError>> {
+    fn drive_inner(&mut self) -> Result<TransactionState, Box<SnapshotError>> {
         loop {
             let state = self.record.state;
             if state.is_terminal() {
@@ -318,7 +323,7 @@ impl Engine {
     /// On failure, the failure state is persisted before the error
     /// is returned.
     // Public API entry point. Local allow: this is the only public
-    // signature that still returns `Result<_, RecoveryError>`
+    // signature that still returns `Result<_, SnapshotError>`
     // unboxed (apart from `drive`, `begin`, `load_for_write`,
     // `load`). Boxing here would change the public API consumed by
     // phase3.rs::run_revert, which surfaces the error via the JSON
@@ -330,7 +335,7 @@ impl Engine {
     // unboxed returns are the public entry points the JSON envelope
     // depends on.
     #[allow(clippy::result_large_err)]
-    pub fn revert(&mut self) -> Result<TransactionState, RecoveryError> {
+    pub fn revert(&mut self) -> Result<TransactionState, SnapshotError> {
         match self.revert_inner() {
             Ok(state) => Ok(state),
             Err(error) => {
@@ -341,9 +346,9 @@ impl Engine {
         }
     }
 
-    // Private helper: same Box<RecoveryError> rationale as
+    // Private helper: same Box<SnapshotError> rationale as
     // `drive_inner`. Caller (`revert`) immediately dereferences.
-    fn revert_inner(&mut self) -> Result<TransactionState, Box<RecoveryError>> {
+    fn revert_inner(&mut self) -> Result<TransactionState, Box<SnapshotError>> {
         let state = self.record.state;
         if state == TransactionState::Reverted {
             return Ok(state);
@@ -413,13 +418,14 @@ impl Engine {
     ///   reverse swap has NOT happened — perform it, then persist
     ///   `Reverted`.
     /// * otherwise (ambiguous), surface `FailedManualIntervention`.
-    // Private helper: same Box<RecoveryError> rationale as
+    // Private helper: same Box<SnapshotError> rationale as
     // `revert_inner`.
-    fn resume_reverting(&mut self) -> Result<TransactionState, Box<RecoveryError>> {
+    fn resume_reverting(&mut self) -> Result<TransactionState, Box<SnapshotError>> {
         let facts = self.observe_disk_facts();
         let reverse_done =
-            crate::shared::snapshot_engine::state::reverse_swap_appears_done(&self.record.plan, &facts);
-        let swap_done = crate::shared::snapshot_engine::state::swap_appears_done(&self.record.plan, &facts);
+            crate::snapshot::plan::reconcile::reverse_swap_appears_done(&self.record.plan, &facts);
+        let swap_done =
+            crate::snapshot::plan::reconcile::swap_appears_done(&self.record.plan, &facts);
         if reverse_done {
             self.persist_reverted("revert-resume-after-reverse-swap")?;
             return Ok(TransactionState::Reverted);
@@ -430,7 +436,7 @@ impl Engine {
             return Ok(TransactionState::Reverted);
         }
         Err(Box::new(self.failure(
-            RecoveryErrorKind::RootSwitchConflict,
+            SnapshotErrorKind::RootSwitchConflict,
             "cannot resume revert: disk facts are ambiguous about whether the reverse swap happened",
             false,
             false,
@@ -527,7 +533,7 @@ impl Engine {
             )
     }
 
-    fn terminal_drift_error(&self, facts: &DiskFacts) -> RecoveryError {
+    fn terminal_drift_error(&self, facts: &DiskFacts) -> SnapshotError {
         let mut msg = String::from("terminal state drift detected: ");
         if facts.filesystem_fsid != self.record.plan.filesystem.fsid {
             msg.push_str(&format!(
@@ -539,7 +545,7 @@ impl Engine {
                 "active root, staging, backup, or source snapshot identity no longer matches the persisted record",
             );
         }
-        let mut err = RecoveryError::new(RecoveryErrorKind::TargetChanged, msg);
+        let mut err = SnapshotError::new(SnapshotErrorKind::TargetChanged, msg);
         err.transaction_id = Some(self.record.transaction_id.clone());
         err.current_state = Some(self.record.state);
         err.manual_intervention_required = true;
@@ -553,7 +559,7 @@ impl Engine {
     // Action implementations
     // -----------------------------------------------------------------
 
-    fn perform_action(&mut self, action: AdvanceAction) -> Result<(), RecoveryError> {
+    fn perform_action(&mut self, action: AdvanceAction) -> Result<(), SnapshotError> {
         match action {
             AdvanceAction::Preflight => self.do_preflight(),
             AdvanceAction::AcquireLock => self.do_acquire_lock(),
@@ -570,13 +576,13 @@ impl Engine {
     }
 
     /// Re-check the plan's identity against the current disk reality.
-    fn do_preflight(&mut self) -> Result<(), RecoveryError> {
+    fn do_preflight(&mut self) -> Result<(), SnapshotError> {
         let plan = &self.record.plan;
         if is_protected_recovery_path(&plan.current_root.path)
             || is_protected_recovery_path(&plan.source_snapshot.path)
         {
             return Err(self.failure(
-                RecoveryErrorKind::TargetChanged,
+                SnapshotErrorKind::TargetChanged,
                 "refusing to plan against the protected /.catos-recovery path",
                 true,
                 false,
@@ -596,7 +602,7 @@ impl Engine {
         }
         if !source_snapshot.read_only {
             return Err(self.failure(
-                RecoveryErrorKind::SnapshotNotReadonly,
+                SnapshotErrorKind::SnapshotNotReadonly,
                 "source snapshot is no longer readonly",
                 true,
                 false,
@@ -609,7 +615,7 @@ impl Engine {
             // current root. We approximate by comparing FSID values
             // observed at the top-level mount.
             return Err(self.failure(
-                RecoveryErrorKind::SnapshotBelongsToAnotherFsid,
+                SnapshotErrorKind::SnapshotBelongsToAnotherFsid,
                 "source snapshot belongs to a different btrfs filesystem",
                 false,
                 true,
@@ -625,7 +631,7 @@ impl Engine {
         let staging_path = self.top_level_path(&plan.staging_root_path);
         if backup_path.exists() {
             return Err(self.failure(
-                RecoveryErrorKind::BackupPathOccupied,
+                SnapshotErrorKind::BackupPathOccupied,
                 format!("backup path {} already exists", backup_path.display()),
                 true,
                 true,
@@ -633,7 +639,7 @@ impl Engine {
         }
         if staging_path.exists() {
             return Err(self.failure(
-                RecoveryErrorKind::StagingPathOccupied,
+                SnapshotErrorKind::StagingPathOccupied,
                 format!("staging path {} already exists", staging_path.display()),
                 true,
                 true,
@@ -652,10 +658,10 @@ impl Engine {
     /// We DO verify the lock guard is held: a code bug that constructs
     /// a write-engine without the lock would otherwise silently
     /// regress to the pre-Group-1 race.
-    fn do_acquire_lock(&mut self) -> Result<(), RecoveryError> {
+    fn do_acquire_lock(&mut self) -> Result<(), SnapshotError> {
         if self.lock.is_none() {
             return Err(self.failure(
-                RecoveryErrorKind::SyscallFailed,
+                SnapshotErrorKind::SyscallFailed,
                 "engine invariant violation: write-path action reached do_acquire_lock \
                  without a held TransactionLock guard",
                 false,
@@ -666,11 +672,11 @@ impl Engine {
         Ok(())
     }
 
-    fn do_create_backup(&mut self) -> Result<(), RecoveryError> {
+    fn do_create_backup(&mut self) -> Result<(), SnapshotError> {
         let plan = &self.record.plan;
         #[cfg(feature = "recovery_fault_injection")]
         self.maybe_inject_before_fault("create_backup");
-        confined::create_btrfs_snapshot(
+        btrfs_ops::create_btrfs_snapshot(
             &self.opts.top_level_mount,
             &plan.current_root.path,
             &plan.backup_root_path,
@@ -688,11 +694,11 @@ impl Engine {
         Ok(())
     }
 
-    fn do_create_replacement(&mut self) -> Result<(), RecoveryError> {
+    fn do_create_replacement(&mut self) -> Result<(), SnapshotError> {
         let plan = &self.record.plan;
         #[cfg(feature = "recovery_fault_injection")]
         self.maybe_inject_before_fault("create_replacement");
-        confined::create_btrfs_snapshot(
+        btrfs_ops::create_btrfs_snapshot(
             &self.opts.top_level_mount,
             &plan.source_snapshot.path,
             &plan.staging_root_path,
@@ -715,11 +721,11 @@ impl Engine {
     /// a single atomic metadata transaction that exchanges two
     /// subvolumes in place, regardless of whether either is mounted
     /// elsewhere.
-    fn do_swap_roots(&mut self) -> Result<(), RecoveryError> {
+    fn do_swap_roots(&mut self) -> Result<(), SnapshotError> {
         let plan = &self.record.plan;
         #[cfg(feature = "recovery_fault_injection")]
         self.maybe_inject_before_fault("swap_roots");
-        confined::exchange_rooted_paths(
+        btrfs_ops::exchange_rooted_paths(
             &self.opts.top_level_mount,
             &plan.current_root.path,
             &plan.staging_root_path,
@@ -737,7 +743,7 @@ impl Engine {
         Ok(())
     }
 
-    fn do_verify_new_root(&mut self) -> Result<(), RecoveryError> {
+    fn do_verify_new_root(&mut self) -> Result<(), SnapshotError> {
         let plan = &self.record.plan;
         let new_root = self.mount_of(&plan.current_root.path);
         // The new root must look like a CatOS root.
@@ -746,7 +752,7 @@ impl Engine {
         {
             return Err(self
                 .failure(
-                    RecoveryErrorKind::TargetChanged,
+                    SnapshotErrorKind::TargetChanged,
                     "new root does not contain /etc/os-release or /usr/lib/os-release",
                     true,
                     true,
@@ -756,7 +762,7 @@ impl Engine {
         if !new_root.join("usr/lib/modules").exists() {
             return Err(self
                 .failure(
-                    RecoveryErrorKind::TargetChanged,
+                    SnapshotErrorKind::TargetChanged,
                     "new root does not contain /usr/lib/modules",
                     true,
                     true,
@@ -773,7 +779,7 @@ impl Engine {
     // writes. This engine must never call a bootloader tool or write
     // `/boot`, the ESP, UKIs, initramfs images, or firmware entries.
 
-    fn do_verify_final(&mut self) -> Result<(), RecoveryError> {
+    fn do_verify_final(&mut self) -> Result<(), SnapshotError> {
         // Re-run the new-root verification as a final sanity check.
         self.do_verify_new_root()?;
         // The transition to Verifying was already done by
@@ -786,11 +792,11 @@ impl Engine {
     /// Reverse the root swap. The active root and the staging path
     /// (which now contains the pre-recovery root) are exchanged
     /// again.
-    fn swap_roots_back(&mut self) -> Result<(), RecoveryError> {
+    fn swap_roots_back(&mut self) -> Result<(), SnapshotError> {
         let plan = &self.record.plan;
         #[cfg(feature = "recovery_fault_injection")]
         self.maybe_inject_before_fault("swap_roots_back");
-        confined::exchange_rooted_paths(
+        btrfs_ops::exchange_rooted_paths(
             &self.opts.top_level_mount,
             &plan.current_root.path,
             &plan.staging_root_path,
@@ -809,7 +815,7 @@ impl Engine {
     // State persistence helpers
     // -----------------------------------------------------------------
 
-    fn transition(&mut self, intent: Intent, description: &str) -> Result<(), RecoveryError> {
+    fn transition(&mut self, intent: Intent, description: &str) -> Result<(), SnapshotError> {
         let next = self.record.state.transition(intent).map_err(|mut e| {
             e.transaction_id = Some(self.record.transaction_id.clone());
             e
@@ -827,7 +833,7 @@ impl Engine {
         Ok(())
     }
 
-    fn persist_reverted(&mut self, description: &str) -> Result<(), RecoveryError> {
+    fn persist_reverted(&mut self, description: &str) -> Result<(), SnapshotError> {
         // Transition from Reverting to Reverted.
         let now = now_unix();
         self.record.state = TransactionState::Reverted;
@@ -841,7 +847,7 @@ impl Engine {
         Ok(())
     }
 
-    fn persist_record(&mut self, reason: &str) -> Result<(), RecoveryError> {
+    fn persist_record(&mut self, reason: &str) -> Result<(), SnapshotError> {
         let state_path =
             top_level_state_path(&self.opts.top_level_mount, &self.record.transaction_id);
         let mut err = match store::persist_record(&state_path, &self.record) {
@@ -853,7 +859,7 @@ impl Engine {
         Err(err)
     }
 
-    fn remove_record(&mut self) -> Result<(), RecoveryError> {
+    fn remove_record(&mut self) -> Result<(), SnapshotError> {
         let state_path =
             top_level_state_path(&self.opts.top_level_mount, &self.record.transaction_id);
         store::remove_record(&state_path)?;
@@ -862,12 +868,12 @@ impl Engine {
 
     fn failure(
         &self,
-        kind: RecoveryErrorKind,
+        kind: SnapshotErrorKind,
         message: impl Into<String>,
         resume_possible: bool,
         revert_possible: bool,
-    ) -> RecoveryError {
-        let mut error = RecoveryError::new(kind, message);
+    ) -> SnapshotError {
+        let mut error = SnapshotError::new(kind, message);
         error.transaction_id = Some(self.record.transaction_id.clone());
         error.current_state = Some(self.record.state);
         error.completed_steps = Box::new(
@@ -886,10 +892,10 @@ impl Engine {
 
     fn failure_from(
         &self,
-        mut error: RecoveryError,
+        mut error: SnapshotError,
         resume_possible: bool,
         revert_possible: bool,
-    ) -> RecoveryError {
+    ) -> SnapshotError {
         error.transaction_id = Some(self.record.transaction_id.clone());
         error.current_state = Some(self.record.state);
         error.completed_steps = Box::new(
@@ -1024,11 +1030,11 @@ impl Engine {
     // Failure-state persistence
     // -----------------------------------------------------------------
 
-    /// Stamp a freshly-built `RecoveryError` with the engine's
+    /// Stamp a freshly-built `SnapshotError` with the engine's
     /// transaction id, current state, completed-step history, and
     /// freshly observed disk facts so the persisted record carries
     /// the full context an operator needs to triage.
-    fn attach_transaction_context(&self, mut error: RecoveryError) -> RecoveryError {
+    fn attach_transaction_context(&self, mut error: SnapshotError) -> SnapshotError {
         if error.transaction_id.is_none() {
             error.transaction_id = Some(self.record.transaction_id.clone());
         }
@@ -1058,7 +1064,7 @@ impl Engine {
     /// returned with `record_persistence_error` populated so the
     /// operator sees BOTH the operation failure and the persistence
     /// failure.
-    fn persist_failure_state(&mut self, mut error: RecoveryError) -> RecoveryError {
+    fn persist_failure_state(&mut self, mut error: SnapshotError) -> SnapshotError {
         let intent = if error.manual_intervention_required || !error.resume_possible {
             Intent::FailManual
         } else {
@@ -1098,7 +1104,7 @@ impl Engine {
     /// provide real btrfs subvolume identity. Real operation failures
     /// remain covered by the QEMU acceptance scenarios.
     #[cfg(feature = "test-helpers")]
-    pub fn persist_failure_for_test(&mut self, error: RecoveryError) -> RecoveryError {
+    pub fn persist_failure_for_test(&mut self, error: SnapshotError) -> SnapshotError {
         self.persist_failure_state(error)
     }
 }
@@ -1181,12 +1187,12 @@ fn top_level_plan_path(top_level_mount: &Path, transaction_id: &str) -> PathBuf 
 fn ensure_target_matches_plan(
     plan: &RecoveryPlan,
     observed: &BtrfsFilesystemIdentity,
-) -> Result<(), RecoveryError> {
+) -> Result<(), SnapshotError> {
     if plan.filesystem.fsid != observed.fsid
         || plan.filesystem.device_major_minor != observed.device_major_minor
     {
-        return Err(RecoveryError::new(
-            RecoveryErrorKind::StalePlan,
+        return Err(SnapshotError::new(
+            SnapshotErrorKind::StalePlan,
             format!(
                 "target filesystem identity changed: plan fsid={} major:minor={}, observed fsid={} major:minor={}",
                 plan.filesystem.fsid,
@@ -1203,15 +1209,24 @@ fn ensure_target_matches_plan(
 /// acquire the non-blocking exclusive lock. Returns a guard whose Drop releases. Used by
 /// [`Engine::begin`] and [`Engine::load_for_write`].
 //
-// Private free helper. Returns `Box<RecoveryError>` for the same
+// Private free helper. Returns `Box<SnapshotError>` for the same
 // reason as `drive_inner` / `revert_inner`: callers (`Engine::begin`
 // and `Engine::load_for_write`) propagate via `?` and surface the
 // unboxed error to their own callers, so the box never escapes the
 // engine module.
+fn snapshot_device_lock_error(error: DeviceLockError) -> SnapshotError {
+    let kind = if error.kind == DeviceLockErrorKind::Busy {
+        SnapshotErrorKind::TransactionAlreadyActive
+    } else {
+        SnapshotErrorKind::SyscallFailed
+    };
+    SnapshotError::new(kind, error.message)
+}
+
 fn acquire_lock_guard(
     top_level_mount: &Path,
     fsid: &str,
-) -> Result<TransactionLock, Box<RecoveryError>> {
+) -> Result<TransactionLock, Box<SnapshotError>> {
     let lock_path = lock_file_path(top_level_mount, fsid);
     TransactionLock::try_acquire(&lock_path, fsid).map_err(Box::new)
 }
@@ -1225,10 +1240,11 @@ fn acquire_lock_guard(
 fn load_record_under_lock(
     opts: &EngineOptions,
     transaction_id: &str,
-) -> Result<(TransactionRecord, TransactionLock, Option<DeviceLock>), RecoveryError> {
+) -> Result<(TransactionRecord, TransactionLock, Option<DeviceLock>), SnapshotError> {
     let fsid = opts.validated_filesystem.fsid.clone();
     let lock = acquire_lock_guard(&opts.top_level_mount, &fsid).map_err(|error| *error)?;
-    let device_lock = DeviceLock::try_acquire_if_block_device(&opts.device_path)?;
+    let device_lock = DeviceLock::try_acquire_if_block_device(&opts.device_path)
+        .map_err(snapshot_device_lock_error)?;
     let state_path = top_level_state_path(&opts.top_level_mount, transaction_id);
     let record = store::load_record(&state_path)?;
     ensure_target_matches_plan(&record.plan, &opts.validated_filesystem)?;

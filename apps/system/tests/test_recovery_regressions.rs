@@ -1,15 +1,16 @@
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use catos_system::shared::model::recovery::{
+use catos_system::snapshot::model::{
     BootLayout, BtrfsFilesystemIdentity, BtrfsSubvolumeIdentity, CompletedStep, DiskFacts,
-    FstabRootDefinition, RecoveryError, RecoveryErrorKind, RecoveryPlan, SubvolumeFacts,
+    FstabRootDefinition, SnapshotError, SnapshotErrorKind, RecoveryPlan, SubvolumeFacts,
     TransactionRecord, TransactionState, RECOVERY_PLAN_SCHEMA_VERSION, TX_RECORD_SCHEMA_VERSION,
 };
 use catos_system::recovery::{exit_code_for, Phase3Outcome};
-use catos_system::shared::snapshot_engine::engine::{Engine, EngineOptions};
-use catos_system::shared::snapshot_engine::lock::{lock_file_path, TransactionLock};
-use catos_system::shared::snapshot_engine::state::{reconcile_with_disk_facts, resume_checkpoint};
+use catos_system::snapshot::execute::engine::{Engine, EngineOptions};
+use catos_system::snapshot::transaction::{lock_file_path, TransactionLock};
+use catos_system::snapshot::plan::reconcile::reconcile_with_disk_facts;
+use catos_system::snapshot::transaction::resume_checkpoint;
 
 const ID: &str = "tx-00000000000000000000000000000001";
 const FSID: &str = "11111111-2222-3333-4444-555555555555";
@@ -67,7 +68,7 @@ fn plan() -> RecoveryPlan {
             evidence: vec![],
         },
         target_catos_identity: None,
-        boot_consistency: catos_system::shared::snapshot_engine::boot::evaluate_readonly_consistency(&boot_layout),
+        boot_consistency: catos_system::snapshot::diagnose::boot::evaluate_readonly_consistency(&boot_layout),
         boot_layout,
         backup_root_path: format!("/.catos-recovery/backups/{ID}/root-before"),
         staging_root_path: format!("/.catos-recovery/staging/{ID}/new-root"),
@@ -133,8 +134,8 @@ fn record(state: TransactionState) -> TransactionRecord {
             description: "backup completed".into(),
         }],
         last_error: Some(
-            RecoveryError::new(
-                RecoveryErrorKind::BtrfsToolFailed,
+            SnapshotError::new(
+                SnapshotErrorKind::BtrfsToolFailed,
                 "replacement snapshot failed",
             )
             .with_state(TransactionState::BackupCreated),
@@ -159,7 +160,7 @@ fn resume_cannot_exit_success_with_a_failure_state() {
     let outcome = Phase3Outcome::Resume {
         record,
         final_state: TransactionState::FailedRecoverable,
-        cleanup: catos_system::shared::model::recovery::CleanupSummary {
+        cleanup: catos_system::snapshot::model::CleanupSummary {
             unmounted: Vec::new(),
             residual: Vec::new(),
             all_clean: true,
@@ -263,5 +264,5 @@ fn write_lock_is_checked_before_transaction_record_is_read() {
         Ok(_) => panic!("writer loaded transaction state while the FSID lock was held"),
         Err(error) => error,
     };
-    assert_eq!(error.kind, RecoveryErrorKind::TransactionAlreadyActive);
+    assert_eq!(error.kind, SnapshotErrorKind::TransactionAlreadyActive);
 }

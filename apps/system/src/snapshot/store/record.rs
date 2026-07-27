@@ -22,19 +22,20 @@
 //!
 //! Schema versioning: every record carries `schema_version`. The
 //! loader rejects unknown future versions and surfaces
-//! [`RecoveryErrorKind::UnsupportedTransactionSchema`] so the operator
+//! [`SnapshotErrorKind::UnsupportedTransactionSchema`] so the operator
 //! knows to upgrade their tooling.
 
 use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
-use crate::shared::model::recovery::{
-    RecoveryError, RecoveryErrorKind, TransactionRecord, RECOVERY_PLAN_SCHEMA_VERSION,
+use crate::snapshot::diagnose::identity::validate_recovery_id;
+use crate::snapshot::model::fs_to_snapshot;
+use crate::snapshot::model::{
+    SnapshotError, SnapshotErrorKind, TransactionRecord, RECOVERY_PLAN_SCHEMA_VERSION,
     TX_RECORD_SCHEMA_VERSION,
 };
-use crate::shared::snapshot_engine::confined::fs_to_recovery;
-use crate::shared::snapshot_engine::identity::{validate_plan_shape, validate_recovery_id};
+use crate::snapshot::verify::validate_plan_shape;
 use crate::target::execute::confined;
 
 /// Minimal view used to peek at a record's `schema_version` field
@@ -50,7 +51,7 @@ struct SchemaVersionProbe {
 /// Load a transaction record from `path`. Performs schema validation
 /// and surfaces a structured error for missing, corrupt, or
 /// future-version files.
-pub fn load_record(path: &Path) -> Result<TransactionRecord, RecoveryError> {
+pub fn load_record(path: &Path) -> Result<TransactionRecord, SnapshotError> {
     let body = confined::read_file(path)?;
     // Peek at schema_version BEFORE typed deserialization. A v1 record
     // whose embedded `TransactionState` enum lost a variant would
@@ -59,15 +60,15 @@ pub fn load_record(path: &Path) -> Result<TransactionRecord, RecoveryError> {
     let probe: SchemaVersionProbe = match serde_json::from_slice(&body) {
         Ok(probe) => probe,
         Err(error) => {
-            return Err(RecoveryError::new(
-                RecoveryErrorKind::StateRecordCorrupt,
+            return Err(SnapshotError::new(
+                SnapshotErrorKind::StateRecordCorrupt,
                 format!("cannot parse {}: {error}", path.display()),
             ));
         }
     };
     if probe.schema_version != TX_RECORD_SCHEMA_VERSION {
-        return Err(RecoveryError::new(
-            RecoveryErrorKind::UnsupportedTransactionSchema,
+        return Err(SnapshotError::new(
+            SnapshotErrorKind::UnsupportedTransactionSchema,
             format!(
                 "transaction record {} has unsupported schema_version: found {}, supported {}; \
                  recreate the transaction with the current tooling",
@@ -80,8 +81,8 @@ pub fn load_record(path: &Path) -> Result<TransactionRecord, RecoveryError> {
     let record: TransactionRecord = match serde_json::from_slice(&body) {
         Ok(record) => record,
         Err(error) => {
-            return Err(RecoveryError::new(
-                RecoveryErrorKind::StateRecordCorrupt,
+            return Err(SnapshotError::new(
+                SnapshotErrorKind::StateRecordCorrupt,
                 format!("cannot parse {}: {error}", path.display()),
             ));
         }
@@ -89,8 +90,8 @@ pub fn load_record(path: &Path) -> Result<TransactionRecord, RecoveryError> {
     validate_recovery_id(&record.transaction_id)?;
     validate_plan_shape(&record.plan)?;
     if record.transaction_id != record.plan.plan_id {
-        return Err(RecoveryError::new(
-            RecoveryErrorKind::StateRecordCorrupt,
+        return Err(SnapshotError::new(
+            SnapshotErrorKind::StateRecordCorrupt,
             "transaction id does not match embedded plan id",
         ));
     }
@@ -99,10 +100,10 @@ pub fn load_record(path: &Path) -> Result<TransactionRecord, RecoveryError> {
 
 /// Atomically persist a transaction record. See module docs for the
 /// protocol. The parent directory is created with `0o700` if missing.
-pub fn persist_record(path: &Path, record: &TransactionRecord) -> Result<(), RecoveryError> {
+pub fn persist_record(path: &Path, record: &TransactionRecord) -> Result<(), SnapshotError> {
     if record.schema_version != TX_RECORD_SCHEMA_VERSION {
-        return Err(RecoveryError::new(
-            RecoveryErrorKind::UnsupportedTransactionSchema,
+        return Err(SnapshotError::new(
+            SnapshotErrorKind::UnsupportedTransactionSchema,
             format!(
                 "cannot persist transaction schema {}; supported {}",
                 record.schema_version, TX_RECORD_SCHEMA_VERSION
@@ -112,8 +113,8 @@ pub fn persist_record(path: &Path, record: &TransactionRecord) -> Result<(), Rec
     validate_recovery_id(&record.transaction_id)?;
     validate_plan_shape(&record.plan)?;
     if record.transaction_id != record.plan.plan_id {
-        return Err(RecoveryError::new(
-            RecoveryErrorKind::StateRecordCorrupt,
+        return Err(SnapshotError::new(
+            SnapshotErrorKind::StateRecordCorrupt,
             "transaction id does not match embedded plan id",
         ));
     }
@@ -122,8 +123,8 @@ pub fn persist_record(path: &Path, record: &TransactionRecord) -> Result<(), Rec
         .join(&record.transaction_id)
         .join("state.json");
     if !path.ends_with(&expected_suffix) {
-        return Err(RecoveryError::new(
-            RecoveryErrorKind::UnsafeRecoveryPath,
+        return Err(SnapshotError::new(
+            SnapshotErrorKind::UnsafeRecoveryPath,
             format!(
                 "state path {} does not match canonical transaction path {}",
                 path.display(),
@@ -132,15 +133,15 @@ pub fn persist_record(path: &Path, record: &TransactionRecord) -> Result<(), Rec
         ));
     }
     path.parent().ok_or_else(|| {
-        RecoveryError::new(
-            RecoveryErrorKind::UnsafeRecoveryPath,
+        SnapshotError::new(
+            SnapshotErrorKind::UnsafeRecoveryPath,
             format!("record path {} has no parent directory", path.display()),
         )
     })?;
 
     let json = serde_json::to_vec_pretty(record).map_err(|e| {
-        RecoveryError::new(
-            RecoveryErrorKind::StateRecordCorrupt,
+        SnapshotError::new(
+            SnapshotErrorKind::StateRecordCorrupt,
             format!("cannot serialise record: {e}"),
         )
     })?;
@@ -154,20 +155,20 @@ pub fn persist_record(path: &Path, record: &TransactionRecord) -> Result<(), Rec
 /// apply and is best left alone.
 pub fn list_records(
     transactions_dir: &Path,
-) -> (Vec<(PathBuf, TransactionRecord)>, Vec<RecoveryError>) {
+) -> (Vec<(PathBuf, TransactionRecord)>, Vec<SnapshotError>) {
     let mut ok = Vec::new();
     let mut errs = Vec::new();
     let entries = match confined::list_directory_names(transactions_dir) {
         Ok(entries) => entries,
         Err(error) => {
-            errs.push(fs_to_recovery(error));
+            errs.push(fs_to_snapshot(error));
             return (ok, errs);
         }
     };
     for name in entries {
         let Some(id) = name.to_str() else {
-            errs.push(RecoveryError::new(
-                RecoveryErrorKind::InvalidRecoveryId,
+            errs.push(SnapshotError::new(
+                SnapshotErrorKind::InvalidRecoveryId,
                 "transaction directory name is not valid UTF-8",
             ));
             continue;
@@ -181,7 +182,7 @@ pub fn list_records(
         match load_record(&state_file) {
             Ok(record) => ok.push((entry_path, record)),
             Err(error) => {
-                if error.kind != RecoveryErrorKind::TransactionNotFound {
+                if error.kind != SnapshotErrorKind::TransactionNotFound {
                     errs.push(error);
                 }
             }
@@ -194,7 +195,7 @@ pub fn list_records(
 /// no persistent writes behind. Does NOT remove backup or staging
 /// subvolumes — those are owned by btrfs-progs and managed by the
 /// engine.
-pub fn remove_record(path: &Path) -> Result<(), RecoveryError> {
+pub fn remove_record(path: &Path) -> Result<(), SnapshotError> {
     Ok(confined::remove_file(path)?)
 }
 
@@ -202,23 +203,23 @@ pub fn remove_record(path: &Path) -> Result<(), RecoveryError> {
 /// plan` before any transaction exists).
 pub fn persist_plan(
     path: &Path,
-    plan: &crate::shared::model::recovery::RecoveryPlan,
-) -> Result<(), RecoveryError> {
+    plan: &crate::snapshot::model::RecoveryPlan,
+) -> Result<(), SnapshotError> {
     validate_plan_shape(plan)?;
     let expected_suffix = PathBuf::from(".catos-recovery")
         .join("transactions")
         .join(&plan.plan_id)
         .join("plan.json");
     if !path.ends_with(&expected_suffix) {
-        return Err(RecoveryError::new(
-            RecoveryErrorKind::UnsafeRecoveryPath,
+        return Err(SnapshotError::new(
+            SnapshotErrorKind::UnsafeRecoveryPath,
             "plan path does not match canonical transaction layout",
         ));
     }
 
     let json = serde_json::to_vec_pretty(plan).map_err(|e| {
-        RecoveryError::new(
-            RecoveryErrorKind::StateRecordCorrupt,
+        SnapshotError::new(
+            SnapshotErrorKind::StateRecordCorrupt,
             format!("cannot serialise plan: {e}"),
         )
     })?;
@@ -226,7 +227,7 @@ pub fn persist_plan(
     Ok(confined::atomic_write(path, &json, 0o600)?)
 }
 
-pub fn load_plan(path: &Path) -> Result<crate::shared::model::recovery::RecoveryPlan, RecoveryError> {
+pub fn load_plan(path: &Path) -> Result<crate::snapshot::model::RecoveryPlan, SnapshotError> {
     let body = if confined::is_confined_recovery_path(path) {
         confined::read_file(path)?
     } else {
@@ -240,8 +241,8 @@ pub fn load_plan(path: &Path) -> Result<crate::shared::model::recovery::Recovery
     let value: serde_json::Value = match serde_json::from_slice(&body) {
         Ok(value) => value,
         Err(error) => {
-            return Err(RecoveryError::new(
-                RecoveryErrorKind::StateRecordCorrupt,
+            return Err(SnapshotError::new(
+                SnapshotErrorKind::StateRecordCorrupt,
                 format!("cannot parse plan {}: {error}", path.display()),
             ));
         }
@@ -257,8 +258,8 @@ pub fn load_plan(path: &Path) -> Result<crate::shared::model::recovery::Recovery
     let probe: SchemaVersionProbe = match serde_json::from_value(plan_value.clone()) {
         Ok(probe) => probe,
         Err(error) => {
-            return Err(RecoveryError::new(
-                RecoveryErrorKind::StateRecordCorrupt,
+            return Err(SnapshotError::new(
+                SnapshotErrorKind::StateRecordCorrupt,
                 format!(
                     "cannot read plan {} schema_version: {error}",
                     path.display()
@@ -267,8 +268,8 @@ pub fn load_plan(path: &Path) -> Result<crate::shared::model::recovery::Recovery
         }
     };
     if probe.schema_version != RECOVERY_PLAN_SCHEMA_VERSION {
-        return Err(RecoveryError::new(
-            RecoveryErrorKind::UnsupportedPlanSchema,
+        return Err(SnapshotError::new(
+            SnapshotErrorKind::UnsupportedPlanSchema,
             format!(
                 "plan {} has unsupported schema_version: found {}, supported {}; \
                  regenerate the plan with the current tooling",
@@ -278,12 +279,12 @@ pub fn load_plan(path: &Path) -> Result<crate::shared::model::recovery::Recovery
             ),
         ));
     }
-    let plan: crate::shared::model::recovery::RecoveryPlan =
+    let plan: crate::snapshot::model::RecoveryPlan =
         match serde_json::from_value(plan_value.clone()) {
             Ok(plan) => plan,
             Err(error) => {
-                return Err(RecoveryError::new(
-                    RecoveryErrorKind::StateRecordCorrupt,
+                return Err(SnapshotError::new(
+                    SnapshotErrorKind::StateRecordCorrupt,
                     format!("cannot parse plan {}: {error}", path.display()),
                 ));
             }
@@ -300,11 +301,11 @@ pub fn load_plan(path: &Path) -> Result<crate::shared::model::recovery::Recovery
 mod tests {
     use super::*;
     use crate::shared::error::FsError;
-    use crate::shared::model::recovery::{
+    use crate::snapshot::model::{
         BootLayout, BtrfsFilesystemIdentity, BtrfsSubvolumeIdentity, CompletedStep, DiskFacts,
         FstabRootDefinition, RecoveryPlan, TransactionPaths, TransactionState,
     };
-    use crate::shared::snapshot_engine::plan::{build_confirmation_token, effective_plan_digest};
+    use crate::snapshot::plan::{build_confirmation_token, effective_plan_digest};
     use std::fs;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -355,7 +356,7 @@ mod tests {
             },
             target_catos_identity: None,
             boot_layout: BootLayout::default(),
-            boot_consistency: crate::shared::snapshot_engine::boot::evaluate_readonly_consistency(
+            boot_consistency: crate::snapshot::diagnose::boot::evaluate_readonly_consistency(
                 &BootLayout::default(),
             ),
             backup_root_path: format!("/.catos-recovery/backups/{id}/root-before"),
@@ -436,7 +437,7 @@ mod tests {
         let root = scratch_root("missing");
         fs::create_dir_all(&root).unwrap();
         let error = load_record(&state_path(&root, ID1)).unwrap_err();
-        assert_eq!(error.kind, RecoveryErrorKind::TransactionNotFound);
+        assert_eq!(error.kind, SnapshotErrorKind::TransactionNotFound);
         let _ = fs::remove_dir_all(root);
     }
 
@@ -449,7 +450,7 @@ mod tests {
         record.schema_version = 99;
         confined::atomic_write(&path, &serde_json::to_vec(&record).unwrap(), 0o600).unwrap();
         let error = load_record(&path).unwrap_err();
-        assert_eq!(error.kind, RecoveryErrorKind::UnsupportedTransactionSchema);
+        assert_eq!(error.kind, SnapshotErrorKind::UnsupportedTransactionSchema);
         let _ = fs::remove_dir_all(root);
     }
 
@@ -460,7 +461,7 @@ mod tests {
         let path = state_path(&root, ID1);
         confined::atomic_write(&path, b"{\"schema_version\":3", 0o600).unwrap();
         let error = load_record(&path).unwrap_err();
-        assert_eq!(error.kind, RecoveryErrorKind::StateRecordCorrupt);
+        assert_eq!(error.kind, SnapshotErrorKind::StateRecordCorrupt);
         let _ = fs::remove_dir_all(root);
     }
 
@@ -512,7 +513,7 @@ mod tests {
         let (records, errors) = list_records(&dir);
         assert_eq!(records.len(), 3);
         assert_eq!(errors.len(), 1);
-        assert_eq!(errors[0].kind, RecoveryErrorKind::StateRecordCorrupt);
+        assert_eq!(errors[0].kind, SnapshotErrorKind::StateRecordCorrupt);
         let _ = fs::remove_dir_all(root);
     }
 
@@ -577,7 +578,7 @@ mod tests {
         plan.filesystem.fsid = "tampered-fsid".into();
         fs::write(&path, serde_json::to_vec_pretty(&plan).unwrap()).unwrap();
         let error = load_plan(&path).unwrap_err();
-        assert_eq!(error.kind, RecoveryErrorKind::PlanDigestMismatch);
+        assert_eq!(error.kind, SnapshotErrorKind::PlanDigestMismatch);
         let _ = fs::remove_dir_all(dir);
     }
 
@@ -589,7 +590,7 @@ mod tests {
         fs::write(&path, b"{\"unrelated\":\"json\"}").unwrap();
         assert_eq!(
             load_plan(&path).unwrap_err().kind,
-            RecoveryErrorKind::StateRecordCorrupt
+            SnapshotErrorKind::StateRecordCorrupt
         );
         let _ = fs::remove_dir_all(dir);
     }
@@ -603,7 +604,7 @@ mod tests {
         fs::create_dir_all(&outside).unwrap();
         symlink(&outside, top.join(".catos-recovery")).unwrap();
         let error = persist_record(&state_path(&top, ID1), &record_for(ID1)).unwrap_err();
-        assert_eq!(error.kind, RecoveryErrorKind::UnsafeRecoveryPath);
+        assert_eq!(error.kind, SnapshotErrorKind::UnsafeRecoveryPath);
         assert!(!outside.join("transactions").exists());
         let _ = fs::remove_dir_all(top);
         let _ = fs::remove_dir_all(outside);
@@ -618,7 +619,7 @@ mod tests {
         fs::create_dir_all(&outside).unwrap();
         symlink(&outside, top.join(".catos-recovery/transactions").join(ID1)).unwrap();
         let error = persist_record(&state_path(&top, ID1), &record_for(ID1)).unwrap_err();
-        assert_eq!(error.kind, RecoveryErrorKind::UnsafeRecoveryPath);
+        assert_eq!(error.kind, SnapshotErrorKind::UnsafeRecoveryPath);
         assert!(!outside.join("state.json").exists());
         let _ = fs::remove_dir_all(top);
         let _ = fs::remove_dir_all(outside);
@@ -636,7 +637,7 @@ mod tests {
         fs::write(&sentinel, b"unchanged").unwrap();
         symlink(&sentinel, &path).unwrap();
         let error = persist_record(&path, &record_for(ID1)).unwrap_err();
-        assert_eq!(error.kind, RecoveryErrorKind::UnsafeRecoveryPath);
+        assert_eq!(error.kind, SnapshotErrorKind::UnsafeRecoveryPath);
         assert_eq!(fs::read(&sentinel).unwrap(), b"unchanged");
         let _ = fs::remove_dir_all(top);
         let _ = fs::remove_dir_all(outside);

@@ -1,6 +1,6 @@
 //! Phase-3 recovery orchestrators.
 //!
-//! Sits between `entry.rs` and the `shared::snapshot_engine`. Owns the
+//! Sits between `entry.rs` and the `snapshot` capability. Owns the
 //! side-effects the engine does NOT own: discovering the target
 //! filesystem, mounting the btrfs top-level inside a private
 //! namespace, surfacing structured errors as JSON envelopes.
@@ -12,27 +12,31 @@
 //! via the read-only `mount::probe` infrastructure from phase 2.
 //!
 //! `apply`, `resume`, `revert` mount the btrfs top-level READ-WRITE.
-//! This is the only place in catos-system that performs persistent
-//! writes to a target device.
+//! These application paths coordinate snapshot-specific persistent writes;
+//! lower-level effects remain confined to capability execute modules.
 
-mod probe;
+pub mod model;
+pub mod output;
 mod read;
 mod write;
 
 use std::path::PathBuf;
 
+use crate::recovery::model::{
+    RecoveryInspectReport, RecoveryListReport, RecoveryRecommendation, RecoveryStatusReport,
+};
 use crate::shared::cli::{RecoveryArgs, RecoverySubcommand};
 use crate::shared::error::exit_code;
-use crate::shared::model::recovery::{
-    CleanupSummary, RecoveryError, RecoveryErrorKind, RecoveryListReport, RecoveryInspectReport,
-    RecoveryPlan, RecoveryStatusReport, TransactionRecord, TransactionState,
+use crate::snapshot::diagnose::identity::{validate_recovery_id, SubvolumePath};
+use crate::snapshot::model::{
+    CleanupSummary, RecoveryPlan, SnapshotError, SnapshotErrorKind, TransactionRecord,
+    TransactionState,
 };
-use crate::shared::snapshot_engine::identity::{validate_recovery_id, SubvolumePath};
 
 /// Outcome of a phase-3 subcommand. Each variant carries the model
 /// the matching output renderer consumes.
 //
-// `Error` boxes `RecoveryError` so the variant stays small relative
+// `Error` boxes `SnapshotError` so the variant stays small relative
 // to the others. Boxing here keeps clippy's `large_enum_variant`
 // quiet (the alternatives — making every variant boxed or accepting
 // the warning globally — are worse). The renderer dereferences once.
@@ -56,7 +60,7 @@ pub enum Phase3Outcome {
         final_state: TransactionState,
         cleanup: CleanupSummary,
     },
-    Error(Box<RecoveryError>),
+    Error(Box<SnapshotError>),
 }
 
 /// Run a recovery subcommand. Called by `entry.rs` after the CLI has
@@ -110,10 +114,10 @@ pub fn run_recovery(args: RecoveryArgs) -> Phase3Outcome {
 // Exit-code mapping
 // ---------------------------------------------------------------------------
 
-/// Convert a [`RecoveryError`] into a top-level exit code. Used by
+/// Convert a [`SnapshotError`] into a top-level exit code. Used by
 /// `entry.rs` when the recovery subcommand returned
 /// `Phase3Outcome::Error`.
-pub fn recovery_error_to_phase3_exit_code(_error: &RecoveryError) -> i32 {
+pub fn recovery_error_to_phase3_exit_code(_error: &SnapshotError) -> i32 {
     exit_code::PROBE_FAILED
 }
 
@@ -140,7 +144,7 @@ fn exit_code_for_recovery(
 pub fn exit_code_for(outcome: &Phase3Outcome) -> i32 {
     match outcome {
         Phase3Outcome::Error(error) => {
-            if matches!(error.kind, RecoveryErrorKind::CurrentRootRefused) {
+            if matches!(error.kind, SnapshotErrorKind::CurrentRootRefused) {
                 exit_code::PERMISSION_DENIED
             } else {
                 exit_code::PROBE_FAILED
@@ -182,10 +186,10 @@ pub fn exit_code_for(outcome: &Phase3Outcome) -> i32 {
 fn require_transaction_id<'a>(
     transaction_id: Option<&'a str>,
     command: &str,
-) -> Result<&'a str, RecoveryError> {
+) -> Result<&'a str, SnapshotError> {
     let transaction_id = transaction_id.ok_or_else(|| {
-        RecoveryError::new(
-            RecoveryErrorKind::TransactionNotFound,
+        SnapshotError::new(
+            SnapshotErrorKind::TransactionNotFound,
             format!("{command} requires --transaction <id>"),
         )
     })?;
@@ -196,7 +200,7 @@ fn require_transaction_id<'a>(
 fn ensure_cli_root_matches_plan(
     explicit_root: Option<&str>,
     sealed_root: &str,
-) -> Result<(), RecoveryError> {
+) -> Result<(), SnapshotError> {
     let Some(explicit_root) = explicit_root.filter(|value| !value.is_empty()) else {
         return Ok(());
     };
@@ -207,8 +211,8 @@ fn ensure_cli_root_matches_plan(
     };
     SubvolumePath::parse(&normalised)?;
     if normalised != sealed_root {
-        return Err(RecoveryError::new(
-            RecoveryErrorKind::TargetChanged,
+        return Err(SnapshotError::new(
+            SnapshotErrorKind::TargetChanged,
             format!(
                 "CLI root subvolume {normalised} does not match sealed transaction root {sealed_root}"
             ),
@@ -217,7 +221,7 @@ fn ensure_cli_root_matches_plan(
     Ok(())
 }
 
-fn require_root() -> Result<(), RecoveryError> {
+fn require_root() -> Result<(), SnapshotError> {
     let uid = unsafe {
         extern "C" {
             fn geteuid() -> u32;
@@ -225,16 +229,17 @@ fn require_root() -> Result<(), RecoveryError> {
         geteuid()
     };
     if uid != 0 {
-        return Err(RecoveryError::new(
-            RecoveryErrorKind::CurrentRootRefused,
+        return Err(SnapshotError::new(
+            SnapshotErrorKind::CurrentRootRefused,
             "recovery apply/resume/revert must run as root",
         ));
     }
     Ok(())
 }
 
-fn recommend(record: &TransactionRecord) -> crate::shared::model::recovery::RecoveryRecommendation {
-    use crate::shared::model::recovery::{RecoveryRecommendation as R, TransactionState as S};
+fn recommend(record: &TransactionRecord) -> RecoveryRecommendation {
+    use crate::recovery::model::RecoveryRecommendation as R;
+    use crate::snapshot::model::TransactionState as S;
     match record.state {
         S::Completed => R::None,
         S::Reverted => R::None,
@@ -257,16 +262,16 @@ fn revert_confirmation_is_safe(state: TransactionState) -> bool {
 }
 
 impl RecoveryArgs {
-    fn require_target_selection(&self) -> Result<TargetSelectionResolved, RecoveryError> {
+    fn require_target_selection(&self) -> Result<TargetSelectionResolved, SnapshotError> {
         let root_device = self.target.root_device.clone().ok_or_else(|| {
-            RecoveryError::new(
-                RecoveryErrorKind::TargetChanged,
+            SnapshotError::new(
+                SnapshotErrorKind::TargetChanged,
                 "this subcommand requires --root-device",
             )
         })?;
         if let Some(esp_device) = self.target.esp_device.as_deref() {
-            return Err(RecoveryError::new(
-                RecoveryErrorKind::UnsupportedExplicitEsp,
+            return Err(SnapshotError::new(
+                SnapshotErrorKind::UnsupportedExplicitEsp,
                 format!(
                     "phase 3 does not maintain or write to the ESP; \
                      --esp-device {} is not supported. The recovery \
@@ -292,7 +297,7 @@ struct TargetSelectionResolved {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::shared::model::recovery::TransactionState;
+    use crate::snapshot::model::TransactionState;
 
     #[test]
     fn reconciled_reverted_state_still_offers_idempotent_revert_confirmation() {
@@ -311,9 +316,9 @@ mod tests {
             valid
         );
         let error = require_transaction_id(Some("../../outside"), "status").unwrap_err();
-        assert_eq!(error.kind, RecoveryErrorKind::InvalidRecoveryId);
+        assert_eq!(error.kind, SnapshotErrorKind::InvalidRecoveryId);
         let missing = require_transaction_id(None, "status").unwrap_err();
-        assert_eq!(missing.kind, RecoveryErrorKind::TransactionNotFound);
+        assert_eq!(missing.kind, SnapshotErrorKind::TransactionNotFound);
     }
 
     #[test]
@@ -322,46 +327,61 @@ mod tests {
         ensure_cli_root_matches_plan(Some("/@root"), "/@root").unwrap();
         ensure_cli_root_matches_plan(None, "/@root").unwrap();
         let error = ensure_cli_root_matches_plan(Some("/@"), "/@root").unwrap_err();
-        assert_eq!(error.kind, RecoveryErrorKind::TargetChanged);
+        assert_eq!(error.kind, SnapshotErrorKind::TargetChanged);
     }
 
     #[test]
     fn nested_snapshot_layout_is_rejected_before_any_write() {
-        let error = crate::shared::snapshot_engine::identity::ensure_supported_snapshot_layout("/@", "/@/.snapshots/1/snapshot").unwrap_err();
+        let error = crate::snapshot::diagnose::identity::ensure_supported_snapshot_layout(
+            "/@",
+            "/@/.snapshots/1/snapshot",
+        )
+        .unwrap_err();
         assert_eq!(
             error.kind,
-            RecoveryErrorKind::UnsupportedNestedSnapshotLayout
+            SnapshotErrorKind::UnsupportedNestedSnapshotLayout
         );
     }
 
     #[test]
     fn non_nested_snapshot_layout_is_supported() {
-        crate::shared::snapshot_engine::identity::ensure_supported_snapshot_layout("/@", "/@snapshots/1").unwrap();
-        crate::shared::snapshot_engine::identity::ensure_supported_snapshot_layout("/@root", "/snapshots/root-1").unwrap();
+        crate::snapshot::diagnose::identity::ensure_supported_snapshot_layout(
+            "/@",
+            "/@snapshots/1",
+        )
+        .unwrap();
+        crate::snapshot::diagnose::identity::ensure_supported_snapshot_layout(
+            "/@root",
+            "/snapshots/root-1",
+        )
+        .unwrap();
     }
 
     #[test]
     fn cleanup_persistence_reports_residual_when_persist_succeeds() {
         let cleanup = CleanupSummary {
-            unmounted: vec![], residual: vec!["synthetic residual".into()],
+            unmounted: vec![],
+            residual: vec!["synthetic residual".into()],
             all_clean: false,
         };
         let error = write::finish_cleanup_persistence(Ok(()), cleanup).unwrap_err();
-        assert_eq!(error.kind, RecoveryErrorKind::CleanupIncomplete);
+        assert_eq!(error.kind, SnapshotErrorKind::CleanupIncomplete);
         assert!(error.message.contains("synthetic residual"));
     }
 
     #[test]
     fn cleanup_persistence_preserves_both_primary_and_cleanup_failures() {
-        let primary = RecoveryError::new(
-            RecoveryErrorKind::RecoveryFailed, "synthetic persistence failure",
+        let primary = SnapshotError::new(
+            SnapshotErrorKind::RecoveryFailed,
+            "synthetic persistence failure",
         );
         let cleanup = CleanupSummary {
-            unmounted: vec![], residual: vec!["synthetic cleanup residual".into()],
+            unmounted: vec![],
+            residual: vec!["synthetic cleanup residual".into()],
             all_clean: false,
         };
         let error = write::finish_cleanup_persistence(Err(primary), cleanup).unwrap_err();
-        assert_eq!(error.kind, RecoveryErrorKind::RecoveryFailed);
+        assert_eq!(error.kind, SnapshotErrorKind::RecoveryFailed);
         assert!(error.message.contains("synthetic persistence failure"));
         assert!(error.message.contains("synthetic cleanup residual"));
         assert!(error.manual_intervention_required);

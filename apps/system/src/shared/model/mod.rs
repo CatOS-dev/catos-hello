@@ -7,12 +7,10 @@
 
 pub mod evidence;
 pub mod repair;
-pub mod snapshot;
 pub mod storage;
 pub mod system;
 
 pub use evidence::Evidence;
 pub use repair::*;
-pub use snapshot::*;
 pub use storage::*;
 pub use system::*;

@@ -340,7 +340,7 @@ pub fn cleanup_plain_verification_mounts(
 }
 
 pub fn cleanup_into_mount_repair(
-    cleanup: crate::shared::model::recovery::CleanupSummary,
+    cleanup: crate::snapshot::model::CleanupSummary,
 ) -> MountRepairCleanup {
     MountRepairCleanup {
         unmounted: cleanup.unmounted,

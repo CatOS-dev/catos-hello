@@ -1,6 +1,6 @@
 //! Rooted-filesystem confinement primitives for the target capability.
 //!
-//! Migrated from `shared::snapshot_engine::confined::confined.rs` (phase-1
+//! Root-confined filesystem operations extracted during the capability
 //! target refactor). Every privileged file operation below a mounted
 //! filesystem top-level is resolved from an already-opened top-level
 //! directory fd. Directory components are opened one at a time with
@@ -11,7 +11,7 @@
 //!
 //! All functions return [`crate::shared::error::FsError`]; the richer
 //! recovery-specific error taxonomy is layered on top by the btrfs
-//! snapshot functions that remain in `shared::snapshot_engine`.
+//! snapshot-specific Btrfs operations that live in `snapshot::execute`.
 //!
 //! This module MUST NOT depend on `crate::mount`, `crate::fs`,
 //! `crate::snapshot`, `crate::boot`, or any application module.
@@ -557,7 +557,7 @@ pub fn remove_rooted_file(top_level: &Path, rooted_path: &str) -> Result<(), FsE
 
 // ---------------------------------------------------------------------------
 // Shared helpers (used by both the rooted-fs functions above and the btrfs
-// snapshot functions that remain in `shared::snapshot_engine`). Exposed as
+// snapshot-specific Btrfs operations in `snapshot::execute`). Exposed as
 // `pub(crate)` so the btrfs functions can call them.
 // ---------------------------------------------------------------------------
 

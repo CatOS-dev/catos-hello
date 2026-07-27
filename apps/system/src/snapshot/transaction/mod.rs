@@ -10,7 +10,7 @@
 //! acquire would let a wedged first process hang the second one
 //! indefinitely; a non-blocking acquire returns `EAGAIN` immediately,
 //! which the engine surfaces as a structured
-//! [`RecoveryErrorKind::TransactionAlreadyActive`] error so the
+//! [`SnapshotErrorKind::TransactionAlreadyActive`] error so the
 //! operator can decide whether to wait, investigate, or kill the
 //! holder.
 //!
@@ -39,13 +39,16 @@
 //! `fs2` / `fs4` solely for a one-line flock wrapper would violate
 //! that for no functional gain.
 
-use std::fs::{File, OpenOptions};
+use std::fs::File;
 use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
 
-use crate::shared::model::recovery::{RecoveryError, RecoveryErrorKind};
-use crate::shared::snapshot_engine::confined::fs_to_recovery;
+use crate::snapshot::model::fs_to_snapshot;
+use crate::snapshot::model::{SnapshotError, SnapshotErrorKind};
 use crate::target::execute::confined;
+
+pub mod state;
+pub use state::*;
 
 /// `flock(LOCK_EX)` = 2. `LOCK_NB` = 4. Combined = 6.
 const LOCK_EX_NB: std::os::raw::c_int = 2 | 4;
@@ -57,71 +60,12 @@ pub struct TransactionLock {
     _file: File,
 }
 
-/// Shared non-blocking lock on the target block-device inode. Filesystem
-/// repair and every Recovery write path hold this guard so they cannot write
-/// the same device concurrently, even across separate mount namespaces.
-#[derive(Debug)]
-pub struct DeviceLock {
-    _file: File,
-}
-
-impl DeviceLock {
-    #[allow(clippy::result_large_err)]
-    pub fn try_acquire(device: &Path) -> Result<Self, RecoveryError> {
-        let file = OpenOptions::new()
-            .read(true)
-            .open(device)
-            .map_err(|error| {
-                RecoveryError::new(
-                    RecoveryErrorKind::SyscallFailed,
-                    format!(
-                        "cannot open target device {} for shared write lock: {error}",
-                        device.display()
-                    ),
-                )
-            })?;
-        let rc = libc_flock(file.as_raw_fd(), LOCK_EX_NB);
-        if rc != 0 {
-            return Err(RecoveryError::new(
-                RecoveryErrorKind::TransactionAlreadyActive,
-                format!(
-                    "target device {} is locked by filesystem repair or recovery: {}",
-                    device.display(),
-                    std::io::Error::last_os_error()
-                ),
-            ));
-        }
-        Ok(Self { _file: file })
-    }
-
-    /// Recovery unit tests use synthetic character devices such as
-    /// `/dev/null`; only real block devices participate in the shared
-    /// fs-repair fence.
-    #[allow(clippy::result_large_err)]
-    pub fn try_acquire_if_block_device(device: &Path) -> Result<Option<Self>, RecoveryError> {
-        use std::os::unix::fs::FileTypeExt;
-        let metadata = std::fs::metadata(device).map_err(|error| {
-            RecoveryError::new(
-                RecoveryErrorKind::SyscallFailed,
-                format!(
-                    "cannot stat target device {} for shared write lock: {error}",
-                    device.display()
-                ),
-            )
-        })?;
-        if !metadata.file_type().is_block_device() {
-            return Ok(None);
-        }
-        Self::try_acquire(device).map(Some)
-    }
-}
-
 impl TransactionLock {
     /// Try to acquire the exclusive, non-blocking lock on
     /// `lock_path`. Returns:
     /// * `Ok(TransactionLock)` — acquired; hold the guard to keep
     ///   the lock.
-    /// * `Err(RecoveryError { kind: TransactionAlreadyActive })` —
+    /// * `Err(SnapshotError { kind: TransactionAlreadyActive })` —
     ///   another process holds the lock (EAGAIN / EWOULDBLOCK).
     /// * `Err(...)` — any other I/O or syscall failure.
     ///
@@ -130,7 +74,7 @@ impl TransactionLock {
     /// has already done that).
     //
     // Local allow, justified: `try_acquire` is part of the public
-    // API surface (`pub use lock::TransactionLock` in mod.rs). It is
+    // API surface (`snapshot::transaction::TransactionLock`). It is
     // consumed by:
     //   * `engine::acquire_lock_guard` (which boxes the error itself
     //     to keep its own result small),
@@ -144,11 +88,11 @@ impl TransactionLock {
     // change the signature visible to any future external consumer
     // of the lock primitive. Cost-benefit: keep the allow.
     #[allow(clippy::result_large_err)]
-    pub fn try_acquire(lock_path: &Path, fsid_for_error: &str) -> Result<Self, RecoveryError> {
+    pub fn try_acquire(lock_path: &Path, fsid_for_error: &str) -> Result<Self, SnapshotError> {
         let file = match confined::open_lock_file(lock_path) {
             Ok(file) => file,
             Err(error) => {
-                let mut recovery_error = fs_to_recovery(error);
+                let mut recovery_error = fs_to_snapshot(error);
                 recovery_error.message = format!(
                     "cannot safely open transaction lock file {} for fsid {}: {}",
                     lock_path.display(),
@@ -169,8 +113,8 @@ impl TransactionLock {
             // structured "another transaction is running" error
             // instead of a generic syscall failure.
             if errno == 11 || errno == ewouldblock_errno() {
-                return Err(RecoveryError::new(
-                    RecoveryErrorKind::TransactionAlreadyActive,
+                return Err(SnapshotError::new(
+                    SnapshotErrorKind::TransactionAlreadyActive,
                     format!(
                         "another recovery transaction is already active for btrfs filesystem \
                          fsid {fsid_for_error}; lock file {} is held by another process \
@@ -179,8 +123,8 @@ impl TransactionLock {
                     ),
                 ));
             }
-            return Err(RecoveryError::new(
-                RecoveryErrorKind::SyscallFailed,
+            return Err(SnapshotError::new(
+                SnapshotErrorKind::SyscallFailed,
                 format!(
                     "flock(LOCK_EX | LOCK_NB) on {} failed: errno={errno}",
                     lock_path.display()
@@ -276,7 +220,7 @@ mod tests {
         let path = scratch_lock_path("nonblock");
         let _g1 = TransactionLock::try_acquire(&path, "fsid-B").unwrap();
         let err = TransactionLock::try_acquire(&path, "fsid-B").unwrap_err();
-        assert_eq!(err.kind, RecoveryErrorKind::TransactionAlreadyActive);
+        assert_eq!(err.kind, SnapshotErrorKind::TransactionAlreadyActive);
         assert!(
             err.message.contains("fsid B")
                 || err.message.contains("fsid_B")
@@ -285,16 +229,6 @@ mod tests {
             err.message
         );
         let _ = std::fs::remove_file(&path);
-    }
-
-    #[test]
-    fn device_lock_is_non_blocking_when_held() {
-        let path = scratch_lock_path("device");
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(&path, b"lock").unwrap();
-        let _first = DeviceLock::try_acquire(&path).unwrap();
-        let error = DeviceLock::try_acquire(&path).unwrap_err();
-        assert_eq!(error.kind, RecoveryErrorKind::TransactionAlreadyActive);
     }
 
     #[test]
@@ -329,7 +263,7 @@ mod tests {
         std::fs::write(&outside, b"sentinel").unwrap();
         symlink(&outside, &lock_path).unwrap();
         let error = TransactionLock::try_acquire(&lock_path, "fsid-symlink").unwrap_err();
-        assert_eq!(error.kind, RecoveryErrorKind::UnsafeRecoveryPath);
+        assert_eq!(error.kind, SnapshotErrorKind::UnsafeRecoveryPath);
         assert_eq!(std::fs::read(&outside).unwrap(), b"sentinel");
         let _ = std::fs::remove_dir_all(root);
         let _ = std::fs::remove_file(outside);

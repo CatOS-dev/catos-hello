@@ -28,17 +28,17 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use catos_system::shared::model::recovery::{
+use catos_system::snapshot::model::{
     BootLayout, BtrfsFilesystemIdentity, BtrfsSubvolumeIdentity, CompletedStep, DiskFacts,
-    FstabRootDefinition, RecoveryError, RecoveryErrorKind, RecoveryPlan, SubvolumeFacts,
+    FstabRootDefinition, SnapshotError, SnapshotErrorKind, RecoveryPlan, SubvolumeFacts,
     TransactionPaths, TransactionRecord, TransactionState, RECOVERY_PLAN_SCHEMA_VERSION,
     TX_RECORD_SCHEMA_VERSION,
 };
-use catos_system::shared::snapshot_engine::engine::{Engine, EngineOptions};
-use catos_system::shared::snapshot_engine::lock::{lock_file_path, TransactionLock};
-use catos_system::shared::snapshot_engine::plan::{build_confirmation_token, effective_plan_digest};
-use catos_system::shared::snapshot_engine::state::reconcile_with_disk_facts;
-use catos_system::shared::snapshot_engine::store;
+use catos_system::snapshot::execute::engine::{Engine, EngineOptions};
+use catos_system::snapshot::transaction::{lock_file_path, TransactionLock};
+use catos_system::snapshot::plan::{build_confirmation_token, effective_plan_digest};
+use catos_system::snapshot::plan::reconcile::reconcile_with_disk_facts;
+use catos_system::snapshot::store;
 use std::hash::{Hash, Hasher};
 
 // ---------------------------------------------------------------------------
@@ -105,7 +105,7 @@ fn sample_plan_with_fsid(fsid: &str, plan_label: &str) -> RecoveryPlan {
         },
         target_catos_identity: None,
         boot_layout: BootLayout::default(),
-        boot_consistency: catos_system::shared::snapshot_engine::boot::evaluate_readonly_consistency(
+        boot_consistency: catos_system::snapshot::diagnose::boot::evaluate_readonly_consistency(
             &BootLayout::default(),
         ),
         backup_root_path: format!("/.catos-recovery/backups/{plan_id}/root-before"),
@@ -243,7 +243,7 @@ fn spawn_lock_holder(top: &Path, fsid: &str) -> std::process::Child {
 /// Acquire-and-time-how-fast: returns the elapsed time before
 /// `TransactionLock::try_acquire` returned `Err`. Used to assert
 /// non-blocking behaviour.
-fn time_lock_failure(top: &Path, fsid: &str) -> (RecoveryErrorKind, std::time::Duration) {
+fn time_lock_failure(top: &Path, fsid: &str) -> (SnapshotErrorKind, std::time::Duration) {
     let path = lock_file_path(top, fsid);
     let start = std::time::Instant::now();
     let err = TransactionLock::try_acquire(&path, fsid).unwrap_err();
@@ -262,7 +262,7 @@ fn apply_apply_lock_conflict() {
     let (kind, elapsed) = time_lock_failure(&top, fsid);
     assert_eq!(
         kind,
-        RecoveryErrorKind::TransactionAlreadyActive,
+        SnapshotErrorKind::TransactionAlreadyActive,
         "expected structured TransactionAlreadyActive, got {kind:?}"
     );
     assert!(
@@ -282,7 +282,7 @@ fn apply_resume_lock_conflict() {
     let mut child = spawn_lock_holder(&top, fsid);
     wait_for_lock_held(&mut child);
     let (kind, elapsed) = time_lock_failure(&top, fsid);
-    assert_eq!(kind, RecoveryErrorKind::TransactionAlreadyActive);
+    assert_eq!(kind, SnapshotErrorKind::TransactionAlreadyActive);
     assert!(elapsed.as_secs() < 2);
     let _ = child.kill();
     let _ = std::fs::remove_dir_all(&top);
@@ -297,7 +297,7 @@ fn resume_resume_lock_conflict() {
     let mut child = spawn_lock_holder(&top, fsid);
     wait_for_lock_held(&mut child);
     let (kind, elapsed) = time_lock_failure(&top, fsid);
-    assert_eq!(kind, RecoveryErrorKind::TransactionAlreadyActive);
+    assert_eq!(kind, SnapshotErrorKind::TransactionAlreadyActive);
     assert!(elapsed.as_secs() < 2);
     let _ = child.kill();
     let _ = std::fs::remove_dir_all(&top);
@@ -313,7 +313,7 @@ fn resume_revert_lock_conflict() {
     let mut child = spawn_lock_holder(&top, fsid);
     wait_for_lock_held(&mut child);
     let (kind, elapsed) = time_lock_failure(&top, fsid);
-    assert_eq!(kind, RecoveryErrorKind::TransactionAlreadyActive);
+    assert_eq!(kind, SnapshotErrorKind::TransactionAlreadyActive);
     assert!(elapsed.as_secs() < 2);
     let _ = child.kill();
     let _ = std::fs::remove_dir_all(&top);
@@ -559,8 +559,8 @@ fn recoverable_failure_persists_last_error() {
     )
     .expect("begin must persist the initial record under the FSID lock");
 
-    let mut injected = RecoveryError::new(
-        RecoveryErrorKind::TargetChanged,
+    let mut injected = SnapshotError::new(
+        SnapshotErrorKind::TargetChanged,
         "new root is missing /etc/os-release",
     );
     injected.transaction_id = Some(plan.plan_id.clone());
@@ -580,7 +580,7 @@ fn recoverable_failure_persists_last_error() {
         source_snapshot: None,
     }));
     let err = engine.persist_failure_for_test(injected);
-    assert_eq!(err.kind, RecoveryErrorKind::TargetChanged);
+    assert_eq!(err.kind, SnapshotErrorKind::TargetChanged);
     assert!(err.resume_possible);
 
     let reloaded = store::load_record(&state_path).unwrap();
@@ -589,7 +589,7 @@ fn recoverable_failure_persists_last_error() {
         .last_error
         .clone()
         .expect("last_error must be persisted on failure");
-    assert_eq!(last_error.kind, RecoveryErrorKind::TargetChanged);
+    assert_eq!(last_error.kind, SnapshotErrorKind::TargetChanged);
     assert_eq!(last_error.failed_step, Some("verify-new-root".into()));
     assert!(last_error.resume_possible);
     assert!(last_error.message.contains("/etc/os-release"));
@@ -621,8 +621,8 @@ fn manual_intervention_failure_persists_last_error() {
     )
     .expect("begin must persist the initial record under the FSID lock");
 
-    let mut injected = RecoveryError::new(
-        RecoveryErrorKind::RootSwitchConflict,
+    let mut injected = SnapshotError::new(
+        SnapshotErrorKind::RootSwitchConflict,
         "root exchange identity is ambiguous",
     );
     injected.transaction_id = Some(plan.plan_id.clone());
@@ -632,7 +632,7 @@ fn manual_intervention_failure_persists_last_error() {
     injected.revert_possible = false;
     injected.manual_intervention_required = true;
     let err = engine.persist_failure_for_test(injected);
-    assert_eq!(err.kind, RecoveryErrorKind::RootSwitchConflict);
+    assert_eq!(err.kind, SnapshotErrorKind::RootSwitchConflict);
 
     let reloaded = store::load_record(&state_path).unwrap();
     assert_eq!(reloaded.state, TransactionState::FailedManualIntervention);
@@ -721,7 +721,7 @@ fn completed_does_not_drift_silently_when_backup_removed() {
         .last_error
         .as_ref()
         .expect("drift must populate last_error");
-    assert_eq!(last_error.kind, RecoveryErrorKind::TargetChanged);
+    assert_eq!(last_error.kind, SnapshotErrorKind::TargetChanged);
     assert!(last_error.manual_intervention_required);
     assert!(!last_error.resume_possible);
 
@@ -819,7 +819,7 @@ fn load_for_write_re_acquires_per_fsid_lock() {
     .expect("load_for_write must error when the lock is held");
     let elapsed = start.elapsed();
 
-    assert_eq!(err.kind, RecoveryErrorKind::TransactionAlreadyActive);
+    assert_eq!(err.kind, SnapshotErrorKind::TransactionAlreadyActive);
     assert!(
         elapsed.as_secs() < 2,
         "load_for_write must NOT block on a held lock; took {elapsed:?}"
@@ -964,7 +964,7 @@ fn swap_done_rejects_readonly_active_root() {
     // subvolume_id, a readonly snapshot someone dropped at /@
     // would falsely match. Assert swap_appears_done returns
     // false here.
-    use catos_system::shared::snapshot_engine::state::swap_appears_done;
+    use catos_system::snapshot::plan::reconcile::swap_appears_done;
     let plan = sample_plan_with_fsid("fsid-ro-rej", "p-ro-rej");
     let facts = DiskFacts {
         filesystem_fsid: plan.filesystem.fsid.clone(),

@@ -2,7 +2,7 @@
 //!
 //! This is the structured result of `catos-repair boot`. It is NOT a
 //! [`crate::mount::model::MountRepairReport`] and NOT a
-//! [`crate::shared::model::recovery::RecoveryPlan`]; boot repair is the
+//! [`crate::snapshot::model::RecoveryPlan`]; boot repair is the
 //! re-application of an existing bootloader provider recipe, not a
 //! generic bootloader-transaction framework.
 //!

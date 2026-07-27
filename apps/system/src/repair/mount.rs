@@ -34,9 +34,9 @@ use crate::mount::plan::repair::apply_in_memory as apply_in_memory_pure;
 use crate::mount::plan::session::{inspect_selected_root, probe_unmounted_candidates};
 use crate::mount::session::TargetMountRwSession;
 use crate::shared::model::evidence::Evidence;
-use crate::shared::model::recovery::CleanupSummary;
-use crate::shared::snapshot_engine::external as btrfs;
-use crate::shared::snapshot_engine::lock::DeviceLock;
+use crate::snapshot::model::CleanupSummary;
+use crate::snapshot::diagnose::enumerate as btrfs;
+use crate::target::execute::lock::DeviceLock;
 use crate::target::diagnose::block::discover_devices;
 use crate::target::diagnose::filesystem::{FilesystemProbe, RealFilesystem};
 use crate::target::model::{BlockDevice, DetectionStatus, Warning};
@@ -483,7 +483,7 @@ pub fn run_mount_repair_via_cli(
     // The btrfs subvolume creation hook: the only snapshot-engine
     // call site in the apply path. Delegated to the confined helper.
     let mut report = execute_mount_repair(&inputs, &top, authorised, &devices, |top_level, subvol| {
-        crate::shared::snapshot_engine::confined::create_btrfs_subvolume(top_level, subvol)
+        crate::snapshot::execute::btrfs::create_btrfs_subvolume(top_level, subvol)
             .map_err(|error| format!("{error}"))
     });
 
@@ -527,7 +527,7 @@ fn rollback_pending_subvolumes(report: &mut MountRepairReport, top: &Path) {
     };
     let pending: Vec<String> = plan.subvolumes.iter().map(|s| s.subvol.clone()).rev().collect();
     for subvol in pending {
-        match crate::shared::snapshot_engine::confined::delete_empty_btrfs_subvolume(top, &subvol) {
+        match crate::snapshot::execute::btrfs::delete_empty_btrfs_subvolume(top, &subvol) {
             Ok(()) => report.actions.push(AppliedAction::SubvolumeRolledBack { subvol }),
             Err(error) => {
                 let reason = format!("{error}");

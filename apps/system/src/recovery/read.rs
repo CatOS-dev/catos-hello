@@ -1,62 +1,73 @@
 //! Read-only recovery subcommands: `list`, `inspect`, `plan`, `status`.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-use crate::shared::cli::RecoveryArgs;
-use crate::target::model::Warning;
-use crate::shared::model::recovery::{
-    RecoveryError, RecoveryErrorKind, RecoveryInspectReport, RecoveryListReport,
-    RecoveryPlan, RecoveryStatusReport, TransactionPaths, TransactionSummary,
-};
-use crate::mount::plan::session::build_probe_plan;
 use crate::mount::execute::secure_dir::SESSION_ROOT_PARENT;
+use crate::mount::model::CleanupReport;
+use crate::mount::plan::session::build_probe_plan;
 use crate::mount::session::ReadOnlyMountSession;
-use crate::shared::snapshot_engine::identity::validate_mounted_filesystem;
-use crate::shared::snapshot_engine::external as btrfs;
-use crate::shared::snapshot_engine::plan::{
+use crate::recovery::model::{
+    RecoveryInspectReport, RecoveryListReport, RecoveryStatusReport, TransactionSummary,
+};
+use crate::shared::cli::RecoveryArgs;
+use crate::snapshot::diagnose::enumerate as btrfs;
+use crate::snapshot::diagnose::enumerate::probe_target_readonly;
+use crate::snapshot::diagnose::identity::{
+    canonical_block_identity, ensure_supported_snapshot_layout, ensure_target_is_not_running_root,
+    validate_mounted_filesystem,
+};
+use crate::snapshot::execute::engine::{Engine, EngineOptions};
+use crate::snapshot::model::{
+    BtrfsFilesystemIdentity, BtrfsSubvolumeIdentity, CleanupSummary, DiskFacts, RecoveryPlan,
+    SnapshotError, SnapshotErrorKind, TransactionPaths, TransactionRecord,
+};
+use crate::snapshot::plan::{
     build_plan as build_recovery_plan, build_revert_confirmation_token, PlanInputs,
 };
-use crate::shared::snapshot_engine::store;
+use crate::snapshot::store;
+use crate::target::model::Warning;
 
-use super::probe::{cleanup_summary, probe_existing_transaction_readonly, probe_target_readonly};
 use super::{recommend, require_transaction_id, revert_confirmation_is_safe};
+
+type RecoveryListProbeResult = Result<
+    (
+        BtrfsFilesystemIdentity,
+        Vec<BtrfsSubvolumeIdentity>,
+        Vec<(PathBuf, TransactionRecord)>,
+        Vec<SnapshotError>,
+    ),
+    SnapshotError,
+>;
 
 // ---------------------------------------------------------------------------
 // list
 // ---------------------------------------------------------------------------
 
-pub(super) fn run_list(args: &RecoveryArgs) -> Result<RecoveryListReport, RecoveryError> {
+pub(super) fn run_list(args: &RecoveryArgs) -> Result<RecoveryListReport, SnapshotError> {
     let selection = args.require_target_selection()?;
     let (canonical_device, _) =
-        crate::shared::snapshot_engine::identity::canonical_block_identity(&selection.root_device)?;
+        crate::snapshot::diagnose::identity::canonical_block_identity(&selection.root_device)?;
 
     let session_root =
         PathBuf::from(SESSION_ROOT_PARENT).join(format!("recovery-list-{}", std::process::id()));
     let source = canonical_device.to_str().ok_or_else(|| {
-        RecoveryError::new(
-            RecoveryErrorKind::SyscallFailed,
+        SnapshotError::new(
+            SnapshotErrorKind::SyscallFailed,
             format!("device {} is not valid UTF-8", canonical_device.display()),
         )
     })?;
     let mount_plan = build_probe_plan(session_root, source, "btrfs", Some("subvolid=5"))
-        .map_err(|error| RecoveryError::new(RecoveryErrorKind::SyscallFailed, error.to_string()))?;
-    let mut session = ReadOnlyMountSession::new(format!("recovery-list-{}", std::process::id()), &mount_plan);
+        .map_err(|error| SnapshotError::new(SnapshotErrorKind::SyscallFailed, error.to_string()))?;
+    let mut session =
+        ReadOnlyMountSession::new(format!("recovery-list-{}", std::process::id()), &mount_plan);
     let mounted = session.run(&mount_plan).map_err(|error| {
-        RecoveryError::new(
-            RecoveryErrorKind::SyscallFailed,
+        SnapshotError::new(
+            SnapshotErrorKind::SyscallFailed,
             format!("cannot mount recovery-list target read-only: {error}"),
         )
     })?;
 
-    let result: Result<
-        (
-            crate::shared::model::recovery::BtrfsFilesystemIdentity,
-            Vec<crate::shared::model::recovery::BtrfsSubvolumeIdentity>,
-            Vec<(PathBuf, crate::shared::model::recovery::TransactionRecord)>,
-            Vec<RecoveryError>,
-        ),
-        RecoveryError,
-    > = (|| {
+    let result: RecoveryListProbeResult = (|| {
         let target = validate_mounted_filesystem(&mounted.target_root, &canonical_device)?;
         let readonly_snapshots = btrfs::list_readonly_subvolumes(&mounted.target_root)?;
         let transactions_dir = mounted
@@ -68,8 +79,8 @@ pub(super) fn run_list(args: &RecoveryArgs) -> Result<RecoveryListReport, Recove
 
     let cleanup = cleanup_summary(session.cleanup());
     if !cleanup.all_clean {
-        return Err(RecoveryError::new(
-            RecoveryErrorKind::CleanupIncomplete,
+        return Err(SnapshotError::new(
+            SnapshotErrorKind::CleanupIncomplete,
             format!(
                 "recovery list mount cleanup was incomplete: {:?}",
                 cleanup.residual
@@ -109,13 +120,13 @@ pub(super) fn run_list(args: &RecoveryArgs) -> Result<RecoveryListReport, Recove
 // inspect
 // ---------------------------------------------------------------------------
 
-pub(super) fn run_inspect(args: &RecoveryArgs) -> Result<RecoveryInspectReport, RecoveryError> {
+pub(super) fn run_inspect(args: &RecoveryArgs) -> Result<RecoveryInspectReport, SnapshotError> {
     let selection = args.require_target_selection()?;
     let device = selection.root_device;
     let root_subvolume = selection.root_subvolume;
     let snapshot = args.snapshot_subvolume.clone().ok_or_else(|| {
-        RecoveryError::new(
-            RecoveryErrorKind::TargetChanged,
+        SnapshotError::new(
+            SnapshotErrorKind::TargetChanged,
             "insufficient space: --snapshot-subvolume is required for inspect",
         )
     })?;
@@ -136,13 +147,13 @@ pub(super) fn run_inspect(args: &RecoveryArgs) -> Result<RecoveryInspectReport, 
 // plan
 // ---------------------------------------------------------------------------
 
-pub(super) fn run_plan(args: &RecoveryArgs) -> Result<RecoveryPlan, RecoveryError> {
+pub(super) fn run_plan(args: &RecoveryArgs) -> Result<RecoveryPlan, SnapshotError> {
     let selection = args.require_target_selection()?;
     let device = selection.root_device;
     let root_subvolume = selection.root_subvolume;
     let snapshot = args.snapshot_subvolume.clone().ok_or_else(|| {
-        RecoveryError::new(
-            RecoveryErrorKind::TargetChanged,
+        SnapshotError::new(
+            SnapshotErrorKind::TargetChanged,
             "insufficient space: --snapshot-subvolume is required for plan",
         )
     })?;
@@ -161,6 +172,7 @@ pub(super) fn run_plan(args: &RecoveryArgs) -> Result<RecoveryPlan, RecoveryErro
         catos_identity: probe.catos_identity,
         fstab_root_definition,
         plan_id,
+        generated_at_unix: current_unix_time(),
         generated_on_host: current_hostname(),
         confirmation_token_entropy: entropy,
     };
@@ -175,7 +187,7 @@ pub(super) fn run_plan(args: &RecoveryArgs) -> Result<RecoveryPlan, RecoveryErro
 // status
 // ---------------------------------------------------------------------------
 
-pub(super) fn run_status(args: &RecoveryArgs) -> Result<RecoveryStatusReport, RecoveryError> {
+pub(super) fn run_status(args: &RecoveryArgs) -> Result<RecoveryStatusReport, SnapshotError> {
     let transaction_id = require_transaction_id(args.transaction.as_deref(), "status")?;
     let selection = args.require_target_selection()?;
     let probe = probe_existing_transaction_readonly(
@@ -215,26 +227,26 @@ pub(super) fn run_status(args: &RecoveryArgs) -> Result<RecoveryStatusReport, Re
 // Entropy / id helpers
 // ---------------------------------------------------------------------------
 
-fn generate_plan_id() -> Result<String, RecoveryError> {
+fn generate_plan_id() -> Result<String, SnapshotError> {
     let bytes = kernel_random_bytes::<16>()?;
     Ok(format!("tx-{}", hex(&bytes)))
 }
 
-fn generate_entropy() -> Result<Vec<u8>, RecoveryError> {
+fn generate_entropy() -> Result<Vec<u8>, SnapshotError> {
     Ok(kernel_random_bytes::<32>()?.to_vec())
 }
 
-fn kernel_random_bytes<const N: usize>() -> Result<[u8; N], RecoveryError> {
+fn kernel_random_bytes<const N: usize>() -> Result<[u8; N], SnapshotError> {
     random_bytes_with(|buffer| getrandom::getrandom(buffer).map_err(|error| error.to_string()))
 }
 
 fn random_bytes_with<const N: usize>(
     mut fill: impl FnMut(&mut [u8]) -> Result<(), String>,
-) -> Result<[u8; N], RecoveryError> {
+) -> Result<[u8; N], SnapshotError> {
     let mut bytes = [0u8; N];
     fill(&mut bytes).map_err(|error| {
-        RecoveryError::new(
-            RecoveryErrorKind::RandomSourceFailed,
+        SnapshotError::new(
+            SnapshotErrorKind::RandomSourceFailed,
             format!("kernel random source failed: {error}"),
         )
     })?;
@@ -249,6 +261,13 @@ fn hex(bytes: &[u8]) -> String {
     out
 }
 
+fn current_unix_time() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0)
+}
+
 fn current_hostname() -> Option<String> {
     std::env::var("HOSTNAME").ok().or_else(|| {
         std::fs::read_to_string("/etc/hostname")
@@ -257,15 +276,141 @@ fn current_hostname() -> Option<String> {
     })
 }
 
+// ---------------------------------------------------------------------------
+// Read-only existing transaction probe
+// ---------------------------------------------------------------------------
+
+pub(super) struct ExistingTransactionProbe {
+    pub(super) canonical_device: PathBuf,
+    pub(super) filesystem: crate::snapshot::model::BtrfsFilesystemIdentity,
+    pub(super) record: TransactionRecord,
+    pub(super) disk_facts: DiskFacts,
+    pub(super) cleanup: CleanupSummary,
+}
+
+pub(super) fn probe_existing_transaction_readonly(
+    device: &Path,
+    explicit_root: Option<&str>,
+    transaction_id: &str,
+    protect_running_root: bool,
+) -> Result<ExistingTransactionProbe, SnapshotError> {
+    let (canonical_device, _) = canonical_block_identity(device)?;
+    let session_root = PathBuf::from(SESSION_ROOT_PARENT).join(format!(
+        "recovery-existing-{}-{}",
+        std::process::id(),
+        transaction_id
+    ));
+    let source = canonical_device.to_str().ok_or_else(|| {
+        SnapshotError::new(
+            SnapshotErrorKind::SyscallFailed,
+            format!("device {} is not valid UTF-8", canonical_device.display()),
+        )
+    })?;
+    let mount_plan = build_probe_plan(session_root, source, "btrfs", Some("subvolid=5"))
+        .map_err(|error| SnapshotError::new(SnapshotErrorKind::SyscallFailed, error.to_string()))?;
+    let mut session =
+        ReadOnlyMountSession::new(format!("recovery-existing-{transaction_id}"), &mount_plan);
+    let mounted = session.run(&mount_plan).map_err(|error| {
+        SnapshotError::new(
+            SnapshotErrorKind::SyscallFailed,
+            format!("cannot mount existing recovery transaction read-only: {error}"),
+        )
+    })?;
+
+    let result = (|| {
+        let target = validate_mounted_filesystem(&mounted.target_root, &canonical_device)?;
+        let mut engine = Engine::load(
+            EngineOptions {
+                top_level_mount: mounted.target_root.clone(),
+                device_path: canonical_device.clone(),
+                validated_filesystem: target.filesystem.clone(),
+            },
+            transaction_id,
+        )?;
+        super::ensure_cli_root_matches_plan(
+            explicit_root,
+            &engine.record().plan.current_root.path,
+        )?;
+        ensure_supported_snapshot_layout(
+            &engine.record().plan.current_root.path,
+            &engine.record().plan.source_snapshot.path,
+        )?;
+
+        if protect_running_root {
+            let root_path = engine.record().plan.current_root.path.clone();
+            let mut active_root = btrfs::show_subvolume(
+                &mounted.target_root.join(root_path.trim_start_matches('/')),
+            )?;
+            active_root.path = root_path;
+            ensure_target_is_not_running_root(&target.filesystem, &active_root)?;
+        }
+
+        let disk_facts = engine.reconcile_status();
+        let record = engine.record().clone();
+        Ok((target.filesystem, record, disk_facts))
+    })();
+
+    let cleanup = cleanup_summary(session.cleanup());
+    if !cleanup.all_clean {
+        let primary = result
+            .as_ref()
+            .err()
+            .map(|error: &SnapshotError| format!("; primary probe error: {error}"))
+            .unwrap_or_default();
+        return Err(SnapshotError::new(
+            SnapshotErrorKind::CleanupIncomplete,
+            format!(
+                "existing transaction probe left residual mounts: {:?}{primary}",
+                cleanup.residual
+            ),
+        ));
+    }
+    let (filesystem, record, disk_facts) = result?;
+    Ok(ExistingTransactionProbe {
+        canonical_device,
+        filesystem,
+        record,
+        disk_facts,
+        cleanup,
+    })
+}
+
+pub(super) fn cleanup_summary(report: CleanupReport) -> CleanupSummary {
+    let mut residual = report
+        .residual
+        .iter()
+        .map(|entry| {
+            format!(
+                "{}: {} ({})",
+                entry.resource.target.display(),
+                entry.reason,
+                entry.error_code
+            )
+        })
+        .collect::<Vec<_>>();
+    if let Some(error) = report.directory_cleanup_error {
+        residual.push(format!("session directory cleanup: {error}"));
+    }
+    CleanupSummary {
+        unmounted: report
+            .unmounted
+            .iter()
+            .map(|entry| entry.target.display().to_string())
+            .collect(),
+        residual,
+        all_clean: report.all_clean,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::shared::model::recovery::RecoveryErrorKind;
+    use crate::snapshot::model::SnapshotErrorKind;
 
     #[test]
     fn random_source_failure_is_not_replaced_with_zero_bytes() {
         let error = random_bytes_with::<32>(|_| Err("injected rng failure".into())).unwrap_err();
-        assert_eq!(error.kind, RecoveryErrorKind::RandomSourceFailed);
+        assert_eq!(error.kind, SnapshotErrorKind::RandomSourceFailed);
         assert!(error.message.contains("injected rng failure"));
     }
 
@@ -279,7 +424,7 @@ mod tests {
         })
         .unwrap();
         let id = format!("tx-{}", hex(&bytes));
-        crate::shared::snapshot_engine::identity::validate_recovery_id(&id).unwrap();
+        crate::snapshot::diagnose::identity::validate_recovery_id(&id).unwrap();
         assert_eq!(id, "tx-000102030405060708090a0b0c0d0e0f");
     }
 }

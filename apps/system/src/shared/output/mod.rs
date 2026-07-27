@@ -4,7 +4,6 @@
 pub mod doctor;
 pub mod human;
 pub mod json;
-pub mod recovery;
 pub mod repair;
 pub mod system;
 
@@ -12,6 +11,5 @@ pub use doctor::*;
 pub use doctor::exit_code_for as doctor_exit_code_for;
 pub use human::*;
 pub use json::*;
-pub use recovery::*;
 pub use repair::*;
 pub use system::*;

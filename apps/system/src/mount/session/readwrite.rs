@@ -13,7 +13,7 @@ use crate::mount::execute::namespace;
 use crate::mount::execute::secure_dir::{create_session_dir, remove_session_dir, SESSION_ROOT_PARENT};
 use crate::mount::execute::syscall::{self, mnt_flags, ms_flags};
 use crate::mount::session::BtrfsTopLevelRwSession;
-use crate::shared::model::recovery::{CleanupSummary, RecoveryError, RecoveryErrorKind};
+use crate::snapshot::model::{CleanupSummary, SnapshotError, SnapshotErrorKind};
 
 /// Production CLI entry point for an explicitly selected, unmounted
 /// CatOS target. It mounts the storage root in a private session,
@@ -30,11 +30,11 @@ impl TargetMountRwSession {
         device: &Path,
         fstype: &str,
         running_root: bool,
-    ) -> Result<Self, RecoveryError> {
+    ) -> Result<Self, SnapshotError> {
         if fstype == "btrfs" {
             BtrfsTopLevelRwSession::mount(device)
                 .map(Self::Btrfs)
-                .map_err(RecoveryError::from)
+                .map_err(SnapshotError::from)
         } else if running_root {
             RunningRootSession::enter().map(Self::Running)
         } else {
@@ -76,10 +76,10 @@ pub struct RunningRootSession {
 }
 
 impl RunningRootSession {
-    fn enter() -> Result<Self, RecoveryError> {
+    fn enter() -> Result<Self, SnapshotError> {
         namespace::establish_private_namespace().map_err(|error| {
-            RecoveryError::new(
-                RecoveryErrorKind::SyscallFailed,
+            SnapshotError::new(
+                SnapshotErrorKind::SyscallFailed,
                 format!("cannot establish private namespace for running-root repair: {error}"),
             )
         })?;
@@ -104,24 +104,24 @@ pub struct PlainRwSession {
 }
 
 impl PlainRwSession {
-    fn mount(device: &Path, fstype: &str) -> Result<Self, RecoveryError> {
+    fn mount(device: &Path, fstype: &str) -> Result<Self, SnapshotError> {
         namespace::establish_private_namespace().map_err(|error| {
-            RecoveryError::new(
-                RecoveryErrorKind::SyscallFailed,
+            SnapshotError::new(
+                SnapshotErrorKind::SyscallFailed,
                 format!("cannot establish private mount namespace: {error}"),
             )
         })?;
         let session_dir = create_session_dir(Path::new(SESSION_ROOT_PARENT), "mount-repair-rw")?;
         let mount_root = session_dir.join("root");
         std::fs::create_dir(&mount_root).map_err(|error| {
-            RecoveryError::new(
-                RecoveryErrorKind::SessionDirectoryNotSecure,
+            SnapshotError::new(
+                SnapshotErrorKind::SessionDirectoryNotSecure,
                 format!("cannot create plain-root mountpoint: {error}"),
             )
         })?;
         let source = device.to_str().ok_or_else(|| {
-            RecoveryError::new(
-                RecoveryErrorKind::SyscallFailed,
+            SnapshotError::new(
+                SnapshotErrorKind::SyscallFailed,
                 "plain root device path is not UTF-8",
             )
         })?;
@@ -133,8 +133,8 @@ impl PlainRwSession {
             None,
         ) {
             let _ = remove_session_dir(Path::new(SESSION_ROOT_PARENT), &session_dir);
-            return Err(RecoveryError::new(
-                RecoveryErrorKind::SyscallFailed,
+            return Err(SnapshotError::new(
+                SnapshotErrorKind::SyscallFailed,
                 format!("cannot mount plain target root read-write: {error}"),
             ));
         }

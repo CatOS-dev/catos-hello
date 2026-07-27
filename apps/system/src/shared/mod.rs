@@ -11,4 +11,3 @@ pub mod model;
 pub mod output;
 pub mod parse;
 pub mod process;
-pub mod snapshot_engine;

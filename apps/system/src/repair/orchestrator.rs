@@ -49,7 +49,7 @@ use crate::fs::safety::{
 use crate::fs::verify::{verify, VerificationOutcome};
 use crate::mount::plan::session::probe_unmounted_candidates;
 use crate::shared::model::evidence::Evidence;
-use crate::shared::snapshot_engine::lock::DeviceLock;
+use crate::target::execute::lock::DeviceLock;
 use crate::target::diagnose::block::discover_devices;
 use crate::target::diagnose::filesystem::RealFilesystem;
 use crate::target::model::DetectionStatus;

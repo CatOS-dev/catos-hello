@@ -21,7 +21,7 @@ use std::env;
 use std::process::ExitCode;
 use std::time::Duration;
 
-use catos_system::recovery::lock::{lock_file_path, TransactionLock};
+use catos_system::snapshot::transaction::{lock_file_path, TransactionLock};
 
 fn main() -> ExitCode {
     let args: Vec<String> = env::args().collect();

@@ -924,14 +924,14 @@ fn run_phase3(invocation: Invocation, args: crate::shared::cli::CliArgs) -> i32 
     };
     let outcome = crate::recovery::run_recovery(recovery_args);
     let result = if args.json {
-        crate::shared::output::render_phase3_json(&outcome, invocation.as_str(), args.root.as_path())
+        crate::recovery::output::render_phase3_json(&outcome, invocation.as_str(), args.root.as_path())
             .and_then(|s| {
                 write_json_stdout(&s)
                     .map_err(|e| Error::SerializeFailed(format!("stdout write: {e}")))
             })
     } else {
         let mut out = std::io::stdout();
-        crate::shared::output::render_phase3_human(&outcome, &mut out)
+        crate::recovery::output::render_phase3_human(&outcome, &mut out)
             .and_then(|_| out.flush())
             .map_err(|e| Error::SerializeFailed(format!("stdout write: {e}")))
     };
