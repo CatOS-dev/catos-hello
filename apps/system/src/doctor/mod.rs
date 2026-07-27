@@ -84,6 +84,18 @@ pub fn run_doctor() -> DoctorReport {
     let mut report = DoctorReport::default();
     report.environment = environment.clone();
     report.target = TargetSelection::Identified(context.target.clone()).to_target_summary();
+    report.evidence.push(Evidence::new(
+        "DOCTOR_TARGET_CONTEXT",
+        "doctor::context",
+        format!("selected candidate {}", context.candidate.root_device.display()),
+    ));
+    if let Err(error) = &context.fstab {
+        report.limitations.push(crate::doctor::model::DoctorLimitation::new(
+            DoctorSectionId::Mount,
+            "MOUNT_FACTS_INCOMPLETE",
+            error.clone(),
+        ));
+    }
     report.sections = run_sections(&runner, &context.target, &environment, &mut report);
     aggregate(&mut report);
     let cleanup = context.cleanup();
