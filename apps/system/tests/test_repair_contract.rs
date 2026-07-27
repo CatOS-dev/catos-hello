@@ -47,7 +47,7 @@
 use std::path::PathBuf;
 
 use catos_system::shared::model::repair::{AttemptKind, FsRepairOutcome, RepairTool};
-use catos_system::shared::model::storage::{BlockDevice, DeviceClass, DiskKind, PartitionRole};
+use catos_system::target::model::{BlockDevice, DeviceClass, DiskKind, PartitionRole};
 use catos_system::repair::runner::{RecordedRunner, ToolResult};
 use catos_system::repair::fs_flows::{
     btrfs_flow, e2fsck_flow, f2fs_flow, fat_flow, supports_filesystem, xfs_flow, FlowOutcome,

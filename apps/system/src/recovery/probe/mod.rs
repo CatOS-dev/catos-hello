@@ -14,7 +14,7 @@ use crate::shared::model::mount::CleanupReport;
 use crate::shared::mount::plan::build_probe_plan;
 use crate::shared::mount::secure_dir::SESSION_ROOT_PARENT;
 use crate::shared::mount::session::Session;
-use crate::shared::snapshot_engine::confined;
+use crate::target::execute::confined;
 use crate::shared::snapshot_engine::engine::{Engine, EngineOptions};
 use crate::shared::snapshot_engine::external as btrfs;
 use crate::shared::snapshot_engine::identity::{

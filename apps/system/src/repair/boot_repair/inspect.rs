@@ -8,7 +8,7 @@ use super::{has_target_path, read_target_file};
 
 pub(super) fn detect_target_architecture(root: &Path) -> Option<crate::shared::model::boot_repair::Architecture> {
     let executable =
-        crate::shared::snapshot_engine::confined::read_rooted_file(root, "/usr/lib/systemd/systemd").ok()?;
+        crate::target::execute::confined::read_rooted_file(root, "/usr/lib/systemd/systemd").ok()?;
     let machine = executable.get(18..20)?;
     match u16::from_le_bytes([machine[0], machine[1]]) {
         62 => Some(crate::shared::model::boot_repair::Architecture::X86_64),
@@ -19,9 +19,9 @@ pub(super) fn detect_target_architecture(root: &Path) -> Option<crate::shared::m
 
 pub(super) fn detect_partition_table(
     target: &TargetIdentity,
-    devices: &[crate::shared::model::storage::BlockDevice],
+    devices: &[crate::target::model::BlockDevice],
 ) -> crate::shared::model::boot_repair::PartitionTable {
-    use crate::shared::model::storage::DiskKind;
+    use crate::target::model::DiskKind;
 
     let root = devices.iter().find(|device| {
         device
@@ -38,7 +38,7 @@ pub(super) fn detect_partition_table(
 
 pub(super) fn derive_bios_install_disk(
     target: &TargetIdentity,
-    devices: &[crate::shared::model::storage::BlockDevice],
+    devices: &[crate::target::model::BlockDevice],
 ) -> Option<String> {
     let root = devices.iter().find(|device| {
         device
@@ -49,7 +49,7 @@ pub(super) fn derive_bios_install_disk(
     if root.parent.is_empty() {
         return None;
     }
-    let matches: Vec<&crate::shared::model::storage::BlockDevice> = devices
+    let matches: Vec<&crate::target::model::BlockDevice> = devices
         .iter()
         .filter(|device| device.name == root.parent)
         .filter(|device| device.parent.is_empty())
@@ -63,7 +63,7 @@ pub(super) fn derive_bios_install_disk(
 
 pub(super) fn derive_efi_device(
     target: &TargetIdentity,
-    devices: &[crate::shared::model::storage::BlockDevice],
+    devices: &[crate::target::model::BlockDevice],
 ) -> Option<(String, u32)> {
     let esp_path = target.esp_device.as_deref()?;
     let esp = devices.iter().find(|device| {
@@ -117,12 +117,12 @@ pub(super) fn collect_detection_inputs_from_target_root(root: &Path) -> Detectio
 }
 
 pub(super) fn collect_installed_packages_from_target_root(root: &Path) -> Vec<String> {
-    crate::shared::snapshot_engine::confined::list_rooted_directory_names(root, "/var/lib/pacman/local")
+    crate::target::execute::confined::list_rooted_directory_names(root, "/var/lib/pacman/local")
         .unwrap_or_default()
         .into_iter()
         .filter_map(|entry| entry.into_string().ok())
         .filter_map(|entry| {
-            crate::shared::snapshot_engine::confined::read_rooted_file(
+            crate::target::execute::confined::read_rooted_file(
                 root,
                 &format!("/var/lib/pacman/local/{entry}/desc"),
             )
@@ -134,18 +134,18 @@ pub(super) fn collect_installed_packages_from_target_root(root: &Path) -> Vec<St
 }
 
 pub(super) fn collect_target_kernels(root: &Path) -> Vec<crate::repair::boot_repair::mkinitcpio::Kernel> {
-    let entries = crate::shared::snapshot_engine::confined::list_rooted_directory_names(root, "/usr/lib/modules")
+    let entries = crate::target::execute::confined::list_rooted_directory_names(root, "/usr/lib/modules")
         .unwrap_or_default()
         .into_iter()
         .filter_map(|entry| entry.into_string().ok())
         .map(|version| {
             let base = format!("/usr/lib/modules/{version}");
             let pkgbase =
-                crate::shared::snapshot_engine::confined::read_rooted_file(root, &format!("{base}/pkgbase"))
+                crate::target::execute::confined::read_rooted_file(root, &format!("{base}/pkgbase"))
                     .ok()
                     .and_then(|bytes| String::from_utf8(bytes).ok())
                     .unwrap_or_default();
-            let has_vmlinuz = crate::shared::snapshot_engine::confined::rooted_regular_file_size(
+            let has_vmlinuz = crate::target::execute::confined::rooted_regular_file_size(
                 root,
                 &format!("{base}/vmlinuz"),
             )
@@ -172,7 +172,7 @@ fn pacman_package_name(desc: &str) -> Option<String> {
 }
 
 pub(super) fn target_regular_file_present(root: &Path, relative: &str) -> bool {
-    crate::shared::snapshot_engine::confined::rooted_regular_file_size(root, &format!("/{relative}"))
+    crate::target::execute::confined::rooted_regular_file_size(root, &format!("/{relative}"))
         .ok()
         .flatten()
         .is_some_and(|size| size > 0)
@@ -188,7 +188,7 @@ pub(super) fn target_uki_deployed(root: &Path) -> bool {
     ["/boot/EFI/Linux", "/boot/efi/EFI/Linux", "/efi/EFI/Linux"]
         .iter()
         .any(|directory| {
-            crate::shared::snapshot_engine::confined::list_rooted_directory_names(root, directory)
+            crate::target::execute::confined::list_rooted_directory_names(root, directory)
                 .unwrap_or_default()
                 .iter()
                 .any(|entry| {
@@ -203,7 +203,7 @@ pub(super) fn target_efistub_deployed(root: &Path) -> bool {
     ["/boot/EFI/CatOS", "/boot/efi/EFI/CatOS", "/efi/EFI/CatOS"]
         .iter()
         .any(|directory| {
-            crate::shared::snapshot_engine::confined::list_rooted_directory_names(root, directory)
+            crate::target::execute::confined::list_rooted_directory_names(root, directory)
                 .unwrap_or_default()
                 .iter()
                 .filter_map(|entry| entry.to_str().map(str::to_string))
@@ -362,7 +362,7 @@ fn target_systemd_boot_entry_present(target_root: &Path, esp: &str, kernels: &[K
     else {
         return false;
     };
-    let entries = crate::shared::snapshot_engine::confined::list_rooted_directory_names(
+    let entries = crate::target::execute::confined::list_rooted_directory_names(
         target_root,
         &format!("/{esp}/loader/entries"),
     )
@@ -388,7 +388,7 @@ pub(super) fn target_signed_catos_efi_present(target_root: &Path, esp_mount_poin
         return false;
     };
     let directory = format!("/{}/EFI/CatOS", esp_mount_point.trim_start_matches('/'));
-    let entries = crate::shared::snapshot_engine::confined::list_rooted_directory_names(target_root, &directory)
+    let entries = crate::target::execute::confined::list_rooted_directory_names(target_root, &directory)
         .unwrap_or_default()
         .into_iter()
         .filter_map(|entry| entry.into_string().ok())

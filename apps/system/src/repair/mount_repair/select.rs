@@ -5,17 +5,17 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use crate::shared::model::fstab::FstabSource;
-use crate::shared::model::inspection::Warning;
+use crate::target::model::Warning;
 use crate::shared::model::mount_repair::{BootMountLayout, MountProblem, TargetIdentity};
-use crate::shared::model::runtime::DetectionStatus;
-use crate::shared::model::storage::{BlockDevice, DeviceClass, DiskKind, EspCandidate, PartitionRole, RootCandidateConfidence};
+use crate::target::model::DetectionStatus;
+use crate::target::model::{BlockDevice, DeviceClass, DiskKind, EspCandidate, PartitionRole, RootCandidateConfidence};
 use crate::shared::mount::probe::{
     inspect_selected_root, probe_unmounted_candidates, SelectedTargetProbe,
 };
 use crate::shared::parse::fstab::{parse_all_with_diagnostics, FstabEntry};
-use crate::shared::probe::candidate::device_matches_fstab_source;
-use crate::shared::probe::fs_probe::{FilesystemProbe, RealFilesystem};
-use crate::shared::system_root::SystemRoot;
+use crate::target::diagnose::candidate::device_matches_fstab_source;
+use crate::target::diagnose::filesystem::{FilesystemProbe, RealFilesystem};
+use crate::target::diagnose::system_root::SystemRoot;
 use crate::shared::snapshot_engine::external as btrfs;
 use crate::repair::subvol_decision::{CatosConfirmation, SubvolFacts};
 
@@ -171,7 +171,7 @@ pub(super) fn inspect_running_root() -> Result<SelectedTargetProbe, String> {
         .map_err(|error| format!("cannot read running-system fstab: {error}"))?;
     let (fstab, diagnostics) = parse_all_with_diagnostics(&fstab_text);
     let mut warning_strings = Vec::new();
-    let inspection = crate::shared::probe::inspect_target(&fs, &root, &mut warning_strings);
+    let inspection = crate::target::diagnose::candidate::inspect_target(&fs, &root, &mut warning_strings);
     let mut warnings = diagnostics
         .into_iter()
         .map(|diagnostic| {

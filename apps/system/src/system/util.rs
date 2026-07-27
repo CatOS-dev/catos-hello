@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::shared::error::{exit_code, Error};
-use crate::shared::model::inspection::Warning;
+use crate::target::model::Warning;
 use crate::shared::model::mount::MountError;
 use crate::shared::mount::session::SESSION_ROOT_PARENT;
 
@@ -56,7 +56,7 @@ mod tests {
         CleanupReport, MountSession, MountSessionState, NamespaceState, ResidualMount,
         MountedResource,
     };
-    use crate::shared::model::inspection::TargetInspection;
+    use crate::target::model::TargetInspection;
     use std::path::PathBuf;
 
     /// generate_session_id must produce a non-empty, filesystem-safe

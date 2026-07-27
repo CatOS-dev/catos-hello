@@ -28,7 +28,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::shared::model::evidence::Evidence;
-use crate::shared::model::storage::{BlockDevice, PartitionRole};
+use crate::target::model::{BlockDevice, PartitionRole};
 
 /// The user's explicit choices for the repair flow. Distinct from
 /// `cli::TargetSelection` because repair only ever needs ONE device
@@ -352,7 +352,7 @@ fn paths_equal(a: &Path, b: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::shared::model::storage::{DeviceClass, DiskKind};
+    use crate::target::model::{DeviceClass, DiskKind};
 
     fn ext4_root(name: &str, dev: &str) -> BlockDevice {
         BlockDevice {

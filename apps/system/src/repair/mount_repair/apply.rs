@@ -11,8 +11,8 @@ use crate::shared::model::mount_repair::{
     AppliedAction, FstabTransaction, MountRepairCleanup, MountRepairOutcome, MountRepairPlan,
     MountRepairReport, MountVerification, TargetIdentity,
 };
-use crate::shared::model::storage::BlockDevice;
-use crate::shared::snapshot_engine::confined;
+use crate::target::model::BlockDevice;
+use crate::target::execute::confined;
 use crate::repair::path_safety::{validate_directory_creation, PathObservation};
 
 use super::rollback::{
@@ -89,7 +89,7 @@ pub(super) fn execute_mount_repair(
     let mut nested_esp_directory_created = false;
 
     for subvolume in &plan.subvolumes {
-        if let Err(error) = confined::create_btrfs_subvolume(top, &subvolume.subvol) {
+        if let Err(error) = crate::shared::snapshot_engine::confined::create_btrfs_subvolume(top, &subvolume.subvol) {
             return failure_after_created_resources(
                 inputs,
                 plan.clone(),
@@ -101,7 +101,7 @@ pub(super) fn execute_mount_repair(
                 nested_esp_directory_created,
                 MountRepairOutcome::SubvolumeConflict,
                 "SUBVOLUME_CREATE_FAILED",
-                format!("cannot create {}: {}", subvolume.subvol, error.message),
+                format!("cannot create {}: {}", subvolume.subvol, format!("{error}")),
                 None,
                 None,
             );
@@ -155,7 +155,7 @@ pub(super) fn execute_mount_repair(
                 nested_esp_directory_created,
                 MountRepairOutcome::UnsafePath,
                 "MOUNTPOINT_CREATE_FAILED",
-                format!("{}: {}", directory.mount_point, error.message),
+                format!("{}: {}", directory.mount_point, format!("{error}")),
                 None,
                 None,
             );
@@ -206,7 +206,7 @@ pub(super) fn execute_mount_repair(
             nested_esp_directory_created,
             MountRepairOutcome::RollbackFailed,
             "FSTAB_BACKUP_FAILED",
-            error.message.to_string(),
+            error.to_string(),
             None,
             None,
         );
@@ -242,7 +242,7 @@ pub(super) fn execute_mount_repair(
                 MountRepairOutcome::RollbackFailed
             },
             "FSTAB_WRITE_FAILED",
-            error.message.to_string(),
+            error.to_string(),
             Some(transaction),
             None,
         );

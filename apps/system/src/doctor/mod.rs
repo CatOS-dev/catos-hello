@@ -15,9 +15,11 @@
 //! * Doctor NEVER writes to the target. The only resources it may
 //!   clean up are mounts it created itself inside its private mount
 //!   namespace. See [`DoctorCleanup`].
-//! * Doctor NEVER invokes a repair flow. The fs diagnosis uses the
-//!   `check_only_for` family (`-n`, `--readonly`, `--dry-run`), not
-//!   the repair flow's `-y` / `-a` / `--repair` / `-L` paths.
+//! * Target selection does not route through `repair`; Doctor resolves
+//!   the target via `target::plan` only. Section-level diagnosis still
+//!   consumes repair flows (`check_only_for`, `mount_repair::diagnose`,
+//!   `boot_repair::detect`) in read-only mode pending later phases that
+//!   will move those surfaces under the `target` capability.
 //! * Doctor NEVER invokes the boot provider's `execute` or `verify`
 //!   methods; it only consults the pure `detect()` function and
 //!   reads deployed asset files directly.
@@ -74,7 +76,7 @@ pub fn run_doctor_with<R: CommandRunner + ?Sized>(runner: &R) -> DoctorReport {
 
 fn run_sections<R: CommandRunner + ?Sized>(
     runner: &R,
-    target: &crate::shared::model::mount_repair::TargetIdentity,
+    target: &crate::target::model::TargetIdentity,
     env: &DoctorEnvironment,
     report: &mut DoctorReport,
 ) -> Vec<DoctorSection> {

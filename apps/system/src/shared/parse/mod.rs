@@ -5,6 +5,5 @@
 //! reuse the same parsers (e.g. reading /etc/fstab from the running host
 //! vs. from a mounted target root).
 
-pub mod blkid;
 pub mod fstab;
 pub mod mountinfo;

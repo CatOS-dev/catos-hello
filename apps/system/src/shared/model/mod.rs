@@ -3,7 +3,7 @@
 //! Organised by domain (`storage`, `repair`, `snapshot`, `system`).
 //! Each sub-module re-exports its types so callers can use either the
 //! short path (`crate::shared::model::<Type>`) or the qualified domain
-//! path (`crate::shared::model::storage::<Type>`).
+//! path (`crate::target::model::<Type>`).
 
 pub mod evidence;
 pub mod repair;

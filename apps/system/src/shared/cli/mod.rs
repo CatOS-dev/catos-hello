@@ -15,7 +15,7 @@ pub use types::*;
 mod tests {
     use super::*;
     use crate::shared::error::exit_code;
-    use crate::shared::system_root::SystemRoot;
+    use crate::target::diagnose::system_root::SystemRoot;
     use std::path::Path;
 
     fn default_root() -> SystemRoot {

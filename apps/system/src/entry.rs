@@ -63,11 +63,12 @@ impl fmt::Display for Invocation {
 /// `main.rs` calls once argv has been parsed.
 pub fn build_report(
     invocation: Invocation,
-    target_root: &crate::shared::system_root::SystemRoot,
-) -> Result<crate::shared::model::inspection::InspectionReport, Error> {
-    use crate::shared::model::inspection::Warning;
-    use crate::shared::probe::fs_probe::RealFilesystem;
-    use crate::shared::probe::{detect_capabilities, detect_runtime, inspect_target};
+    target_root: &crate::target::diagnose::system_root::SystemRoot,
+) -> Result<crate::target::model::InspectionReport, Error> {
+    use crate::target::model::Warning;
+    use crate::target::diagnose::filesystem::RealFilesystem;
+    use crate::target::diagnose::runtime::{detect_capabilities, detect_runtime};
+    use crate::target::diagnose::candidate::inspect_target;
     use crate::SCHEMA_VERSION;
 
     let fs = RealFilesystem;
@@ -82,7 +83,7 @@ pub fn build_report(
         .map(|m| Warning::new("PROBE_WARNING", m))
         .collect();
 
-    Ok(crate::shared::model::inspection::InspectionReport {
+    Ok(crate::target::model::InspectionReport {
         schema_version: SCHEMA_VERSION,
         program_version: crate::PROGRAM_VERSION.to_string(),
         invocation: invocation.as_str().to_string(),
@@ -202,7 +203,7 @@ fn run_via_full_parser(invocation: Invocation, argv: &[String]) -> i32 {
     use std::io::Write;
     // Validate the default target root. In phase 1 the default is `/`;
     // if `/` is somehow inaccessible we cannot proceed.
-    let default_root = match crate::shared::system_root::SystemRoot::from_user_input("/") {
+    let default_root = match crate::target::diagnose::system_root::SystemRoot::from_user_input("/") {
         Ok(r) => r,
         Err(e) => {
             eprintln!("{invocation}: {e}");

@@ -8,10 +8,10 @@ use crate::shared::model::mount_repair::{
     AppliedAction, BootMountLayout, FstabTransaction, MountRepairCleanup, MountRepairOutcome,
     MountRepairPlan, MountRepairReport, MountVerification, PlannedDirectory, TargetIdentity,
 };
-use crate::shared::model::storage::BlockDevice;
+use crate::target::model::BlockDevice;
 use crate::shared::mount::syscall::{self, ms_flags};
-use crate::shared::probe::fs_probe::{FilesystemProbe, RealFilesystem};
-use crate::shared::snapshot_engine::confined;
+use crate::target::diagnose::filesystem::{FilesystemProbe, RealFilesystem};
+use crate::target::execute::confined;
 use crate::shared::snapshot_engine::external as btrfs;
 use crate::shared::snapshot_engine::lock::DeviceLock;
 
@@ -101,7 +101,7 @@ pub(super) fn rollback_created_resources(
                 mount_point: mount_point.clone(),
             }),
             Err(error) => {
-                let reason = error.message.to_string();
+                let reason = error.to_string();
                 actions.push(AppliedAction::RollbackResidual {
                     resource: mount_point.clone(),
                     reason: reason.clone(),
@@ -111,12 +111,12 @@ pub(super) fn rollback_created_resources(
         }
     }
     for subvolume in created_subvolumes.iter().rev() {
-        match confined::delete_empty_btrfs_subvolume(top, subvolume) {
+        match crate::shared::snapshot_engine::confined::delete_empty_btrfs_subvolume(top, subvolume) {
             Ok(()) => actions.push(AppliedAction::SubvolumeRolledBack {
                 subvol: subvolume.clone(),
             }),
             Err(error) => {
-                let reason = error.message.to_string();
+                let reason = error.to_string();
                 actions.push(AppliedAction::RollbackResidual {
                     resource: subvolume.clone(),
                     reason: reason.clone(),
@@ -152,10 +152,10 @@ pub(super) fn rollback_nested_esp_mountpoint(
                 })
                 .ok_or_else(|| "separate /boot device disappeared during rollback".to_string())?;
             let _lock =
-                DeviceLock::try_acquire(boot_device).map_err(|error| error.message.to_string())?;
+                DeviceLock::try_acquire(boot_device).map_err(|error| error.to_string())?;
             if mountpoint_matches_device(Path::new("/boot"), boot) {
                 return confined::remove_empty_rooted_directory(Path::new("/boot"), "/efi")
-                    .map_err(|error| error.message.to_string());
+                    .map_err(|error| error.to_string());
             }
             let fstype = boot
                 .filesystem
@@ -168,7 +168,7 @@ pub(super) fn rollback_nested_esp_mountpoint(
                 Path::new(crate::shared::mount::secure_dir::SESSION_ROOT_PARENT),
                 "mount-repair-boot-rollback",
             )
-            .map_err(|error| error.message.to_string())?;
+            .map_err(|error| error.to_string())?;
             let mount_point = session_dir.join("boot");
             std::fs::create_dir(&mount_point)
                 .map_err(|error| format!("cannot create rollback /boot mountpoint: {error}"))?;
@@ -181,14 +181,14 @@ pub(super) fn rollback_nested_esp_mountpoint(
             )
             .map_err(|error| format!("cannot mount separate /boot for rollback: {error}"))?;
             let remove_result = confined::remove_empty_rooted_directory(&mount_point, "/efi")
-                .map_err(|error| error.message.to_string());
+                .map_err(|error| error.to_string());
             let unmount_result = syscall::umount2(&mount_point, 0)
                 .map_err(|error| format!("cannot unmount rollback /boot: {error}"));
             let session_remove = crate::shared::mount::secure_dir::remove_session_dir(
                 Path::new(crate::shared::mount::secure_dir::SESSION_ROOT_PARENT),
                 &session_dir,
             )
-            .map_err(|error| error.message.to_string());
+            .map_err(|error| error.to_string());
             remove_result?;
             unmount_result?;
             session_remove
@@ -200,7 +200,7 @@ pub(super) fn rollback_nested_esp_mountpoint(
         } if esp_mount_point == "/boot/efi" => {
             let rooted = format!("{}/efi", subvolume.trim_end_matches('/'));
             confined::remove_empty_rooted_directory(top, &rooted)
-                .map_err(|error| error.message.to_string())
+                .map_err(|error| error.to_string())
         }
         _ => Ok(()),
     }
@@ -251,7 +251,7 @@ pub(super) fn ensure_nested_esp_mountpoint(
                 .to_str()
                 .ok_or_else(|| "separate /boot device path is not UTF-8".to_string())?;
             let _lock =
-                DeviceLock::try_acquire(boot_device).map_err(|error| error.message.to_string())?;
+                DeviceLock::try_acquire(boot_device).map_err(|error| error.to_string())?;
             if mountpoint_matches_device(Path::new("/boot"), boot) {
                 let fs = RealFilesystem;
                 let existed = match fs.rooted_metadata(Path::new("/boot"), Path::new("efi")) {
@@ -268,7 +268,7 @@ pub(super) fn ensure_nested_esp_mountpoint(
                 };
                 if !existed {
                     confined::create_rooted_directory(Path::new("/boot"), "/efi")
-                        .map_err(|error| error.message.to_string())?;
+                        .map_err(|error| error.to_string())?;
                 }
                 return Ok((!existed).then(|| "/boot/efi".to_string()));
             }
@@ -276,7 +276,7 @@ pub(super) fn ensure_nested_esp_mountpoint(
                 Path::new(crate::shared::mount::secure_dir::SESSION_ROOT_PARENT),
                 "mount-repair-boot-parent",
             )
-            .map_err(|error| error.message.to_string())?;
+            .map_err(|error| error.to_string())?;
             let mount_point = session_dir.join("boot");
             std::fs::create_dir(&mount_point)
                 .map_err(|error| format!("cannot create temporary /boot mountpoint: {error}"))?;
@@ -310,7 +310,7 @@ pub(super) fn ensure_nested_esp_mountpoint(
                 Ok(())
             } else {
                 confined::create_rooted_directory(&mount_point, "/efi")
-                    .map_err(|error| error.message.to_string())
+                    .map_err(|error| error.to_string())
             };
             let unmount_result = syscall::umount2(&mount_point, 0)
                 .map_err(|error| format!("cannot unmount temporary separate /boot: {error}"));
@@ -318,7 +318,7 @@ pub(super) fn ensure_nested_esp_mountpoint(
                 Path::new(crate::shared::mount::secure_dir::SESSION_ROOT_PARENT),
                 &session_dir,
             )
-            .map_err(|error| error.message.to_string());
+            .map_err(|error| error.to_string());
             create_result?;
             unmount_result?;
             remove_result?;
@@ -341,7 +341,7 @@ pub(super) fn ensure_nested_esp_mountpoint(
             };
             if !existed {
                 confined::create_rooted_directory(top, &rooted)
-                    .map_err(|error| error.message.to_string())?;
+                    .map_err(|error| error.to_string())?;
             }
             Ok((!existed).then(|| "/boot/efi".to_string()))
         }

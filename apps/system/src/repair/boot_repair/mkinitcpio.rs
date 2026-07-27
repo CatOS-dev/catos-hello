@@ -16,7 +16,7 @@
 //! ## Hard rules
 //!
 //! * No I/O. All filesystem reads happen through the confined
-//!   [`crate::shared::snapshot_engine::confined`] API in the orchestrator. This
+//!   [`crate::target::execute::confined`] API in the orchestrator. This
 //!   module only transforms bytes.
 //! * The HOOKS array the builder emits MUST match the bootloadu
 //!   ordering: `base udev autodetect microcode modconf kms keyboard

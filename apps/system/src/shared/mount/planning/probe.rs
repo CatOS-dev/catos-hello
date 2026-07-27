@@ -11,21 +11,21 @@ use std::time::Duration;
 
 use crate::shared::model::evidence::Evidence;
 use crate::shared::model::fstab::FstabEntry;
-use crate::shared::model::inspection::{TargetInspection, Warning};
+use crate::target::model::{TargetInspection, Warning};
 use crate::shared::model::mount::{CleanupReport, MountError, MountErrorKind};
-use crate::shared::model::storage::{
+use crate::target::model::{
     BlockDevice, BtrfsSubvolume, BtrfsSubvolumeKind, EspCandidate, RootCandidate,
     RootCandidateConfidence,
 };
 use crate::shared::mount::plan::build_probe_plan;
 use crate::shared::mount::session::{Session, SESSION_ROOT_PARENT};
 use crate::shared::parse::fstab::parse_all_with_diagnostics;
-use crate::shared::probe::candidate::identify_candidates;
-use crate::shared::probe::capability::ProcCaps;
-use crate::shared::probe::fs_probe::{FilesystemProbe, RealFilesystem};
-use crate::shared::probe::inspect_target;
+use crate::target::diagnose::candidate::identify_candidates;
+use crate::target::diagnose::runtime::ProcCaps;
+use crate::target::diagnose::filesystem::{FilesystemProbe, RealFilesystem};
+use crate::target::diagnose::candidate::inspect_target;
 use crate::shared::process::run_trusted_tool;
-use crate::shared::system_root::SystemRoot;
+use crate::target::diagnose::system_root::SystemRoot;
 
 static PROBE_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 const MAX_PROBED_DEVICES: usize = 64;

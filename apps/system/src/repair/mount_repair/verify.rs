@@ -8,15 +8,15 @@ use crate::shared::model::mount_repair::{
     MountRepairCleanup, MountVerification, TargetIdentity,
 };
 use crate::shared::model::recovery::CleanupSummary;
-use crate::shared::model::storage::BlockDevice;
+use crate::target::model::BlockDevice;
 use crate::shared::mount::namespace;
 use crate::shared::mount::plan::{build_plan as build_mount_plan, PlanInputs};
 use crate::shared::mount::probe::probe_unmounted_candidates;
 use crate::shared::mount::session::Session;
 use crate::shared::mount::syscall::{self, ms_flags};
 use crate::shared::parse::fstab::{parse_all_with_diagnostics, FstabEntry};
-use crate::shared::probe::candidate::device_matches_fstab_source;
-use crate::shared::probe::fs_probe::{FilesystemProbe, RealFilesystem};
+use crate::target::diagnose::candidate::device_matches_fstab_source;
+use crate::target::diagnose::filesystem::{FilesystemProbe, RealFilesystem};
 use crate::shared::snapshot_engine::external as btrfs;
 
 use super::select::same_block_device;

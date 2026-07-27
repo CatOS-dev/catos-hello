@@ -30,7 +30,7 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 use crate::shared::model::evidence::Evidence;
-use crate::shared::model::inspection::Warning;
+use crate::target::model::Warning;
 use crate::shared::model::mount_repair::{MountRepairCleanup, TargetIdentity};
 
 // ---------------------------------------------------------------------------

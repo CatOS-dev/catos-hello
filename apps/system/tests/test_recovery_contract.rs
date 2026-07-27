@@ -32,7 +32,8 @@ use catos_system::shared::snapshot_engine::identity::{
 };
 use catos_system::shared::snapshot_engine::plan::{build_confirmation_token, effective_plan_digest, PlanInputs};
 use catos_system::shared::snapshot_engine::state::{reconcile_with_disk_facts, AdvanceAction, Intent};
-use catos_system::shared::snapshot_engine::{confined, store};
+use catos_system::shared::snapshot_engine::store;
+use catos_system::target::execute::confined;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 

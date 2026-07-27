@@ -43,7 +43,7 @@ use std::path::{Path, PathBuf};
 use crate::shared::model::evidence::Evidence;
 use crate::shared::model::fstab::{FstabEntry, FstabEntryKind, FstabSource};
 use crate::shared::model::mount::{MountError, MountErrorKind, MountPlan, MountStep, NamespaceState};
-use crate::shared::model::storage::BlockDevice;
+use crate::target::model::BlockDevice;
 
 // ---------------------------------------------------------------------------
 // Per-fstype option table
@@ -703,7 +703,7 @@ fn unsafe_target_error(target: &str, message: &str) -> MountError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::shared::model::storage::{DeviceClass, DiskKind, PartitionRole};
+    use crate::target::model::{DeviceClass, DiskKind, PartitionRole};
 
     fn ext4_root_device() -> BlockDevice {
         BlockDevice {

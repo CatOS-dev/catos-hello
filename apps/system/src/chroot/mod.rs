@@ -39,11 +39,11 @@ use crate::chroot::btrfs::list_subvolumes;
 use crate::chroot::fstab::{read as read_fstab, FsTabEntry};
 use crate::shared::error::exit_code;
 use crate::shared::process::trusted_tool_path;
+use crate::target::execute::luks;
 
 pub mod block_device;
 pub mod btrfs;
 pub mod fstab;
-pub mod luks;
 
 /// Parsed `catos-chroot` arguments.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -116,7 +116,7 @@ pub fn run(argv: &[String]) -> i32 {
     };
 
     if root_device.is_crypto_luks() {
-        if let Err(message) = luks::open(&root_device) {
+        if let Err(message) = luks::open(&root_device.name, root_device.uuid.as_deref()) {
             eprintln!("catos-chroot: {message}");
             return exit_code::PROBE_FAILED;
         }
@@ -350,7 +350,14 @@ fn fstab_btrfs_option(entry: &FsTabEntry) -> Option<&str> {
 /// created) by the caller; this only reverses the crypto layer.
 fn cleanup(opened_luks: &[BlockDevice], _extra_mounts: &[PathBuf]) -> Result<(), String> {
     for device in opened_luks {
-        if let Err(error) = luks::close(device) {
+        let Some(uuid) = device.uuid.as_deref() else {
+            eprintln!(
+                "catos-chroot: warning: cannot close LUKS device {} without UUID",
+                device.name
+            );
+            continue;
+        };
+        if let Err(error) = luks::close(uuid) {
             eprintln!("catos-chroot: warning: {error}");
         }
     }

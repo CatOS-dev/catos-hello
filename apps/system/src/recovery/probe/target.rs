@@ -11,7 +11,7 @@ use crate::shared::model::recovery::{
 use crate::shared::mount::plan::build_probe_plan;
 use crate::shared::mount::session::Session;
 use crate::shared::parse::fstab::{self, FstabEntry, FstabEntryKind, FstabSource};
-use crate::shared::snapshot_engine::confined;
+use crate::target::execute::confined;
 use crate::shared::snapshot_engine::external as btrfs;
 use crate::shared::snapshot_engine::identity::{
     canonical_block_identity, SubvolumePath,
@@ -212,8 +212,8 @@ fn read_fstab_entries(
     let path = super::rooted_join(subvolume, "/etc/fstab");
     let bytes = match confined::read_rooted_file(top_level, &path) {
         Ok(bytes) => bytes,
-        Err(error) if error.kind == RecoveryErrorKind::TransactionNotFound => return Ok(None),
-        Err(error) => return Err(error),
+        Err(crate::shared::error::FsError::NotFound) => return Ok(None),
+        Err(error) => return Err(crate::shared::snapshot_engine::confined::fs_to_recovery(error)),
     };
     let body = String::from_utf8(bytes).map_err(|error| {
         RecoveryError::new(

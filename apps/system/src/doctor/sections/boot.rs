@@ -7,7 +7,8 @@ use crate::shared::model::doctor::{
     DoctorReport, DoctorSection, DoctorSectionId, DoctorSectionStatus, DoctorSeverity,
 };
 use crate::shared::model::evidence::Evidence;
-use crate::shared::model::mount_repair::TargetIdentity;
+use crate::shared::model::mount_repair::TargetIdentity as RepairTargetIdentity;
+use crate::target::model::TargetIdentity;
 use crate::repair::boot_repair::detect::{detect, DetectionInputs, DetectionVerdict};
 
 use super::{has_target_path, push_evidence, read_target_file, set_section, target_root_path};
@@ -20,7 +21,8 @@ pub(in crate::doctor) fn run_boot_section(
     let id = DoctorSectionId::Boot;
     let inputs = collect_detection_inputs(target);
     push_boot_evidence(sections, id, &inputs);
-    let verdict = detect(&inputs, target);
+    let repair_target = repair_identity_from(target);
+    let verdict = detect(&inputs, &repair_target);
     match verdict {
         DetectionVerdict::Detected { provider, method, evidence } => {
             for ev in evidence {
@@ -90,6 +92,18 @@ pub(in crate::doctor) fn run_boot_section(
         }
     }
     Ok(())
+}
+
+fn repair_identity_from(target: &TargetIdentity) -> RepairTargetIdentity {
+    RepairTargetIdentity {
+        root_device: target.root_device.clone().unwrap_or_default(),
+        root_fstype: target.root_fstype.clone().unwrap_or_default(),
+        root_subvol: target.root_subvol.clone(),
+        root_uuid: target.root_uuid.clone(),
+        esp_device: None,
+        esp_uuid: None,
+        boot_layout: None,
+    }
 }
 
 fn collect_detection_inputs(target: &TargetIdentity) -> DetectionInputs {
@@ -201,11 +215,11 @@ pub(in crate::doctor) fn run_secure_boot_section(
         ),
     );
 
-    let esp_present = target
-        .boot_layout
-        .as_ref()
-        .and_then(|l| l.esp_mount_point())
-        .is_some();
+    // boot_layout (and therefore the ESP mount-point signal it carries)
+    // is not discovered on the minimal `target::plan` path. Until a
+    // later phase wires this section through its own layout-detection
+    // capability, treat ESP as absent here.
+    let esp_present = false;
     if !esp_present && firmware_sb_on.is_none() && firmware_boot_conf.is_none() {
         set_section(sections, id, DoctorSectionStatus::NotApplicable);
         report.limitations.push(DoctorLimitation::new(

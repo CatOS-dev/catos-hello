@@ -4,10 +4,10 @@
 use std::io::Write;
 
 use crate::shared::cli::View;
-use crate::shared::model::capability::{Capability, CapabilityStatus};
+use crate::target::model::{Capability, CapabilityStatus};
 use crate::shared::model::evidence::Evidence;
-use crate::shared::model::inspection::InspectionReport;
-use crate::shared::model::runtime::{Detection, DetectionStatus, PrimaryRuntimeMode};
+use crate::target::model::InspectionReport;
+use crate::target::model::{Detection, DetectionStatus, PrimaryRuntimeMode};
 
 /// Render the report as human-readable text into `out`. The view controls
 /// which sections are emitted, matching the JSON contract: `environment`
@@ -189,8 +189,8 @@ fn detection_status_str(s: &DetectionStatus) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::shared::model::inspection::{TargetInspection, Warning};
-    use crate::shared::model::RuntimeFacts;
+    use crate::target::model::{TargetInspection, Warning};
+    use crate::target::model::RuntimeFacts;
 
     fn empty_report() -> InspectionReport {
         InspectionReport {
@@ -203,13 +203,13 @@ mod tests {
             target: TargetInspection {
                 root: std::path::PathBuf::from("/"),
                 os_release: None,
-                has_fstab: crate::shared::model::Presence::Absent,
-                has_crypttab: crate::shared::model::Presence::Absent,
-                has_pacman_db: crate::shared::model::Presence::Absent,
-                has_usr: crate::shared::model::Presence::Absent,
-                has_boot: crate::shared::model::Presence::Absent,
-                has_efi: crate::shared::model::Presence::Absent,
-                has_boot_efi: crate::shared::model::Presence::Absent,
+                has_fstab: crate::target::model::Presence::Absent,
+                has_crypttab: crate::target::model::Presence::Absent,
+                has_pacman_db: crate::target::model::Presence::Absent,
+                has_usr: crate::target::model::Presence::Absent,
+                has_boot: crate::target::model::Presence::Absent,
+                has_efi: crate::target::model::Presence::Absent,
+                has_boot_efi: crate::target::model::Presence::Absent,
                 is_catos_target: Detection::unknown(vec![]),
                 tool_paths: vec![],
             },

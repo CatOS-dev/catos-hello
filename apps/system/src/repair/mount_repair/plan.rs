@@ -7,7 +7,7 @@ use crate::shared::model::mount_repair::{
     BootMountLayout, FstabDigest, FstabTransaction, MountProblem, MountRepairPlan,
     PlannedDirectory, PlannedFstabEdit, PlannedSubvolume, default_mount_options,
 };
-use crate::shared::model::storage::BlockDevice;
+use crate::target::model::BlockDevice;
 use crate::shared::parse::fstab::{parse_all_with_diagnostics, FstabEntry, FstabEntryKind};
 use crate::repair::fstab_edit::apply_edits;
 use crate::repair::path_safety::{validate_directory_creation, PathObservation};

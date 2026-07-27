@@ -38,13 +38,13 @@ use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
 use crate::shared::model::evidence::Evidence;
-use crate::shared::model::inspection::Warning;
+use crate::target::model::Warning;
 use crate::shared::model::repair::{FsRepairOutcome, FsRepairReport, RepairCleanup, RepairTool};
-use crate::shared::model::runtime::DetectionStatus;
-use crate::shared::model::storage::{BlockDevice, DeviceClass, PartitionRole, RootCandidateConfidence};
+use crate::target::model::DetectionStatus;
+use crate::target::model::{BlockDevice, DeviceClass, PartitionRole, RootCandidateConfidence};
 use crate::shared::mount::probe::probe_unmounted_candidates;
-use crate::shared::probe::discover_devices;
-use crate::shared::probe::fs_probe::RealFilesystem;
+use crate::target::diagnose::block::discover_devices;
+use crate::target::diagnose::filesystem::RealFilesystem;
 use crate::shared::snapshot_engine::lock::DeviceLock;
 use crate::repair::runner::{CommandRunner, TrustedRunner};
 use crate::repair::fs_flows::{
@@ -206,7 +206,7 @@ pub fn run_fs_repair_with<R: CommandRunner + ?Sized>(
 
 fn auto_select_catos_root(
     devices: &[BlockDevice],
-    roots: &[crate::shared::model::storage::RootCandidate],
+    roots: &[crate::target::model::RootCandidate],
 ) -> Result<PathBuf, Vec<String>> {
     let candidates: Vec<PathBuf> = roots
         .iter()

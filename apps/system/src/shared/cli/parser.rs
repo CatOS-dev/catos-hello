@@ -1,7 +1,7 @@
 use super::help::{help_text, version_text};
 use super::types::*;
 use crate::shared::error::Error;
-use crate::shared::system_root::SystemRoot;
+use crate::target::diagnose::system_root::SystemRoot;
 use std::path::{Component, Path, PathBuf};
 
 /// Parse a top-level subcommand, consuming the matching `argv` slots.

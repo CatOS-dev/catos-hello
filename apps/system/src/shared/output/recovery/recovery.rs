@@ -373,7 +373,7 @@ fn render_error<W: Write>(out: &mut W, error: &RecoveryError) -> std::io::Result
 
 fn render_warnings<W: Write>(
     out: &mut W,
-    warnings: &[crate::shared::model::inspection::Warning],
+    warnings: &[crate::target::model::Warning],
 ) -> std::io::Result<()> {
     if warnings.is_empty() {
         return Ok(());

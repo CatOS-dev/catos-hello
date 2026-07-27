@@ -11,9 +11,9 @@ pub use scan::*;
 pub use target::*;
 pub use util::*;
 
-use crate::shared::model::inspection::{TargetInspection, Warning};
+use crate::target::model::{TargetInspection, Warning};
 use crate::shared::model::mount::{MountPlan, MountSession};
-use crate::shared::model::storage::StorageReport;
+use crate::target::model::StorageReport;
 
 /// Outcome of a phase-2 command. Each variant carries the structured
 /// model that the matching output renderer consumes.

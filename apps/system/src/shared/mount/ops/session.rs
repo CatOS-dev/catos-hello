@@ -40,7 +40,7 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use crate::shared::model::evidence::Evidence;
-use crate::shared::model::inspection::Warning;
+use crate::target::model::Warning;
 use crate::shared::model::mount::{
     CleanupReport, MountError, MountErrorKind, MountPlan, MountSession, MountSessionState,
     MountedResource, NamespaceState, ResidualMount,

@@ -33,8 +33,9 @@ use crate::shared::model::recovery::{
     RecoveryError, RecoveryErrorKind, TransactionRecord, RECOVERY_PLAN_SCHEMA_VERSION,
     TX_RECORD_SCHEMA_VERSION,
 };
-use crate::shared::snapshot_engine::confined;
+use crate::shared::snapshot_engine::confined::fs_to_recovery;
 use crate::shared::snapshot_engine::identity::{validate_plan_shape, validate_recovery_id};
+use crate::target::execute::confined;
 
 /// Minimal view used to peek at a record's `schema_version` field
 /// BEFORE attempting a typed deserialization. This keeps v1 records
@@ -144,7 +145,7 @@ pub fn persist_record(path: &Path, record: &TransactionRecord) -> Result<(), Rec
         )
     })?;
 
-    confined::atomic_write(path, &json, 0o600)
+    Ok(confined::atomic_write(path, &json, 0o600)?)
 }
 
 /// Load every transaction record under `transactions_dir`. Skips
@@ -159,7 +160,7 @@ pub fn list_records(
     let entries = match confined::list_directory_names(transactions_dir) {
         Ok(entries) => entries,
         Err(error) => {
-            errs.push(error);
+            errs.push(fs_to_recovery(error));
             return (ok, errs);
         }
     };
@@ -194,7 +195,7 @@ pub fn list_records(
 /// subvolumes — those are owned by btrfs-progs and managed by the
 /// engine.
 pub fn remove_record(path: &Path) -> Result<(), RecoveryError> {
-    confined::remove_file(path)
+    Ok(confined::remove_file(path)?)
 }
 
 /// Persist a [`RecoveryPlan`] as a standalone file (used by `recovery
@@ -222,7 +223,7 @@ pub fn persist_plan(
         )
     })?;
 
-    confined::atomic_write(path, &json, 0o600)
+    Ok(confined::atomic_write(path, &json, 0o600)?)
 }
 
 pub fn load_plan(path: &Path) -> Result<crate::shared::model::recovery::RecoveryPlan, RecoveryError> {
@@ -298,6 +299,7 @@ pub fn load_plan(path: &Path) -> Result<crate::shared::model::recovery::Recovery
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::shared::error::FsError;
     use crate::shared::model::recovery::{
         BootLayout, BtrfsFilesystemIdentity, BtrfsSubvolumeIdentity, CompletedStep, DiskFacts,
         FstabRootDefinition, RecoveryPlan, TransactionPaths, TransactionState,
@@ -530,7 +532,10 @@ mod tests {
         let root = scratch_root("escape");
         let hostile = root.join(".catos-recovery/transactions/../outside/state.json");
         let error = confined::ConfinedPath::parse(&hostile).unwrap_err();
-        assert_eq!(error.kind, RecoveryErrorKind::UnsafeRecoveryPath);
+        assert!(
+            matches!(error, FsError::OutsideRoot(_)),
+            "parent-escape must surface as FsError::OutsideRoot, got {error:?}"
+        );
     }
 
     #[test]

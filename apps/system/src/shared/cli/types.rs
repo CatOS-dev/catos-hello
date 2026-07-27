@@ -1,4 +1,4 @@
-use crate::shared::system_root::SystemRoot;
+use crate::target::diagnose::system_root::SystemRoot;
 use std::path::PathBuf;
 
 /// One of the phase-1, phase-2, or phase-3 commands.
@@ -8,7 +8,7 @@ use std::path::PathBuf;
 ///
 /// Phase 2 commands are read-only storage discovery and target mount:
 ///   * `storage scan` — walks sysfs + blkid + mountinfo and emits a
-///     [`crate::shared::model::storage::StorageReport`].
+///     [`crate::target::model::StorageReport`].
 ///   * `target plan` — reads a target fstab + discovers devices and emits
 ///     a [`crate::shared::model::mount::MountPlan`] without executing any mount.
 ///   * `target mount` — same as `target plan` then executes the plan in a

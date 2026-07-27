@@ -4,13 +4,14 @@ use super::util::merge_warnings;
 use std::collections::HashSet;
 
 use crate::shared::error::Error;
-use crate::shared::model::inspection::Warning;
-use crate::shared::model::storage::StorageReport;
+use crate::target::model::Warning;
+use crate::target::model::StorageReport;
 use crate::shared::mount::probe::probe_unmounted_candidates;
-use crate::shared::probe::candidate::candidate_ambiguities;
-use crate::shared::probe::fs_probe::RealFilesystem;
-use crate::shared::probe::{discover_devices, identify_candidates};
-use crate::shared::system_root::SystemRoot;
+use crate::target::diagnose::candidate::candidate_ambiguities;
+use crate::target::diagnose::filesystem::RealFilesystem;
+use crate::target::diagnose::block::discover_devices;
+use crate::target::diagnose::candidate::identify_candidates;
+use crate::target::diagnose::system_root::SystemRoot;
 
 pub fn run_storage_scan(root: &SystemRoot) -> Result<Phase2Outcome, Error> {
     let fs = RealFilesystem;

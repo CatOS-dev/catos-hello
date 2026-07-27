@@ -36,7 +36,7 @@ pub(super) fn snapshot_repair_state(
         return SnapshotRepairState::default();
     }
 
-    if crate::shared::snapshot_engine::confined::read_rooted_file(
+    if crate::target::execute::confined::read_rooted_file(
         target_root,
         "/etc/snapper/configs/root",
     )
@@ -48,7 +48,7 @@ pub(super) fn snapshot_repair_state(
         };
     }
 
-    let template = crate::shared::snapshot_engine::confined::read_rooted_file(
+    let template = crate::target::execute::confined::read_rooted_file(
         target_root,
         "/etc/snapper/config-templates/catos-root",
     )
@@ -219,18 +219,18 @@ pub(super) fn run_snapshot_repair(
 }
 
 fn target_snapshot_catalog_has_entries(target_root: &Path) -> bool {
-    crate::shared::snapshot_engine::confined::list_rooted_directory_names(target_root, "/.snapshots")
+    crate::target::execute::confined::list_rooted_directory_names(target_root, "/.snapshots")
         .unwrap_or_default()
         .into_iter()
         .filter_map(|entry| entry.into_string().ok())
         .filter(|entry| entry.chars().all(|character| character.is_ascii_digit()))
         .any(|entry| {
-            crate::shared::snapshot_engine::confined::rooted_regular_file_size(
+            crate::target::execute::confined::rooted_regular_file_size(
                 target_root,
                 &format!("/.snapshots/{entry}/info.xml"),
             )
             .is_ok()
-                && crate::shared::snapshot_engine::confined::list_rooted_directory_names(
+                && crate::target::execute::confined::list_rooted_directory_names(
                     target_root,
                     &format!("/.snapshots/{entry}/snapshot"),
                 )
@@ -253,12 +253,12 @@ fn snapshot_generate_reports_zero_deployment(
 }
 
 fn snapshot_unit_present(target_root: &Path, unit: &str) -> bool {
-    crate::shared::snapshot_engine::confined::read_rooted_file(
+    crate::target::execute::confined::read_rooted_file(
         target_root,
         &format!("/usr/lib/systemd/system/{unit}"),
     )
     .is_ok()
-        || crate::shared::snapshot_engine::confined::read_rooted_file(
+        || crate::target::execute::confined::read_rooted_file(
             target_root,
             &format!("/etc/systemd/system/{unit}"),
         )

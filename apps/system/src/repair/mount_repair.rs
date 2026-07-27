@@ -42,15 +42,15 @@ use std::path::{Path, PathBuf};
 
 use crate::shared::model::evidence::Evidence;
 use crate::shared::model::fstab::FstabSource;
-use crate::shared::model::inspection::Warning;
+use crate::target::model::Warning;
 use crate::shared::model::mount_repair::{
     default_mount_options, AppliedAction, BootMountLayout, FstabDigest, FstabTransaction,
     MountProblem, MountRepairCleanup, MountRepairOutcome, MountRepairPlan, MountRepairReport,
     MountVerification, PlannedDirectory, PlannedFstabEdit, PlannedSubvolume, TargetIdentity,
 };
 use crate::shared::model::recovery::{CleanupSummary, RecoveryError, RecoveryErrorKind};
-use crate::shared::model::runtime::DetectionStatus;
-use crate::shared::model::storage::{
+use crate::target::model::DetectionStatus;
+use crate::target::model::{
     BlockDevice, DeviceClass, EspCandidate, PartitionRole, RootCandidateConfidence,
 };
 use crate::shared::mount::namespace;
@@ -59,10 +59,9 @@ use crate::shared::mount::probe::{inspect_selected_root, probe_unmounted_candida
 use crate::shared::mount::session::Session;
 use crate::shared::mount::syscall::{self, ms_flags};
 use crate::shared::parse::fstab::{parse_all_with_diagnostics, FstabEntry, FstabEntryKind};
-use crate::shared::probe::candidate::device_matches_fstab_source;
-use crate::shared::probe::discover_devices;
-use crate::shared::probe::fs_probe::{FilesystemProbe, RealFilesystem};
-use crate::shared::snapshot_engine::confined;
+use crate::target::diagnose::candidate::device_matches_fstab_source;
+use crate::target::diagnose::block::discover_devices;
+use crate::target::diagnose::filesystem::{FilesystemProbe, RealFilesystem};
 use crate::shared::snapshot_engine::external as btrfs;
 use crate::shared::snapshot_engine::lock::DeviceLock;
 use crate::repair::fstab_edit::apply_edits;
@@ -70,7 +69,7 @@ use crate::repair::path_safety::{validate_directory_creation, PathObservation};
 use crate::repair::subvol_decision::{
     decide_all, history_from_entries, CatosConfirmation, SubvolDecision, SubvolFacts,
 };
-use crate::shared::system_root::SystemRoot;
+use crate::target::diagnose::system_root::SystemRoot;
 
 /// Inputs to [`diagnose`] / [`build_plan`]. Built by the caller
 /// from the parsed fstab, the btrfs probe, and the device discovery

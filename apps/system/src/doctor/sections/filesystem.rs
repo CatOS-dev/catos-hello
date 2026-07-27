@@ -1,20 +1,22 @@
 //! Environment, storage, and filesystem sections.
 
+use std::path::Path;
+
 use crate::shared::model::doctor::{
     issue_code, recommendation_code, DoctorEnvironment, DoctorIssue, DoctorLimitation,
     DoctorReport, DoctorSection, DoctorSectionId, DoctorSectionStatus, DoctorSeverity,
 };
 use crate::shared::model::evidence::Evidence;
-use crate::shared::model::mount_repair::TargetIdentity;
+use crate::target::model::TargetIdentity;
 use crate::repair::fs_flows::{check_only_for, ReadonlyOutcome, ReadonlyResult};
 use crate::repair::runner::CommandRunner;
 
 use super::{is_device_mounted_rw, push_evidence, set_section};
 
 pub(in crate::doctor) fn capture_environment() -> DoctorEnvironment {
-    use crate::shared::model::runtime::DetectionStatus;
-    let fs = crate::shared::probe::fs_probe::RealFilesystem;
-    let runtime = crate::shared::probe::detect_runtime(&fs);
+    use crate::target::model::DetectionStatus;
+    let fs = crate::target::diagnose::filesystem::RealFilesystem;
+    let runtime = crate::target::diagnose::runtime::detect_runtime(&fs);
     let primary_mode = runtime.primary_mode();
     let running_root_is_catos =
         matches!(runtime.is_snapshot_boot.status, DetectionStatus::Detected)
@@ -25,8 +27,8 @@ pub(in crate::doctor) fn capture_environment() -> DoctorEnvironment {
     }
 }
 
-fn primary_mode_label(mode: crate::shared::model::runtime::PrimaryRuntimeMode) -> String {
-    use crate::shared::model::runtime::PrimaryRuntimeMode::*;
+fn primary_mode_label(mode: crate::target::model::PrimaryRuntimeMode) -> String {
+    use crate::target::model::PrimaryRuntimeMode::*;
     match mode {
         RunningSystem => "running_system",
         Chroot => "chroot",
@@ -37,14 +39,14 @@ fn primary_mode_label(mode: crate::shared::model::runtime::PrimaryRuntimeMode) -
     .to_string()
 }
 
-fn is_running_root_catos(fs: &crate::shared::probe::fs_probe::RealFilesystem) -> bool {
-    use crate::shared::model::runtime::DetectionStatus;
-    let root = match crate::shared::system_root::SystemRoot::from_user_input("/") {
+fn is_running_root_catos(fs: &crate::target::diagnose::filesystem::RealFilesystem) -> bool {
+    use crate::target::model::DetectionStatus;
+    let root = match crate::target::diagnose::system_root::SystemRoot::from_user_input("/") {
         Ok(r) => r,
         Err(_) => return false,
     };
     let mut warnings = Vec::new();
-    let inspection = crate::shared::probe::inspect_target(fs, &root, &mut warnings);
+    let inspection = crate::target::diagnose::candidate::inspect_target(fs, &root, &mut warnings);
     inspection.is_catos_target.status == DetectionStatus::Detected
 }
 
@@ -82,15 +84,18 @@ pub(in crate::doctor) fn run_storage_section(
     section.evidence.push(Evidence::new(
         "ROOT_DEVICE",
         "doctor::storage",
-        format!("root device: {}", target.root_device.display()),
+        format!(
+            "root device: {}",
+            target
+                .root_device
+                .as_deref()
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|| "<unknown>".to_string())
+        ),
     ));
-    if let Some(esp) = target.esp_device.as_deref() {
-        section.evidence.push(Evidence::new(
-            "ESP_DEVICE",
-            "doctor::storage",
-            format!("ESP device: {}", esp.display()),
-        ));
-    }
+    // ESP device is not discovered by the minimal `target::plan` path;
+    // surfacing it here is an open design point for a later phase that
+    // wires the section through its own ESP-detection capability.
     Ok(())
 }
 
@@ -101,8 +106,8 @@ pub(in crate::doctor) fn run_filesystem_section<R: CommandRunner + ?Sized>(
     report: &mut DoctorReport,
 ) -> Result<(), ()> {
     let id = DoctorSectionId::Filesystem;
-    let fstype = target.root_fstype.as_str();
-    let device = match target.root_device.to_str() {
+    let fstype = target.root_fstype.as_deref().unwrap_or("");
+    let device = match target.root_device.as_deref().and_then(Path::to_str) {
         Some(s) => s.to_string(),
         None => {
             let section = set_section(sections, id, DoctorSectionStatus::Skipped);
@@ -121,7 +126,12 @@ pub(in crate::doctor) fn run_filesystem_section<R: CommandRunner + ?Sized>(
         }
     };
 
-    if is_device_mounted_rw(&target.root_device) {
+    if target
+        .root_device
+        .as_deref()
+        .map(|d| is_device_mounted_rw(d))
+        .unwrap_or(false)
+    {
         let section = set_section(sections, id, DoctorSectionStatus::Skipped);
         report.limitations.push(DoctorLimitation::new(
             id,

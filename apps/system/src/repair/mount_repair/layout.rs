@@ -2,9 +2,9 @@
 
 use std::path::Path;
 use crate::shared::model::mount_repair::BootMountLayout;
-use crate::shared::model::storage::{BlockDevice, DeviceClass, DiskKind, PartitionRole};
+use crate::target::model::{BlockDevice, DeviceClass, DiskKind, PartitionRole};
 use crate::shared::parse::fstab::FstabEntry;
-use crate::shared::probe::candidate::device_matches_fstab_source;
+use crate::target::diagnose::candidate::device_matches_fstab_source;
 use super::select::same_block_device;
 use super::MountPointObservation;
 

@@ -3,7 +3,7 @@
 use std::path::PathBuf;
 
 use crate::shared::cli::RecoveryArgs;
-use crate::shared::model::inspection::Warning;
+use crate::target::model::Warning;
 use crate::shared::model::recovery::{
     RecoveryError, RecoveryErrorKind, RecoveryInspectReport, RecoveryListReport,
     RecoveryPlan, RecoveryStatusReport, TransactionPaths, TransactionSummary,
@@ -48,7 +48,15 @@ pub(super) fn run_list(args: &RecoveryArgs) -> Result<RecoveryListReport, Recove
         )
     })?;
 
-    let result = (|| {
+    let result: Result<
+        (
+            crate::shared::model::recovery::BtrfsFilesystemIdentity,
+            Vec<crate::shared::model::recovery::BtrfsSubvolumeIdentity>,
+            Vec<(PathBuf, crate::shared::model::recovery::TransactionRecord)>,
+            Vec<RecoveryError>,
+        ),
+        RecoveryError,
+    > = (|| {
         let target = validate_mounted_filesystem(&mounted.target_root, &canonical_device)?;
         let readonly_snapshots = btrfs::list_readonly_subvolumes(&mounted.target_root)?;
         let transactions_dir = mounted

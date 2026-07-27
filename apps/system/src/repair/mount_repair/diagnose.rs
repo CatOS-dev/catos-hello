@@ -6,9 +6,9 @@ use crate::shared::model::fstab::FstabSource;
 use crate::shared::model::mount_repair::{
     default_mount_options, MountProblem, TargetIdentity,
 };
-use crate::shared::model::storage::{BlockDevice, EspCandidate};
+use crate::target::model::{BlockDevice, EspCandidate};
 use crate::shared::parse::fstab::{parse_all_with_diagnostics, FstabEntry, FstabEntryKind};
-use crate::shared::probe::candidate::device_matches_fstab_source;
+use crate::target::diagnose::candidate::device_matches_fstab_source;
 use crate::repair::subvol_decision::{decide_all, history_from_entries, CatosConfirmation, SubvolDecision};
 use super::{is_fat_fstype, is_fat_device, MountRepairInputs, MountPointObservation};
 

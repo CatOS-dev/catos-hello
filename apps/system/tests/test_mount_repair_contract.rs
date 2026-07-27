@@ -801,9 +801,9 @@ fn topology_device(
     path: &str,
     fstype: &str,
     uuid: &str,
-    role: catos_system::shared::model::storage::PartitionRole,
-) -> catos_system::shared::model::storage::BlockDevice {
-    use catos_system::shared::model::storage::{BlockDevice, DeviceClass, DiskKind};
+    role: catos_system::target::model::PartitionRole,
+) -> catos_system::target::model::BlockDevice {
+    use catos_system::target::model::{BlockDevice, DeviceClass, DiskKind};
     BlockDevice {
         name: name.into(),
         dev_path: Some(PathBuf::from(path)),
@@ -842,7 +842,7 @@ fn topology_fstab(body: &str) -> Vec<catos_system::shared::model::fstab::FstabEn
 #[test]
 fn detects_all_six_boot_and_esp_layouts() {
     use catos_system::shared::model::mount_repair::BootMountLayout;
-    use catos_system::shared::model::storage::PartitionRole;
+    use catos_system::target::model::PartitionRole;
     use catos_system::repair::mount_repair::detect_boot_mount_layout;
 
     let root = topology_device(

@@ -1,11 +1,8 @@
-//! System-domain model: doctor reports, capabilities, inspection, runtime.
+//! System-domain model: Doctor aggregated-diagnosis data model.
+//!
+//! Phase-1 target refactor: capability / inspection / runtime types
+//! moved to [`crate::target::model`]. Only `doctor` remains here.
 
-pub mod capability;
 pub mod doctor;
-pub mod inspection;
-pub mod runtime;
 
-pub use capability::*;
 pub use doctor::*;
-pub use inspection::*;
-pub use runtime::*;

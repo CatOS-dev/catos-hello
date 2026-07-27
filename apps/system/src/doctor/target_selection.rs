@@ -1,23 +1,24 @@
-//! Target selection for Doctor. Reuses the stage-3 mount-repair
-//! discovery machinery so Doctor's notion of "the target" can never
-//! diverge from `catos-repair mount`'s notion.
+//! Target selection for Doctor.
 //!
-//! Decision tree (per spec section 四):
+//! Doctor identifies the target **directly via the `target` capability**,
+//! not via `repair::mount_repair`. Phase-1 target discovery is strictly
+//! read-only: we confirm the running root when it identifies as CatOS,
+//! and otherwise report `None`. We deliberately do not mount candidate
+//! devices here — mounting is `repair`'s job.
 //!
-//! 1. If the running root is uniquely confirmed as CatOS, select it.
-//! 2. Otherwise, perform target discovery. A single high-confidence
-//!    CatOS target is selected.
-//! 3. Multiple high-confidence targets → `Ambiguous`.
-//! 4. Zero targets → `None`.
-//!
-//! We never fall back to "the first plausible device". The spec is
-//! explicit: 不因为 `/dev/sda2` 排在最前就选择它.
+//! `TargetSelection` carries the canonical minimal
+//! `target::model::TargetIdentity` straight from `target::plan`. No
+//! mini→rich field remapping happens here. Downstream sections that
+//! previously consumed the richer `shared::model::mount_repair::
+//! TargetIdentity` shape now take the minimal identity directly; the
+//! ESP / boot-layout signals (which were always `None` on this path,
+//! because `target::plan` never discovers them) are open design points
+//! to be wired through each section's own capability path in a later
+//! phase.
 
 use crate::shared::model::doctor::{DoctorTarget, DoctorTargetKind};
-use crate::shared::model::mount_repair::{
-    BootMountLayout, MountRepairOutcome, MountRepairReport, TargetIdentity,
-};
-use crate::repair::mount_repair::run_mount_repair_via_cli;
+use crate::target::model::TargetIdentity;
+use crate::target::plan::{discover_target_plan, TargetPlan, TargetPlanKind};
 
 #[derive(Debug, Clone)]
 pub enum TargetSelection {
@@ -29,7 +30,25 @@ pub enum TargetSelection {
 impl TargetSelection {
     pub fn to_target_summary(&self) -> DoctorTarget {
         match self {
-            TargetSelection::Identified(target) => target_summary_for(target),
+            TargetSelection::Identified(target) => {
+                let kind = if target.root_device.as_deref() == Some(std::path::Path::new("/")) {
+                    DoctorTargetKind::RunningRoot
+                } else {
+                    DoctorTargetKind::Offline
+                };
+                DoctorTarget {
+                    kind,
+                    root_device: target
+                        .root_device
+                        .as_deref()
+                        .and_then(|p| p.to_str())
+                        .map(str::to_string),
+                    root_fstype: target.root_fstype.clone(),
+                    root_subvolume: target.root_subvol.clone(),
+                    esp_device: None,
+                    boot_layout: None,
+                }
+            }
             TargetSelection::None { .. } | TargetSelection::Ambiguous { .. } => DoctorTarget {
                 kind: DoctorTargetKind::None,
                 ..DoctorTarget::default()
@@ -38,149 +57,128 @@ impl TargetSelection {
     }
 }
 
-fn target_summary_for(target: &TargetIdentity) -> DoctorTarget {
-    DoctorTarget {
-        kind: DoctorTargetKind::Offline,
-        root_device: target.root_device.to_str().map(str::to_string),
-        root_fstype: Some(target.root_fstype.clone()),
-        root_subvolume: target.root_subvol.clone(),
-        esp_device: target
-            .esp_device
-            .as_deref()
-            .and_then(|p| p.to_str())
-            .map(str::to_string),
-        boot_layout: target.boot_layout.as_ref().map(layout_label),
-    }
-}
-
-fn layout_label(layout: &BootMountLayout) -> String {
-    use BootMountLayout::*;
-    match layout {
-        EspAtBootEfi { .. } => "esp_at_boot_efi",
-        EspAtEfi { .. } => "esp_at_efi",
-        EspAtBoot { .. } => "esp_at_boot",
-        SeparateBootAndEsp { .. } => "separate_boot_and_esp",
-        BootBtrfsSubvolume { .. } => "boot_btrfs_subvolume",
-        BootInsideRoot => "boot_inside_root",
-    }
-    .to_string()
-}
-
 pub fn discover_target() -> TargetSelection {
-    let report: MountRepairReport = run_mount_repair_via_cli(None, None, None, false);
-    translate_mount_report(report)
+    from_plan(discover_target_plan())
 }
 
-pub(super) fn translate_mount_report(report: MountRepairReport) -> TargetSelection {
-    match report.target {
-        Some(target) => TargetSelection::Identified(target),
-        None => match report.final_outcome {
-            MountRepairOutcome::AmbiguousTarget => TargetSelection::Ambiguous {
-                candidates: collect_candidate_descriptions(&report),
+/// Map a [`TargetPlan`] to a [`TargetSelection`] without any field
+/// remapping: the plan's [`TargetIdentity`] flows through unchanged.
+pub(super) fn from_plan(plan: TargetPlan) -> TargetSelection {
+    match plan.kind {
+        TargetPlanKind::RunningRoot | TargetPlanKind::Offline => match plan.identity {
+            Some(identity) => TargetSelection::Identified(identity),
+            None => TargetSelection::None {
+                reason: "target plan carried no identity".to_string(),
             },
-            MountRepairOutcome::NotCatos => TargetSelection::None {
-                reason: "no device on the system was confirmed as a CatOS target".to_string(),
-            },
-            other => TargetSelection::None {
-                reason: format!(
-                    "mount-repair discovery returned outcome {} without a target identity",
-                    other.code()
-                ),
+        },
+        TargetPlanKind::Ambiguous => TargetSelection::Ambiguous {
+            candidates: plan.candidates,
+        },
+        TargetPlanKind::None => TargetSelection::None {
+            reason: if plan.warnings.is_empty() {
+                "no device on the system was confirmed as a CatOS target".to_string()
+            } else {
+                plan.warnings.join("; ")
             },
         },
     }
 }
 
-fn collect_candidate_descriptions(report: &MountRepairReport) -> Vec<String> {
-    let mut out: Vec<String> = Vec::new();
-    for evidence in &report.evidence {
-        if evidence.code == "AUTO_DISCOVERY_REFUSED" || evidence.code.contains("AMBIGUOUS") {
-            out.push(evidence.message.clone());
-        }
-    }
-    if out.is_empty() {
-        out.push("multiple CatOS root candidates discovered".to_string());
-    }
-    out
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::shared::model::evidence::Evidence;
-    use crate::shared::model::mount_repair::MountRepairCleanup;
     use std::path::PathBuf;
 
-    fn sample_target() -> TargetIdentity {
-        TargetIdentity {
-            root_device: PathBuf::from("/dev/nvme0n1p2"),
-            root_fstype: "btrfs".into(),
-            root_subvol: Some("/@".into()),
-            root_uuid: Some("root-uuid".into()),
-            esp_device: Some(PathBuf::from("/dev/nvme0n1p1")),
-            esp_uuid: Some("esp-uuid".into()),
-            boot_layout: None,
-        }
-    }
-
-    fn refused_report(outcome: MountRepairOutcome, reason: &str) -> MountRepairReport {
-        MountRepairReport {
-            target: None,
-            plan: None,
-            fstab_transaction: None,
-            actions: Vec::new(),
-            verification: None,
-            cleanup: MountRepairCleanup::default(),
-            final_outcome: outcome,
-            requires_human_action: true,
-            fully_complete: false,
-            evidence: vec![Evidence::new("REFUSED", "test", reason)],
+    fn plan(kind: TargetPlanKind, identity: Option<TargetIdentity>) -> TargetPlan {
+        TargetPlan {
+            kind,
+            identity,
+            candidates: Vec::new(),
             warnings: Vec::new(),
         }
     }
 
-    #[test]
-    fn identified_report_translates_to_identified_selection() {
-        let mut report = refused_report(MountRepairOutcome::Clean, "stub");
-        report.target = Some(sample_target());
-        report.final_outcome = MountRepairOutcome::Clean;
-        let sel = translate_mount_report(report);
-        assert!(matches!(sel, TargetSelection::Identified(_)));
+    fn offline_identity() -> TargetIdentity {
+        TargetIdentity {
+            root: PathBuf::from("/dev/nvme0n1p2"),
+            root_device: Some(PathBuf::from("/dev/nvme0n1p2")),
+            root_fstype: Some("btrfs".into()),
+            root_subvol: Some("/@".into()),
+            root_uuid: Some("root-uuid".into()),
+        }
     }
 
     #[test]
-    fn ambiguous_outcome_translates_to_ambiguous_selection() {
-        let report = refused_report(MountRepairOutcome::AmbiguousTarget, "ambiguous");
-        let sel = translate_mount_report(report);
+    fn running_root_plan_yields_identified_selection() {
+        let mut p = plan(TargetPlanKind::RunningRoot, None);
+        p.identity = Some(TargetIdentity {
+            root: PathBuf::from("/"),
+            ..TargetIdentity::default()
+        });
+        let sel = from_plan(p);
         match sel {
-            TargetSelection::Ambiguous { candidates } => assert!(!candidates.is_empty()),
+            TargetSelection::Identified(t) => assert_eq!(t.root, PathBuf::from("/")),
+            other => panic!("expected Identified, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn ambiguous_plan_yields_ambiguous_selection() {
+        let mut p = plan(TargetPlanKind::Ambiguous, None);
+        p.candidates = vec!["/dev/sda2".into(), "/dev/sdb2".into()];
+        let sel = from_plan(p);
+        match sel {
+            TargetSelection::Ambiguous { candidates } => assert_eq!(candidates.len(), 2),
             other => panic!("expected Ambiguous, got {other:?}"),
         }
     }
 
     #[test]
-    fn none_outcome_translates_to_none_selection_with_reason() {
-        let report = refused_report(MountRepairOutcome::NotCatos, "not catos");
-        let sel = translate_mount_report(report);
+    fn none_plan_yields_none_selection_with_reason() {
+        let mut p = plan(TargetPlanKind::None, None);
+        p.warnings = vec!["no CatOS root".to_string()];
+        let sel = from_plan(p);
         match sel {
-            TargetSelection::None { reason } => assert!(!reason.is_empty()),
+            TargetSelection::None { reason } => assert!(reason.contains("no CatOS root")),
             other => panic!("expected None, got {other:?}"),
         }
     }
 
     #[test]
-    fn target_summary_carries_device_paths_for_identified_target() {
-        let sel = TargetSelection::Identified(sample_target());
+    fn target_summary_carries_device_paths_for_offline_target() {
+        let sel = TargetSelection::Identified(TargetIdentity {
+            root_device: Some(PathBuf::from("/dev/nvme0n1p2")),
+            root_fstype: Some("btrfs".into()),
+            root_subvol: Some("/@".into()),
+            ..TargetIdentity::default()
+        });
         let summary = sel.to_target_summary();
         assert_eq!(summary.root_device.as_deref(), Some("/dev/nvme0n1p2"));
         assert_eq!(summary.root_fstype.as_deref(), Some("btrfs"));
         assert_eq!(summary.root_subvolume.as_deref(), Some("/@"));
-        assert_eq!(summary.esp_device.as_deref(), Some("/dev/nvme0n1p1"));
     }
 
     #[test]
     fn target_summary_for_none_uses_none_kind() {
+        use crate::shared::model::doctor::DoctorTargetKind;
         let sel = TargetSelection::None { reason: "x".into() };
         assert_eq!(sel.to_target_summary().kind, DoctorTargetKind::None);
+    }
+
+    /// The minimal identity flows through `from_plan` unchanged — no
+    /// field remapping, no esp/boot_layout invention.
+    #[test]
+    fn minimal_identity_flows_through_unchanged() {
+        let p = plan(TargetPlanKind::Offline, Some(offline_identity()));
+        let sel = from_plan(p);
+        match sel {
+            TargetSelection::Identified(t) => {
+                assert_eq!(t.root_device.as_deref(), Some(std::path::Path::new("/dev/nvme0n1p2")));
+                assert_eq!(t.root_fstype.as_deref(), Some("btrfs"));
+                assert_eq!(t.root_subvol.as_deref(), Some("/@"));
+                assert_eq!(t.root_uuid.as_deref(), Some("root-uuid"));
+            }
+            other => panic!("expected Identified, got {other:?}"),
+        }
     }
 }

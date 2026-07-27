@@ -44,7 +44,8 @@ use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
 
 use crate::shared::model::recovery::{RecoveryError, RecoveryErrorKind};
-use crate::shared::snapshot_engine::confined;
+use crate::shared::snapshot_engine::confined::fs_to_recovery;
+use crate::target::execute::confined;
 
 /// `flock(LOCK_EX)` = 2. `LOCK_NB` = 4. Combined = 6.
 const LOCK_EX_NB: std::os::raw::c_int = 2 | 4;
@@ -146,15 +147,16 @@ impl TransactionLock {
     pub fn try_acquire(lock_path: &Path, fsid_for_error: &str) -> Result<Self, RecoveryError> {
         let file = match confined::open_lock_file(lock_path) {
             Ok(file) => file,
-            Err(mut error) => {
-                error.message = format!(
+            Err(error) => {
+                let mut recovery_error = fs_to_recovery(error);
+                recovery_error.message = format!(
                     "cannot safely open transaction lock file {} for fsid {}: {}",
                     lock_path.display(),
                     fsid_for_error,
-                    error.message
+                    recovery_error.message
                 )
                 .into_boxed_str();
-                return Err(error);
+                return Err(recovery_error);
             }
         };
 

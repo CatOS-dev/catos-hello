@@ -34,10 +34,10 @@ impl ConfigTransaction {
             .parent()
             .and_then(Path::to_str)
             .ok_or_else(|| format!("invalid target configuration path {target_path:?}"))?;
-        crate::shared::snapshot_engine::confined::create_rooted_directory(&self.root, parent)
+        crate::target::execute::confined::create_rooted_directory(&self.root, parent)
             .map_err(|error| format!("cannot create target config parent {parent}: {error}"))?;
         let existing =
-            crate::shared::snapshot_engine::confined::read_rooted_file(&self.root, target_path)
+            crate::target::execute::confined::read_rooted_file(&self.root, target_path)
                 .ok();
         if existing.as_deref() == Some(contents.as_bytes()) {
             return Ok(BootAction::ConfigUnchanged {
@@ -46,7 +46,7 @@ impl ConfigTransaction {
         }
         let backup_path = existing.as_ref().map(|bytes| {
             let backup_path = format!("{target_path}.catos-repair.backup");
-            crate::shared::snapshot_engine::confined::atomic_write_rooted(
+            crate::target::execute::confined::atomic_write_rooted(
                 &self.root,
                 &backup_path,
                 bytes,
@@ -56,7 +56,7 @@ impl ConfigTransaction {
             Ok::<String, String>(backup_path)
         });
         let backup_path = backup_path.transpose()?;
-        crate::shared::snapshot_engine::confined::atomic_write_rooted(
+        crate::target::execute::confined::atomic_write_rooted(
             &self.root,
             target_path,
             contents.as_bytes(),
@@ -78,13 +78,13 @@ impl ConfigTransaction {
         let mut errors = Vec::new();
         for change in self.changes.drain(..).rev() {
             let result = match change.original {
-                Some(original) => crate::shared::snapshot_engine::confined::atomic_write_rooted(
+                Some(original) => crate::target::execute::confined::atomic_write_rooted(
                     &self.root,
                     &change.target_path,
                     &original,
                     0o644,
                 ),
-                None => crate::shared::snapshot_engine::confined::remove_rooted_file(
+                None => crate::target::execute::confined::remove_rooted_file(
                     &self.root,
                     &change.target_path,
                 ),

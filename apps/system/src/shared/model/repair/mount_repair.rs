@@ -25,7 +25,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::shared::model::evidence::Evidence;
-use crate::shared::model::inspection::Warning;
+use crate::target::model::Warning;
 
 // ---------------------------------------------------------------------------
 // CatOS standard btrfs layout (single source of truth)

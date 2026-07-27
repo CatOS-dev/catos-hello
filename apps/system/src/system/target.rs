@@ -5,18 +5,18 @@ use std::path::Path;
 use crate::shared::cli::TargetSelection;
 use crate::shared::error::Error;
 use crate::shared::model::fstab::{FstabEntry, FstabEntryKind, FstabSource};
-use crate::shared::model::inspection::Warning;
+use crate::target::model::Warning;
 use crate::shared::model::mount::MountError;
 use crate::shared::mount::plan::{build_plan, PlanInputs};
 use crate::shared::mount::probe::inspect_selected_root;
 use crate::shared::mount::session::Session;
 use crate::shared::parse::fstab::parse_all_with_diagnostics;
-use crate::shared::probe::fs_probe::{FilesystemProbe, RealFilesystem};
-use crate::shared::probe::discover_devices;
-use crate::shared::system_root::SystemRoot;
+use crate::target::diagnose::filesystem::{FilesystemProbe, RealFilesystem};
+use crate::target::diagnose::block::discover_devices;
+use crate::target::diagnose::system_root::SystemRoot;
 
 struct TargetInputs {
-    devices: Vec<crate::shared::model::storage::BlockDevice>,
+    devices: Vec<crate::target::model::BlockDevice>,
     fstab: Vec<FstabEntry>,
     warnings: Vec<Warning>,
 }
@@ -76,7 +76,7 @@ pub fn run_target_mount(
                     }
                 })?)?;
             let mut inspection_warnings = Vec::new();
-            let inspection = crate::shared::probe::inspect_target(
+            let inspection = crate::target::diagnose::candidate::inspect_target(
                 &RealFilesystem,
                 &target_root,
                 &mut inspection_warnings,
@@ -132,7 +132,7 @@ fn prepare_target_inputs(
     let mut fstab = probe.fstab;
     replace_root_entry(&mut fstab, root_device, selection.root_subvolume.as_deref())?;
 
-    if probe.inspection.is_catos_target.status != crate::shared::model::runtime::DetectionStatus::Detected {
+    if probe.inspection.is_catos_target.status != crate::target::model::DetectionStatus::Detected {
         warnings.push(Warning::new(
             "SELECTED_ROOT_NOT_CONFIRMED_CATOS",
             format!(
@@ -171,9 +171,9 @@ fn prepare_target_inputs(
 }
 
 fn find_selected_device<'a>(
-    devices: &'a [crate::shared::model::storage::BlockDevice],
+    devices: &'a [crate::target::model::BlockDevice],
     path: &Path,
-) -> Result<&'a crate::shared::model::storage::BlockDevice, Error> {
+) -> Result<&'a crate::target::model::BlockDevice, Error> {
     devices
         .iter()
         .find(|device| device.dev_path.as_deref() == Some(path))
@@ -192,7 +192,7 @@ fn find_selected_device<'a>(
 
 fn replace_root_entry(
     fstab: &mut Vec<FstabEntry>,
-    device: &crate::shared::model::storage::BlockDevice,
+    device: &crate::target::model::BlockDevice,
     subvolume: Option<&str>,
 ) -> Result<(), Error> {
     let source = device
@@ -233,7 +233,7 @@ fn replace_root_entry(
 
 fn replace_esp_entry(
     fstab: &mut Vec<FstabEntry>,
-    device: &crate::shared::model::storage::BlockDevice,
+    device: &crate::target::model::BlockDevice,
 ) -> Result<(), Error> {
     let source = device
         .dev_path

@@ -7,7 +7,8 @@ use crate::shared::model::doctor::{
     DoctorSection, DoctorSectionId, DoctorSectionStatus, DoctorSeverity,
 };
 use crate::shared::model::evidence::Evidence;
-use crate::shared::model::mount_repair::{MountProblem, TargetIdentity};
+use crate::shared::model::mount_repair::{MountProblem, TargetIdentity as RepairTargetIdentity};
+use crate::target::model::TargetIdentity;
 use crate::repair::mount_repair::{MountPointObservation, MountRepairInputs};
 use crate::repair::subvol_decision::{CatosConfirmation, SubvolFacts};
 
@@ -61,17 +62,35 @@ pub(in crate::doctor) fn run_mount_section(
 
 fn build_mount_inputs(target: &TargetIdentity) -> MountRepairInputs {
     let fstab_text = read_target_fstab(target).unwrap_or_default();
-    let catos_confirmation = if target.root_fstype == "btrfs" {
+    let catos_confirmation = if target.root_fstype.as_deref() == Some("btrfs") {
         CatosConfirmation::Confirmed
     } else {
         CatosConfirmation::NotConfirmed
     };
     MountRepairInputs {
         fstab_text,
-        target: target.clone(),
+        target: repair_identity_from(target),
         catos_confirmation,
         subvol_facts: SubvolFacts::default(),
         mount_point_observations: collect_mount_point_observations(target),
+    }
+}
+
+/// Construct the rich `repair::mount_repair::TargetIdentity` that
+/// [`crate::repair::mount_repair::diagnose`] consumes from the minimal
+/// [`TargetIdentity`] Doctor carries. ESP and boot-layout signals are
+/// unknown on the `target::plan` path (Doctor does not mount or detect
+/// them); they are left `None`. Wiring real ESP/boot-layout discovery
+/// into this section is an open design point for a later phase.
+fn repair_identity_from(target: &TargetIdentity) -> RepairTargetIdentity {
+    RepairTargetIdentity {
+        root_device: target.root_device.clone().unwrap_or_default(),
+        root_fstype: target.root_fstype.clone().unwrap_or_default(),
+        root_subvol: target.root_subvol.clone(),
+        root_uuid: target.root_uuid.clone(),
+        esp_device: None,
+        esp_uuid: None,
+        boot_layout: None,
     }
 }
 
@@ -84,7 +103,7 @@ fn collect_mount_point_observations(
     target: &TargetIdentity,
 ) -> std::collections::HashMap<String, MountPointObservation> {
     let mut out = std::collections::HashMap::new();
-    if target.root_fstype != "btrfs" {
+    if target.root_fstype.as_deref() != Some("btrfs") {
         return out;
     }
     let root = target_root_path(target);
@@ -262,23 +281,21 @@ fn push_mount_evidence(
             "repair::mount_repair::diagnose",
             format!(
                 "root_device={}, fstype={}, subvol={:?}",
-                target.root_device.display(),
-                target.root_fstype,
+                target
+                    .root_device
+                    .as_deref()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_else(|| "<unknown>".to_string()),
+                target
+                    .root_fstype
+                    .as_deref()
+                    .unwrap_or("<unknown>"),
                 target.root_subvol
             ),
         ),
     );
-    if let Some(layout) = target.boot_layout.as_ref() {
-        push_evidence(
-            sections,
-            id,
-            Evidence::new(
-                "BOOT_LAYOUT",
-                "repair::mount_repair::detect_boot_mount_layout",
-                format!("{:?}", layout),
-            ),
-        );
-    }
+    // boot_layout is not discovered on the minimal target::plan path;
+    // surfacing it here is an open design point for a later phase.
 }
 
 #[cfg(test)]

@@ -8,7 +8,7 @@ use crate::shared::model::doctor::{
     DoctorReport, DoctorSection, DoctorSectionId, DoctorSectionStatus, DoctorSeverity,
 };
 use crate::shared::model::evidence::Evidence;
-use crate::shared::model::mount_repair::TargetIdentity;
+use crate::target::model::TargetIdentity;
 use crate::shared::model::recovery::TransactionRecord;
 use crate::shared::snapshot_engine::store;
 
@@ -20,7 +20,7 @@ pub(in crate::doctor) fn run_recovery_section(
     report: &mut DoctorReport,
 ) -> Result<(), ()> {
     let id = DoctorSectionId::Recovery;
-    if target.root_fstype != "btrfs" {
+    if target.root_fstype.as_deref() != Some("btrfs") {
         set_section(sections, id, DoctorSectionStatus::NotApplicable);
         report.limitations.push(DoctorLimitation::new(
             id,
@@ -29,7 +29,7 @@ pub(in crate::doctor) fn run_recovery_section(
         ));
         return Ok(());
     }
-    let device = match target.root_device.to_str() {
+    let device = match target.root_device.as_deref().and_then(Path::to_str) {
         Some(s) => s.to_string(),
         None => {
             set_section(sections, id, DoctorSectionStatus::Unknown);

@@ -53,7 +53,7 @@
             major_minor: Some("8:2".into()),
             parent: "sda".into(),
             class: DeviceClass::Partition,
-            disk_kind: crate::shared::model::storage::DiskKind::Gpt,
+            disk_kind: crate::target::model::DiskKind::Gpt,
             partition_role: PartitionRole::LinuxFilesystem,
             partition_number: Some(2),
             size_sectors: Some(1_000_000),
@@ -67,7 +67,7 @@
             mount_point: mount_point.map(PathBuf::from),
             mounts: mount_point
                 .map(|point| {
-                    vec![crate::shared::model::storage::MountObservation {
+                    vec![crate::target::model::MountObservation {
                         mount_point: PathBuf::from(point),
                         root: PathBuf::from("/"),
                         fstype: "ext4".into(),

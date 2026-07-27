@@ -56,7 +56,7 @@ pub(in crate::doctor) fn push_evidence(
     entry.1.evidence.push(ev);
 }
 
-pub(in crate::doctor) fn target_root_path(_target: &crate::shared::model::mount_repair::TargetIdentity) -> PathBuf {
+pub(in crate::doctor) fn target_root_path(_target: &crate::target::model::TargetIdentity) -> PathBuf {
     PathBuf::from("/")
 }
 

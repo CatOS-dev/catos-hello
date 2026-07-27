@@ -94,7 +94,7 @@ pub fn run_boot_repair(
     detection: &DetectionInputs,
     bios_install_path: Option<&str>,
     installed_packages: &[String],
-    storage_devices: &[crate::shared::model::storage::BlockDevice],
+    storage_devices: &[crate::target::model::BlockDevice],
 ) -> BootRepairReport {
     // 1. Detect provider from target evidence.
     let verdict = detect(detection, target);
@@ -239,7 +239,7 @@ pub fn run_boot_repair(
         has_plymouth: installed_packages
             .iter()
             .any(|package| package == "plymouth"),
-        has_crypto_keyfile: crate::shared::snapshot_engine::confined::read_rooted_file(
+        has_crypto_keyfile: crate::target::execute::confined::read_rooted_file(
             target_root,
             "/crypto_keyfile.bin",
         )
@@ -377,7 +377,7 @@ pub fn run_boot_repair(
 
     let final_outcome = if exec_result.failure.is_some() || snapshot_execution.failure.is_some() {
         if let Err(error) = config_transaction.rollback() {
-            warnings.push(crate::shared::model::inspection::Warning::new(
+            warnings.push(crate::target::model::Warning::new(
                 "CONFIG_ROLLBACK_FAILED",
                 error,
             ));
@@ -417,7 +417,7 @@ pub fn run_boot_repair(
         verification = merge_verification(verification, verify_result.verification);
         if !verify_result.verified {
             if let Err(error) = config_transaction.rollback() {
-                warnings.push(crate::shared::model::inspection::Warning::new(
+                warnings.push(crate::target::model::Warning::new(
                     "CONFIG_ROLLBACK_FAILED",
                     error,
                 ));
@@ -654,14 +654,14 @@ use inspect::{
 };
 
 fn read_target_file(root: &Path, relative: &str) -> Option<String> {
-    crate::shared::snapshot_engine::confined::read_rooted_file(root, &format!("/{relative}"))
+    crate::target::execute::confined::read_rooted_file(root, &format!("/{relative}"))
         .ok()
         .and_then(|contents| String::from_utf8(contents).ok())
 }
 
 
 fn has_target_path(root: &Path, relative: &str) -> bool {
-    crate::shared::snapshot_engine::confined::list_rooted_directory_names(root, &format!("/{relative}")).is_ok()
+    crate::target::execute::confined::list_rooted_directory_names(root, &format!("/{relative}")).is_ok()
 }
 
 use config_tx::{ConfigTransaction, write_provider_configs};
@@ -719,10 +719,10 @@ mod tests {
         name: &str,
         dev_path: Option<&str>,
         parent: &str,
-    ) -> crate::shared::model::storage::BlockDevice {
-        use crate::shared::model::storage::{DeviceClass, DiskKind, PartitionRole};
+    ) -> crate::target::model::BlockDevice {
+        use crate::target::model::{DeviceClass, DiskKind, PartitionRole};
 
-        crate::shared::model::storage::BlockDevice {
+        crate::target::model::BlockDevice {
             name: name.into(),
             dev_path: dev_path.map(PathBuf::from),
             major_minor: None,

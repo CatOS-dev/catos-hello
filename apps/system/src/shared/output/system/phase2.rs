@@ -6,7 +6,7 @@ use std::io::Write;
 
 use crate::shared::error::Error;
 use crate::shared::model::mount::{CleanupReport, MountPlan, MountSession};
-use crate::shared::model::storage::StorageReport;
+use crate::target::model::StorageReport;
 use crate::system::Phase2Outcome;
 
 /// Render a phase-2 outcome as JSON. Wraps every variant in a top-level
@@ -292,7 +292,7 @@ fn render_mount_session<W: Write>(out: &mut W, session: &MountSession) -> std::i
 
 fn render_target_inspection<W: Write>(
     out: &mut W,
-    inspection: &crate::shared::model::inspection::TargetInspection,
+    inspection: &crate::target::model::TargetInspection,
 ) -> std::io::Result<()> {
     writeln!(out, "Target inspection")?;
     writeln!(
@@ -330,7 +330,7 @@ fn render_cleanup_report<W: Write>(out: &mut W, cleanup: &CleanupReport) -> std:
 
 fn render_warnings<W: Write>(
     out: &mut W,
-    warnings: &[crate::shared::model::inspection::Warning],
+    warnings: &[crate::target::model::Warning],
 ) -> std::io::Result<()> {
     if warnings.is_empty() {
         return Ok(());
@@ -345,7 +345,7 @@ fn render_warnings<W: Write>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::shared::model::storage::StorageReport;
+    use crate::target::model::StorageReport;
 
     #[test]
     fn human_phase2_output_has_no_ansi_escapes() {
