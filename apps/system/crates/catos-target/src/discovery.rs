@@ -53,6 +53,10 @@ impl ReadonlySession {
         Ok(Self { probe: ReadonlyProbe::mount(device, fstype, None)? })
     }
 
+    pub fn open_with_options(device: &Path, fstype: &str, options: &str) -> Result<Self, String> {
+        Ok(Self { probe: ReadonlyProbe::mount_with_options(device, fstype, options)? })
+    }
+
     pub fn root(&self) -> &Path { self.probe.path() }
     pub fn cleanup(mut self) -> ProbeCleanup { self.probe.cleanup() }
 }

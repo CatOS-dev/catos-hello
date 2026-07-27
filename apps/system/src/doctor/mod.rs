@@ -41,7 +41,7 @@ use crate::doctor::model::{
 };
 use crate::fs::command::FsCommandRunner;
 use crate::target::Evidence;
-use crate::target::discovery::{TargetCandidate, TargetSession};
+use crate::target::discovery::{ReadonlySession, TargetCandidate, TargetSession};
 
 pub mod target_selection;
 use target_selection::TargetSelection;
@@ -52,6 +52,7 @@ pub(crate) struct DoctorTargetContext {
     pub target: crate::target::model::TargetIdentity,
     pub candidate: TargetCandidate,
     pub fstab: Result<String, String>,
+    top_level: Result<Option<ReadonlySession>, String>,
     session: TargetSession,
 }
 
@@ -60,10 +61,19 @@ impl DoctorTargetContext {
         let candidate = session.candidate().clone();
         let fstab = std::fs::read_to_string(target.root.join("etc/fstab"))
             .map_err(|error| format!("cannot read selected target fstab: {error}"));
-        Self { target, candidate, fstab, session }
+        let top_level = if candidate.root_fstype == "btrfs" {
+            ReadonlySession::open_with_options(&candidate.root_device, "btrfs", "ro,norecovery,subvolid=5").map(Some)
+        } else {
+            Ok(None)
+        };
+        Self { target, candidate, fstab, top_level, session }
     }
 
-    fn cleanup(self) -> crate::target::discovery::ProbeCleanup { self.session.cleanup() }
+    fn cleanup(self) -> Vec<crate::target::discovery::ProbeCleanup> {
+        let mut cleanup = vec![self.session.cleanup()];
+        if let Ok(Some(session)) = self.top_level { cleanup.push(session.cleanup()); }
+        cleanup
+    }
 }
 
 pub fn run_doctor() -> DoctorReport {
@@ -100,9 +110,9 @@ pub fn run_doctor() -> DoctorReport {
     aggregate(&mut report);
     let cleanup = context.cleanup();
     report.cleanup = DoctorCleanup {
-        cleaned: if cleanup.unmounted && cleanup.removed { vec![cleanup.mountpoint.display().to_string()] } else { Vec::new() },
-        residual: cleanup.error.into_iter().map(|error| format!("{}: {error}", cleanup.mountpoint.display())).collect(),
-        all_clean: cleanup.unmounted && cleanup.removed,
+        cleaned: cleanup.iter().filter(|item| item.unmounted && item.removed).map(|item| item.mountpoint.display().to_string()).collect(),
+        residual: cleanup.iter().filter_map(|item| item.error.as_ref().map(|error| format!("{}: {error}", item.mountpoint.display()))).collect(),
+        all_clean: cleanup.iter().all(|item| item.unmounted && item.removed),
     };
     report
 }
