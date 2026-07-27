@@ -47,6 +47,7 @@
 //!   [`crate::shared::model::boot_repair::BootRepairOutcome::ManualInterventionRequired`].
 
 pub mod cmdline;
+pub mod config_tx;
 pub mod detect;
 pub mod mkinitcpio;
 pub mod providers;
@@ -1145,155 +1146,7 @@ fn snapshot_unit_present(target_root: &Path, unit: &str) -> bool {
         .is_ok()
 }
 
-struct ConfigTransaction {
-    root: std::path::PathBuf,
-    changes: Vec<ConfigChange>,
-}
-
-struct ConfigChange {
-    target_path: String,
-    original: Option<Vec<u8>>,
-}
-
-impl ConfigTransaction {
-    fn new(root: &Path) -> Self {
-        Self {
-            root: root.to_path_buf(),
-            changes: Vec::new(),
-        }
-    }
-
-    fn write(
-        &mut self,
-        target_path: &str,
-        contents: &str,
-    ) -> Result<crate::shared::model::boot_repair::BootAction, String> {
-        let parent = Path::new(target_path)
-            .parent()
-            .and_then(Path::to_str)
-            .ok_or_else(|| format!("invalid target configuration path {target_path:?}"))?;
-        crate::shared::snapshot_engine::confined::create_rooted_directory(&self.root, parent)
-            .map_err(|error| format!("cannot create target config parent {parent}: {error}"))?;
-        let existing = crate::shared::snapshot_engine::confined::read_rooted_file(&self.root, target_path).ok();
-        if existing.as_deref() == Some(contents.as_bytes()) {
-            return Ok(crate::shared::model::boot_repair::BootAction::ConfigUnchanged {
-                target_path: target_path.to_string(),
-            });
-        }
-        let backup_path = existing.as_ref().map(|bytes| {
-            let backup_path = format!("{target_path}.catos-repair.backup");
-            crate::shared::snapshot_engine::confined::atomic_write_rooted(&self.root, &backup_path, bytes, 0o600)
-                .map_err(|error| format!("cannot write backup {backup_path}: {error}"))?;
-            Ok::<String, String>(backup_path)
-        });
-        let backup_path = backup_path.transpose()?;
-        crate::shared::snapshot_engine::confined::atomic_write_rooted(
-            &self.root,
-            target_path,
-            contents.as_bytes(),
-            0o644,
-        )
-        .map_err(|error| format!("cannot write target config {target_path}: {error}"))?;
-        self.changes.push(ConfigChange {
-            target_path: target_path.to_string(),
-            original: existing,
-        });
-        Ok(crate::shared::model::boot_repair::BootAction::ConfigWritten {
-            target_path: target_path.to_string(),
-            backup_path,
-            bytes: contents.len(),
-        })
-    }
-
-    fn rollback(&mut self) -> Result<(), String> {
-        let mut errors = Vec::new();
-        for change in self.changes.drain(..).rev() {
-            let result = match change.original {
-                Some(original) => crate::shared::snapshot_engine::confined::atomic_write_rooted(
-                    &self.root,
-                    &change.target_path,
-                    &original,
-                    0o644,
-                ),
-                None => {
-                    crate::shared::snapshot_engine::confined::remove_rooted_file(&self.root, &change.target_path)
-                }
-            };
-            if let Err(error) = result {
-                errors.push(format!("{}: {error}", change.target_path));
-            }
-        }
-        if errors.is_empty() {
-            Ok(())
-        } else {
-            Err(errors.join("; "))
-        }
-    }
-}
-
-fn write_provider_configs(
-    transaction: &mut ConfigTransaction,
-    provider: crate::shared::model::boot_repair::ProviderId,
-    ctx: &crate::repair::boot_repair::providers::base::ProviderCtx<'_>,
-    efi_device: Option<&(String, u32)>,
-    mkinitcpio_text: &str,
-    mkinitcpio_inputs: &crate::repair::boot_repair::mkinitcpio::MkinitcpioInputs<'_>,
-) -> Result<Vec<crate::shared::model::boot_repair::BootAction>, String> {
-    use crate::shared::model::boot_repair::{FirmwareMethod, ProviderId};
-
-    // bootloadu configures mkinitcpio before every provider. Limine and
-    // systemd-boot snapshot overlays therefore need the same target config,
-    // not only GRUB.
-    let arrays = crate::repair::boot_repair::mkinitcpio::compute_arrays(mkinitcpio_inputs);
-    let mut actions = vec![transaction.write(
-        "/etc/mkinitcpio.conf",
-        &crate::repair::boot_repair::mkinitcpio::serialise(mkinitcpio_text, &arrays),
-    )?];
-
-    match provider {
-        ProviderId::Grub => {
-            actions.push(transaction.write(
-                "/etc/default/grub.d/00-catos.cfg",
-                &crate::repair::boot_repair::providers::grub::build_grub_defaults(ctx),
-            )?);
-        }
-        ProviderId::Limine => {
-            actions.push(transaction.write("/etc/kernel/cmdline", &format!("{}\n", ctx.cmdline))?);
-            actions.push(transaction.write(
-                "/etc/default/limine",
-                &crate::repair::boot_repair::providers::limine::build_limine_defaults(ctx),
-            )?);
-        }
-        ProviderId::SystemdBoot => {
-            actions.push(transaction.write("/etc/kernel/cmdline", &format!("{}\n", ctx.cmdline))?);
-            actions.push(transaction.write(
-                "/etc/kernel/install.conf.d/20-catos-bootloadu.conf",
-                &crate::repair::boot_repair::providers::systemd_boot::build_install_conf(ctx),
-            )?);
-        }
-        ProviderId::Uki | ProviderId::Efistub => {
-            let method = match provider {
-                ProviderId::Uki => FirmwareMethod::Uki,
-                ProviderId::Efistub => FirmwareMethod::Efistub,
-                _ => unreachable!(),
-            };
-            let efi_device = efi_device.ok_or_else(|| {
-                "firmware boot repair requires verified ESP disk and partition facts before writing its configuration"
-                    .to_string()
-            })?;
-            actions.push(transaction.write("/etc/kernel/cmdline", &format!("{}\n", ctx.cmdline))?);
-            actions.push(transaction.write(
-                "/etc/catos/firmware-boot.conf",
-                &crate::repair::boot_repair::providers::firmware::build_firmware_boot_conf(
-                    method,
-                    ctx,
-                    Some(efi_device),
-                ),
-            )?);
-        }
-    }
-    Ok(actions)
-}
+use config_tx::{ConfigTransaction, write_provider_configs};
 
 fn verify_grub_target(
     target_root: &Path,
@@ -1770,58 +1623,6 @@ mod tests {
             detect_target_architecture(&target_root.path),
             Some(Architecture::Aarch64)
         );
-    }
-
-    #[test]
-    fn target_config_write_is_atomic_and_records_a_backup() {
-        let target_root = TempTargetRoot::new();
-        fs::create_dir_all(target_root.path.join("etc/default/grub.d")).unwrap();
-        fs::write(
-            target_root.path.join("etc/default/grub.d/00-catos.cfg"),
-            "old\n",
-        )
-        .unwrap();
-
-        let action = ConfigTransaction::new(&target_root.path)
-            .write("/etc/default/grub.d/00-catos.cfg", "new\n")
-            .unwrap();
-
-        assert_eq!(
-            read_target_file(&target_root.path, "etc/default/grub.d/00-catos.cfg").as_deref(),
-            Some("new\n")
-        );
-        assert_eq!(
-            read_target_file(
-                &target_root.path,
-                "etc/default/grub.d/00-catos.cfg.catos-repair.backup",
-            )
-            .as_deref(),
-            Some("old\n")
-        );
-        assert!(matches!(
-            action,
-            crate::shared::model::boot_repair::BootAction::ConfigWritten { .. }
-        ));
-    }
-
-    #[test]
-    fn config_transaction_rolls_back_existing_and_new_files() {
-        let target_root = TempTargetRoot::new();
-        fs::create_dir_all(target_root.path.join("etc/catos")).unwrap();
-        fs::write(target_root.path.join("etc/catos/existing.conf"), "before\n").unwrap();
-        let mut transaction = ConfigTransaction::new(&target_root.path);
-
-        transaction
-            .write("/etc/catos/existing.conf", "after\n")
-            .unwrap();
-        transaction.write("/etc/catos/new.conf", "new\n").unwrap();
-        transaction.rollback().unwrap();
-
-        assert_eq!(
-            read_target_file(&target_root.path, "etc/catos/existing.conf").as_deref(),
-            Some("before\n")
-        );
-        assert!(read_target_file(&target_root.path, "etc/catos/new.conf").is_none());
     }
 
     #[test]
