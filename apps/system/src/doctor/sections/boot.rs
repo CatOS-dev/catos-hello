@@ -203,7 +203,7 @@ fn valid_limine_config(root: &Path) -> bool {
     let Ok(body) = std::fs::read_to_string(root.join("limine.conf")) else { return false };
     !body.trim().is_empty() && body.lines().any(|line| {
         let line = line.trim();
-        !line.is_empty() && !line.starts_with('#') && line.contains('=')
+        !line.is_empty() && !line.starts_with('#') && (line.contains('=') || line.contains(':'))
     })
 }
 
@@ -213,7 +213,9 @@ fn valid_systemd_loader(root: &Path) -> bool {
     let entry = std::fs::read_dir(entries).ok().into_iter().flatten().filter_map(Result::ok).any(|entry| {
         let path = entry.path();
         let Ok(body) = std::fs::read_to_string(path) else { return false };
-        !body.trim().is_empty() && body.lines().any(|line| line.trim_start().starts_with("title "))
+        !body.trim().is_empty()
+            && body.lines().any(|line| line.trim_start().starts_with("title "))
+            && body.lines().any(|line| line.trim_start().starts_with("linux "))
     });
     loader || entry
 }
