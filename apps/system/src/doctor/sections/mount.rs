@@ -97,7 +97,7 @@ fn build_mount_inputs(context: &DoctorTargetContext) -> Result<MountRepairInputs
     let subvol_facts = if root_fstype == "btrfs" {
         collect_subvolume_facts(&target.root)?
     } else {
-        SubvolFacts::default()
+        SubvolFacts::not_applicable()
     };
     let boot_layout = context.boot_layout.as_ref().map_err(Clone::clone)?.clone();
     let (esp_device, esp_uuid) = match context.esp.as_ref().map_err(Clone::clone)?.as_ref() {

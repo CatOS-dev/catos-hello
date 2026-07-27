@@ -79,6 +79,14 @@ pub struct SubvolFacts {
 }
 
 impl SubvolFacts {
+    /// A confirmed non-Btrfs target has no Btrfs subvolume observations.  This
+    /// is a diagnosed negative fact, not a missing probe result.
+    pub fn not_applicable() -> Self {
+        Self {
+            observations: Vec::new(),
+        }
+    }
+
     pub fn find(&self, subvol: &str) -> Option<&SubvolObservation> {
         self.observations.iter().find(|o| o.subvol == subvol)
     }
