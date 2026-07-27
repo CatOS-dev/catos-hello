@@ -31,7 +31,20 @@ pub(in crate::doctor) fn run_boot_section(
             return Ok(());
         }
     };
+    let boot_layout = match context.boot_layout.as_ref() {
+        Ok(layout) => layout.clone(),
+        Err(error) => {
+            set_section(sections, id, DoctorSectionStatus::Unknown);
+            report.limitations.push(DoctorLimitation::new(id, "BOOT_LAYOUT_INCOMPLETE", error.clone()));
+            return Ok(());
+        }
+    };
     push_boot_evidence(sections, id, &inputs);
+    push_evidence(
+        sections,
+        id,
+        Evidence::new("BOOT_LAYOUT", "doctor::context", format!("selected target boot layout: {boot_layout:?}")),
+    );
     let repair_target = crate::mount::model::MountTargetIdentity {
         root_device: match context.target.root_device.clone() {
             Some(device) => device,
@@ -53,7 +66,7 @@ pub(in crate::doctor) fn run_boot_section(
         root_uuid: context.target.root_uuid.clone(),
         esp_device: context.esp.as_ref().ok().and_then(|esp| esp.as_ref()).map(|esp| esp.device.clone()),
         esp_uuid: context.esp.as_ref().ok().and_then(|esp| esp.as_ref()).and_then(|esp| esp.uuid.clone()),
-        boot_layout: None,
+        boot_layout: Some(boot_layout),
     };
     let verdict = detect(&inputs, &repair_target);
     match verdict {
