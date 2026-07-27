@@ -150,7 +150,13 @@ pub(in crate::doctor) fn run_boot_section(
 fn collect_detection_inputs(context: &DoctorTargetContext) -> Result<DetectionInputs, String> {
     let root = target_root_path(&context.target);
     let fstab = context.fstab.as_ref().map_err(Clone::clone)?;
-    if fstab_has_external_boot(fstab) {
+    if fstab_has_external_boot(fstab)
+        || matches!(
+            context.boot_layout.as_ref(),
+            Ok(crate::mount::model::BootMountLayout::SeparateBootAndEsp { .. }
+                | crate::mount::model::BootMountLayout::BootBtrfsSubvolume { .. })
+        )
+    {
         return Err("target /boot is a separate filesystem and is not mounted in Doctor's selected readonly session".to_string());
     }
     let esp = context.esp.as_ref().map_err(Clone::clone)?.as_ref();
