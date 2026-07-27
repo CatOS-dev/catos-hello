@@ -76,25 +76,16 @@ pub fn run(argv: &[String]) -> i32 {
                 Ok(opened) => opened,
                 Err(error) => { eprintln!("catos-chroot: {error}"); return exit_code::PROBE_FAILED; }
             };
-            let rediscovered = crate::target::discovery::discover_targets();
-            devices = target_inventory_for_chroot();
-            let selected = match crate::selection_ui::select_target(&rediscovered, "catos-chroot") {
-                crate::selection_ui::Selection::Selected(candidate) => candidate,
-                crate::selection_ui::Selection::Declined => {
-                    let cleanup = opened.close();
-                    eprintln!("catos-chroot: target selection declined");
-                    if let Err(error) = cleanup { eprintln!("catos-chroot: LUKS cleanup failed: {error}"); return exit_code::PROBE_FAILED; }
-                    return exit_code::ARG_ERROR;
-                }
-                crate::selection_ui::Selection::Unavailable(error) => {
-                    let cleanup = opened.close();
-                    eprintln!("catos-chroot: unlocked mapper did not yield a CatOS candidate: {error}");
-                    if let Err(error) = cleanup { eprintln!("catos-chroot: LUKS cleanup failed: {error}"); }
-                    return exit_code::PROBE_FAILED;
-                }
-            };
-            opened_luks = Some(opened);
-            selected
+            let mut opened = Some(opened);
+            match resolve_after_luks(
+                crate::target::discovery::discover_targets,
+                |report| crate::selection_ui::select_target(report, "catos-chroot"),
+                target_inventory_for_chroot,
+                || opened.take().expect("opened LUKS token").close(),
+            ) {
+                Ok((selected, fresh_inventory)) => { devices = fresh_inventory; opened_luks = opened; selected }
+                Err(error) => { eprintln!("catos-chroot: {error}"); return exit_code::PROBE_FAILED; }
+            }
         }
         crate::selection_ui::Selection::Unavailable(reason) => { eprintln!("catos-chroot: {reason}"); return exit_code::PROBE_FAILED; }
     };
@@ -212,6 +203,31 @@ fn target_block_to_chroot(device: &crate::target::model::BlockDevice) -> Option<
 
 fn find_selected_device(devices: &[BlockDevice], selected: &std::path::Path) -> Option<BlockDevice> {
     devices.iter().find(|device| std::path::Path::new(&device.name) == selected).cloned()
+}
+
+fn resolve_after_luks<D, S, I, C>(discover: D, select: S, inventory: I, close: C) -> Result<(crate::target::discovery::TargetCandidate, Vec<BlockDevice>), String>
+where
+    D: FnOnce() -> crate::target::discovery::DiscoveryReport,
+    S: FnOnce(&crate::target::discovery::DiscoveryReport) -> crate::selection_ui::Selection,
+    I: FnOnce() -> Vec<BlockDevice>,
+    C: FnOnce() -> Result<(), String>,
+{
+    let report = discover();
+    let candidate = match select(&report) {
+        crate::selection_ui::Selection::Selected(candidate) => candidate,
+        crate::selection_ui::Selection::Declined => return close_after_luks_failure(close, "target selection declined"),
+        crate::selection_ui::Selection::Unavailable(reason) => return close_after_luks_failure(close, &format!("unlocked mapper did not yield a CatOS candidate: {reason}")),
+    };
+    let fresh = inventory();
+    if find_selected_device(&fresh, &candidate.root_device).is_none() {
+        return close_after_luks_failure(close, "selected mapper is absent from fresh shared inventory");
+    }
+    Ok((candidate, fresh))
+}
+
+fn close_after_luks_failure<T, C>(close: C, reason: &str) -> Result<T, String>
+where C: FnOnce() -> Result<(), String> {
+    match close() { Ok(()) => Err(reason.into()), Err(error) => Err(format!("{reason}; LUKS cleanup failed: {error}")) }
 }
 
 pub fn print_help() {
@@ -380,5 +396,34 @@ mod tests {
         let fresh = BlockDevice { name: "/dev/mapper/luks-luks".into(), fs_type: Some("btrfs".into()), uuid: Some("root".into()), partuuid: None, label: None, partlabel: None };
         assert!(find_selected_device(&[old], std::path::Path::new("/dev/mapper/luks-luks")).is_none());
         assert_eq!(find_selected_device(&[fresh.clone()], std::path::Path::new("/dev/mapper/luks-luks")).unwrap(), fresh);
+    }
+
+    fn mapper_candidate() -> crate::target::discovery::TargetCandidate {
+        crate::target::discovery::TargetCandidate { root_device: "/dev/mapper/luks-id".into(), root_fstype: "ext4".into(), root_uuid: Some("root".into()), root_subvolume: None, root_subvolume_id: None, filesystem_id: None, label: None, os_release: Default::default(), fstab_identity: None, currently_mounted: false, running_environment_member: false, confidence: crate::target::model::RootCandidateConfidence::High, evidence: Vec::new() }
+    }
+
+    #[test]
+    fn luks_resolution_consumes_rediscovered_mapper_inventory() {
+        let candidate = mapper_candidate();
+        let result = resolve_after_luks(
+            || crate::target::discovery::DiscoveryReport { candidates: vec![candidate.clone()], excluded: Vec::new(), rejected: Vec::new(), cleanup: Vec::new() },
+            |report| crate::selection_ui::Selection::Selected(report.candidates[0].clone()),
+            || vec![BlockDevice { name: "/dev/mapper/luks-id".into(), fs_type: Some("ext4".into()), uuid: Some("root".into()), partuuid: None, label: None, partlabel: None }],
+            || panic!("successful rediscovery must not close mapper"),
+        ).unwrap();
+        assert_eq!(result.0.root_device, std::path::PathBuf::from("/dev/mapper/luks-id"));
+        assert_eq!(result.1.len(), 1);
+    }
+
+    #[test]
+    fn luks_resolution_closes_and_reports_close_failure_after_rediscovery_error() {
+        let error = resolve_after_luks(
+            crate::target::discovery::DiscoveryReport::default,
+            |_| crate::selection_ui::Selection::Unavailable("no mapper candidate".into()),
+            Vec::new,
+            || Err("close failed".into()),
+        ).unwrap_err();
+        assert!(error.contains("no mapper candidate"));
+        assert!(error.contains("LUKS cleanup failed: close failed"));
     }
 }
