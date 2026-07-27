@@ -15,6 +15,7 @@ use super::{push_evidence, push_issue, set_section};
 pub(in crate::doctor) fn run_recovery_section(
     sections: &mut [(DoctorSectionId, DoctorSection)],
     target: &TargetIdentity,
+    options: Option<&crate::snapshot::execute::engine::EngineOptions>,
     report: &mut DoctorReport,
 ) -> Result<(), ()> {
     let id = DoctorSectionId::Recovery;
@@ -43,6 +44,11 @@ pub(in crate::doctor) fn run_recovery_section(
         }
         return Ok(());
     }
+    let Some(options) = options else {
+        set_section(sections, id, DoctorSectionStatus::Unknown);
+        report.limitations.push(DoctorLimitation::new(id, "RECOVERY_FACTS_INCOMPLETE", "validated readonly Btrfs top-level facts are unavailable"));
+        return Ok(());
+    };
     if records.is_empty() {
             set_section(sections, id, DoctorSectionStatus::Healthy);
             push_evidence(
@@ -59,6 +65,16 @@ pub(in crate::doctor) fn run_recovery_section(
 
     let mut section_status = DoctorSectionStatus::Healthy;
     for (_, record) in &records {
+        let mut engine = match crate::snapshot::execute::engine::Engine::load(options.clone(), &record.transaction_id) {
+            Ok(engine) => engine,
+            Err(error) => {
+                section_status = DoctorSectionStatus::Unknown;
+                report.limitations.push(DoctorLimitation::new(id, "RECOVERY_RECONCILE_FAILED", format!("cannot load {} read-only: {error}", record.transaction_id)));
+                push_issue(sections, DoctorIssue::new("RECOVERY_RECONCILE_FAILED", DoctorSeverity::Warning, id, format!("transaction {} could not be read-only reconciled", record.transaction_id)));
+                continue;
+            }
+        };
+        engine.reconcile_status();
         inspect_single_record(sections, report, id, record, &mut section_status);
     }
     set_section(sections, id, section_status);
@@ -217,7 +233,7 @@ mod tests {
             .collect();
         let mut report = DoctorReport::default();
 
-        run_recovery_section(&mut sections, &target, &mut report).unwrap();
+        run_recovery_section(&mut sections, &target, None, &mut report).unwrap();
 
         let recovery = sections.iter().find(|(id, _)| *id == DoctorSectionId::Recovery).unwrap();
         assert_eq!(recovery.1.status, DoctorSectionStatus::Unknown);
