@@ -337,4 +337,17 @@ mod tests {
         assert!(!recovery.1.issues.iter().any(|issue| issue.code == issue_code::RECOVERY_TRANSACTION_INTERRUPTED));
         assert!(recovery.1.issues.iter().any(|issue| issue.code == issue_code::RECOVERY_BACKUP_PRESENT));
     }
+
+    #[test]
+    fn unconfigured_recovery_engine_fake_fails_explicitly() {
+        let configured = false;
+        let result = load_and_reconcile_record("tx-unconfigured", || {
+            if !configured {
+                return Err("fake recovery engine call was not configured".to_string());
+            }
+            unreachable!("the strict fake must fail before returning a record");
+        });
+
+        assert!(matches!(result, Err(message) if message.contains("not configured")));
+    }
 }
