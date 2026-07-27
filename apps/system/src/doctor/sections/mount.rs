@@ -16,14 +16,24 @@ use crate::target::model::TargetIdentity;
 use crate::target::Evidence;
 
 use super::{push_evidence, push_issue, set_section, target_root_path};
+use crate::doctor::DoctorTargetContext;
 
 pub(in crate::doctor) fn run_mount_section(
     sections: &mut [(DoctorSectionId, DoctorSection)],
-    target: &TargetIdentity,
+    context: Option<&DoctorTargetContext>,
     report: &mut DoctorReport,
 ) -> Result<(), ()> {
     let id = DoctorSectionId::Mount;
-    let inputs = match build_mount_inputs(target) {
+    let Some(context) = context else {
+        set_section(sections, id, DoctorSectionStatus::Unknown);
+        report.limitations.push(crate::doctor::model::DoctorLimitation::new(
+            id,
+            "TARGET_CONTEXT_UNAVAILABLE",
+            "Mount requires the selected readonly Doctor target context",
+        ));
+        return Ok(());
+    };
+    let inputs = match build_mount_inputs(context) {
         Ok(inputs) => inputs,
         Err(message) => {
             set_section(sections, id, DoctorSectionStatus::Unknown);
@@ -36,7 +46,7 @@ pub(in crate::doctor) fn run_mount_section(
         }
     };
     let problems = mount_diagnose(&inputs);
-    push_mount_evidence(sections, id, target);
+    push_mount_evidence(sections, id, &context.target);
 
     let status = derive_mount_section_status(&problems);
     set_section(sections, id, status);
@@ -74,8 +84,9 @@ pub(in crate::doctor) fn run_mount_section(
     Ok(())
 }
 
-fn build_mount_inputs(target: &TargetIdentity) -> Result<MountRepairInputs, String> {
-    let fstab_text = read_target_fstab(target)?;
+fn build_mount_inputs(context: &DoctorTargetContext) -> Result<MountRepairInputs, String> {
+    let target = &context.target;
+    let fstab_text = context.fstab.as_ref().map_err(Clone::clone)?.clone();
     let root_device = target.root_device.clone().ok_or_else(|| "selected target has no root device".to_string())?;
     let root_fstype = target.root_fstype.clone().ok_or_else(|| "selected target has no root filesystem type".to_string())?;
     let catos_confirmation = if target.root_fstype.as_deref() == Some("btrfs") {
@@ -88,6 +99,18 @@ fn build_mount_inputs(target: &TargetIdentity) -> Result<MountRepairInputs, Stri
     } else {
         SubvolFacts::default()
     };
+    let fstab_entries = crate::mount::diagnose::fstab::parse_all(&fstab_text);
+    let selected_esp = context.esp.as_ref().map_err(Clone::clone)?.as_ref().map(|esp| esp.device.as_path());
+    let boot_layout = crate::mount::diagnose::target::detect_boot_mount_layout(
+        &fstab_entries,
+        &context.devices,
+        &root_device,
+        selected_esp,
+    )?;
+    let (esp_device, esp_uuid) = match context.esp.as_ref().map_err(Clone::clone)?.as_ref() {
+        Some(esp) => (Some(esp.device.clone()), esp.uuid.clone()),
+        None => (None, None),
+    };
     Ok(MountRepairInputs {
         fstab_text,
         target: RepairTargetIdentity {
@@ -95,20 +118,14 @@ fn build_mount_inputs(target: &TargetIdentity) -> Result<MountRepairInputs, Stri
             root_fstype,
             root_subvol: target.root_subvol.clone(),
             root_uuid: target.root_uuid.clone(),
-            esp_device: None,
-            esp_uuid: None,
-            boot_layout: None,
+            esp_device,
+            esp_uuid,
+            boot_layout: Some(boot_layout),
         },
         catos_confirmation,
         subvol_facts,
         mount_point_observations: collect_mount_point_observations(target),
     })
-}
-
-fn read_target_fstab(target: &TargetIdentity) -> Result<String, String> {
-    let root = target_root_path(target);
-    let path = root.join("etc/fstab");
-    std::fs::read_to_string(&path).map_err(|error| format!("cannot read target fstab {}: {error}", path.display()))
 }
 
 fn collect_subvolume_facts(root: &Path) -> Result<SubvolFacts, String> {
