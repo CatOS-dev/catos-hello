@@ -471,14 +471,34 @@ pub(in crate::doctor) fn run_secure_boot_section(
         }
     };
 
-    let firmware_sb_on = read_target_file(
+    let firmware_sb_body = match read_target_file(
         Path::new("/"),
         "sys/firmware/efi/efivars/SecureBoot-8be4df61-92ca-11d2-b0b3-00a0c91f6dba",
-    )
-    .map(|body| secure_boot_enabled_from_efivar(body.as_bytes()))
-    .unwrap_or(None);
-    let target_marker = read_target_file(&root, "etc/catos/secureboot").is_some();
-    let firmware_boot_conf = read_target_file(&root, "etc/catos/firmware-boot.conf");
+    ) {
+        Ok(value) => value,
+        Err(error) => {
+            set_section(sections, id, DoctorSectionStatus::Unknown);
+            report.limitations.push(DoctorLimitation::new(id, "FIRMWARE_SECURE_BOOT_UNAVAILABLE", format!("cannot read firmware Secure Boot state: {error}")));
+            return Ok(());
+        }
+    };
+    let firmware_sb_on = firmware_sb_body.as_deref().and_then(|body| secure_boot_enabled_from_efivar(body.as_bytes()));
+    let target_marker = match read_target_file(&root, "etc/catos/secureboot") {
+        Ok(value) => value.is_some(),
+        Err(error) => {
+            set_section(sections, id, DoctorSectionStatus::Unknown);
+            report.limitations.push(DoctorLimitation::new(id, "SECURE_BOOT_POLICY_INCOMPLETE", format!("cannot read target Secure Boot marker: {error}")));
+            return Ok(());
+        }
+    };
+    let firmware_boot_conf = match read_target_file(&root, "etc/catos/firmware-boot.conf") {
+        Ok(value) => value,
+        Err(error) => {
+            set_section(sections, id, DoctorSectionStatus::Unknown);
+            report.limitations.push(DoctorLimitation::new(id, "SECURE_BOOT_POLICY_INCOMPLETE", format!("cannot read target firmware boot policy: {error}")));
+            return Ok(());
+        }
+    };
 
     push_evidence(
         sections,

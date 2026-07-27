@@ -10,7 +10,7 @@ use crate::fs::command::FsCommandRunner;
 use crate::fs::diagnose::{check_only_for, ReadonlyOutcome, ReadonlyResult};
 use crate::target::Evidence;
 
-use super::{is_device_mounted_rw, push_evidence, set_section};
+use super::{is_device_mounted_rw, push_evidence, set_section, MountState};
 use crate::doctor::DoctorTargetContext;
 
 pub(in crate::doctor) fn capture_environment() -> DoctorEnvironment {
@@ -252,12 +252,16 @@ pub(in crate::doctor) fn run_filesystem_section<R: FsCommandRunner + ?Sized>(
         }
     };
 
-    if target
-        .root_device
-        .as_deref()
-        .map(is_device_mounted_rw)
-        .unwrap_or(false)
-    {
+    let mount_state = match target.root_device.as_deref().map(is_device_mounted_rw) {
+        Some(Ok(state)) => state,
+        Some(Err(error)) => {
+            set_section(sections, id, DoctorSectionStatus::Unknown);
+            report.limitations.push(DoctorLimitation::new(id, "MOUNT_STATE_UNAVAILABLE", format!("cannot determine whether target is mounted read-write: {error}")));
+            return Ok(());
+        }
+        None => MountState::NotMounted,
+    };
+    if mount_state == MountState::MountedRw {
         let section = set_section(sections, id, DoctorSectionStatus::Skipped);
         report.limitations.push(DoctorLimitation::new(
             id,
