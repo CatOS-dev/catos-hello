@@ -2,14 +2,14 @@
 
 use std::path::Path;
 
-use crate::fs::command::FsCommandRunner;
-use crate::fs::diagnose::{check_only_for, ReadonlyOutcome, ReadonlyResult};
-use crate::shared::model::doctor::{
+use crate::doctor::model::{
     issue_code, recommendation_code, DoctorEnvironment, DoctorIssue, DoctorLimitation,
     DoctorReport, DoctorSection, DoctorSectionId, DoctorSectionStatus, DoctorSeverity,
 };
-use crate::shared::model::evidence::Evidence;
+use crate::fs::command::FsCommandRunner;
+use crate::fs::diagnose::{check_only_for, ReadonlyOutcome, ReadonlyResult};
 use crate::target::model::TargetIdentity;
+use crate::target::Evidence;
 
 use super::{is_device_mounted_rw, push_evidence, set_section};
 
@@ -129,7 +129,7 @@ pub(in crate::doctor) fn run_filesystem_section<R: FsCommandRunner + ?Sized>(
     if target
         .root_device
         .as_deref()
-        .map(|d| is_device_mounted_rw(d))
+        .map(is_device_mounted_rw)
         .unwrap_or(false)
     {
         let section = set_section(sections, id, DoctorSectionStatus::Skipped);

@@ -14,7 +14,7 @@ pub use types::*;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::shared::error::exit_code;
+    use crate::error::exit_code;
     use crate::target::diagnose::system_root::SystemRoot;
     use std::path::Path;
 

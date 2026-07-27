@@ -3,14 +3,14 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::shared::model::doctor::{
+use crate::doctor::model::{
     issue_code, recommendation_code, DoctorIssue, DoctorLimitation, DoctorRecommendation,
     DoctorReport, DoctorSection, DoctorSectionId, DoctorSectionStatus, DoctorSeverity,
 };
-use crate::shared::model::evidence::Evidence;
-use crate::target::model::TargetIdentity;
 use crate::snapshot::model::TransactionRecord;
 use crate::snapshot::store;
+use crate::target::model::TargetIdentity;
+use crate::target::Evidence;
 
 use super::{push_evidence, push_issue, set_section};
 

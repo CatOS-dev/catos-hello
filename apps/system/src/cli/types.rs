@@ -10,7 +10,7 @@ use std::path::PathBuf;
 ///   * `storage scan` — walks sysfs + blkid + mountinfo and emits a
 ///     [`crate::target::model::StorageReport`].
 ///   * `target plan` — reads a target fstab + discovers devices and emits
-///     a [`crate::shared::model::mount::MountPlan`] without executing any mount.
+///     a [`crate::mount::model::MountPlan`] without executing any mount.
 ///   * `target mount` — same as `target plan` then executes the plan in a
 ///     private mount namespace, inspects the target, cleans up, and emits
 ///     the final session/cleanup report.

@@ -31,15 +31,16 @@
 //!   are independent. Doctor returns 0 whenever it produced a report,
 //!   even if every section found a problem.
 
+pub mod model;
 mod sections;
 
-use crate::fs::command::FsCommandRunner;
-use crate::shared::model::doctor::{
+use crate::doctor::model::{
     issue_code, recommendation_code, DoctorCleanup, DoctorEnvironment, DoctorIssue,
-    DoctorLimitation, DoctorOverallStatus, DoctorRecommendation, DoctorReport, DoctorSection,
-    DoctorSectionId, DoctorSectionStatus, DoctorSeverity,
+    DoctorOverallStatus, DoctorRecommendation, DoctorReport, DoctorSection, DoctorSectionId,
+    DoctorSectionStatus, DoctorSeverity,
 };
-use crate::shared::model::evidence::Evidence;
+use crate::fs::command::FsCommandRunner;
+use crate::target::Evidence;
 
 pub mod target_selection;
 use target_selection::TargetSelection;
@@ -232,7 +233,7 @@ pub fn aggregate_for_tests(report: &mut DoctorReport) {
 pub mod tests {
     #![allow(clippy::field_reassign_with_default)]
     use super::*;
-    use crate::shared::model::doctor::DoctorTargetKind;
+    use crate::doctor::model::{DoctorLimitation, DoctorTargetKind};
 
     pub fn aggregate_public(report: &mut DoctorReport) {
         aggregate(report);

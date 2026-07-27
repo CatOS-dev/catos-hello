@@ -6,7 +6,7 @@
 use std::io::Write;
 
 use crate::boot::model::BootRepairReport;
-use crate::shared::error::Error;
+use crate::error::Error;
 
 pub fn render_boot_repair_json(
     report: &BootRepairReport,

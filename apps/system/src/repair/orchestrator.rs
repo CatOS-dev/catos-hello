@@ -14,7 +14,7 @@
 //!
 //! Every tool invocation goes through the [`FsCommandRunner`] trait,
 //! which the real implementation (`RepairRunner`) backs with
-//! [`crate::shared::process::run_trusted_tool`]'s fixed-path / minimal-env /
+//! [`catos_process::run_trusted_tool`]'s fixed-path / minimal-env /
 //! bounded-output / deadline contract. There is no `sh -c`, no
 //! string-concatenated argv, no auto-format, no auto-unmount of
 //! pre-existing mounts.
@@ -48,13 +48,13 @@ use crate::fs::safety::{
 };
 use crate::fs::verify::{verify, VerificationOutcome};
 use crate::mount::plan::session::probe_unmounted_candidates;
-use crate::shared::model::evidence::Evidence;
-use crate::target::execute::lock::DeviceLock;
 use crate::target::diagnose::block::discover_devices;
 use crate::target::diagnose::filesystem::RealFilesystem;
+use crate::target::execute::lock::DeviceLock;
 use crate::target::model::DetectionStatus;
 use crate::target::model::Warning;
 use crate::target::model::{BlockDevice, DeviceClass, PartitionRole, RootCandidateConfidence};
+use crate::target::Evidence;
 
 /// Run the full `catos-repair fs` flow with the default
 /// `RepairRunner`. Used by the CLI in production. Tests call

@@ -5,9 +5,9 @@
 
 use std::io::Write;
 
+use crate::error::Error;
 use crate::recovery::model::{RecoveryInspectReport, RecoveryListReport, RecoveryStatusReport};
 use crate::recovery::Phase3Outcome;
-use crate::shared::error::Error;
 use crate::snapshot::model::{RecoveryPlan, SnapshotError, TransactionRecord};
 
 pub fn render_phase3_json(

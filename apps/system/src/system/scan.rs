@@ -1,17 +1,17 @@
-use super::Phase2Outcome;
 use super::target::read_target_fstab;
 use super::util::merge_warnings;
+use super::Phase2Outcome;
 use std::collections::HashSet;
 
-use crate::shared::error::Error;
-use crate::target::model::Warning;
-use crate::target::model::StorageReport;
+use crate::error::Error;
 use crate::mount::plan::session::probe_unmounted_candidates;
-use crate::target::diagnose::candidate::candidate_ambiguities;
-use crate::target::diagnose::filesystem::RealFilesystem;
 use crate::target::diagnose::block::discover_devices;
+use crate::target::diagnose::candidate::candidate_ambiguities;
 use crate::target::diagnose::candidate::identify_candidates;
+use crate::target::diagnose::filesystem::RealFilesystem;
 use crate::target::diagnose::system_root::SystemRoot;
+use crate::target::model::StorageReport;
+use crate::target::model::Warning;
 
 pub fn run_storage_scan(root: &SystemRoot) -> Result<Phase2Outcome, Error> {
     let fs = RealFilesystem;

@@ -1,6 +1,6 @@
 use super::help::{help_text, version_text};
 use super::types::*;
-use crate::shared::error::Error;
+use crate::error::Error;
 use crate::target::diagnose::system_root::SystemRoot;
 use std::path::{Component, Path, PathBuf};
 
@@ -360,16 +360,14 @@ fn parse_plan_file_path(value: &str, option: &str) -> Result<PathBuf, Error> {
     Ok(path.to_path_buf())
 }
 
-fn root_error(
-    error: catos_target::diagnose::system_root::RootError,
-) -> crate::shared::error::Error {
+fn root_error(error: catos_target::diagnose::system_root::RootError) -> crate::error::Error {
     use catos_target::diagnose::system_root::RootError;
     match error {
-        RootError::PermissionDenied(path) => crate::shared::error::Error::PermissionDenied {
+        RootError::PermissionDenied(path) => crate::error::Error::PermissionDenied {
             path: path.into(),
             detail: "cannot stat target root".into(),
         },
-        other => crate::shared::error::Error::InvalidRoot {
+        other => crate::error::Error::InvalidRoot {
             path: match &other {
                 RootError::Relative(path)
                 | RootError::DoesNotExist(path)

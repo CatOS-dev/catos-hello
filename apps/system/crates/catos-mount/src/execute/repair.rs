@@ -162,7 +162,7 @@ pub fn execute_mount_repair(
                 nested_esp_directory_created,
                 MountRepairOutcome::UnsafePath,
                 "MOUNTPOINT_CREATE_FAILED",
-                format!("{}: {}", directory.mount_point, format!("{error}")),
+                format!("{}: {error}", directory.mount_point),
                 None,
                 None,
             );

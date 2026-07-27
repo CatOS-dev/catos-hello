@@ -16,7 +16,7 @@
 //! to be wired through each section's own capability path in a later
 //! phase.
 
-use crate::shared::model::doctor::{DoctorTarget, DoctorTargetKind};
+use crate::doctor::model::{DoctorTarget, DoctorTargetKind};
 use crate::target::model::TargetIdentity;
 use crate::target::plan::{discover_target_plan, TargetPlan, TargetPlanKind};
 
@@ -160,7 +160,7 @@ mod tests {
 
     #[test]
     fn target_summary_for_none_uses_none_kind() {
-        use crate::shared::model::doctor::DoctorTargetKind;
+        use crate::doctor::model::DoctorTargetKind;
         let sel = TargetSelection::None { reason: "x".into() };
         assert_eq!(sel.to_target_summary().kind, DoctorTargetKind::None);
     }
@@ -173,7 +173,10 @@ mod tests {
         let sel = from_plan(p);
         match sel {
             TargetSelection::Identified(t) => {
-                assert_eq!(t.root_device.as_deref(), Some(std::path::Path::new("/dev/nvme0n1p2")));
+                assert_eq!(
+                    t.root_device.as_deref(),
+                    Some(std::path::Path::new("/dev/nvme0n1p2"))
+                );
                 assert_eq!(t.root_fstype.as_deref(), Some("btrfs"));
                 assert_eq!(t.root_subvol.as_deref(), Some("/@"));
                 assert_eq!(t.root_uuid.as_deref(), Some("root-uuid"));

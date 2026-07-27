@@ -9,11 +9,11 @@
 
 use std::io::Write;
 
-use crate::shared::error::Error;
-use crate::shared::model::doctor::{
+use crate::doctor::model::{
     DoctorIssue, DoctorOverallStatus, DoctorRecommendation, DoctorReport, DoctorSection,
     DoctorSeverity, DoctorTargetKind,
 };
+use crate::error::Error;
 
 /// Render the report as human-readable text. Always returns `Ok(())`
 /// because Doctor's exit code is decided by [`DoctorReport::doctor_failed`],
@@ -204,9 +204,9 @@ pub fn render_doctor_json(report: &DoctorReport) -> Result<String, Error> {
 /// only when Doctor itself could not complete.
 pub fn exit_code_for(report: &DoctorReport) -> i32 {
     if report.doctor_failed() {
-        crate::shared::error::exit_code::PROBE_FAILED
+        crate::error::exit_code::PROBE_FAILED
     } else {
-        crate::shared::error::exit_code::SUCCESS
+        crate::error::exit_code::SUCCESS
     }
 }
 
@@ -219,12 +219,12 @@ pub fn overall_status_label(status: DoctorOverallStatus) -> &'static str {
 mod tests {
     #![allow(clippy::field_reassign_with_default)]
     use super::*;
-    use crate::shared::model::doctor::{
+    use crate::doctor::model::{
         DoctorCleanup, DoctorEnvironment, DoctorIssue, DoctorLimitation, DoctorOverallStatus,
         DoctorRecommendation, DoctorSection, DoctorSectionId, DoctorSectionStatus, DoctorSeverity,
         DoctorTarget, DoctorTargetKind, DOCTOR_SCHEMA_VERSION,
     };
-    use crate::shared::model::evidence::Evidence;
+    use crate::target::Evidence;
 
     fn sample_report() -> DoctorReport {
         let mut report = DoctorReport {

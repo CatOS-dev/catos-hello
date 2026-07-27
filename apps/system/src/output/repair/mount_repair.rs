@@ -5,7 +5,7 @@
 
 use std::io::Write;
 
-use crate::shared::error::Error;
+use crate::error::Error;
 use crate::mount::model::MountRepairReport;
 
 pub fn render_mount_repair_json(
@@ -120,10 +120,7 @@ pub fn render_mount_repair_human<W: Write>(
                 crate::mount::model::AppliedAction::DirectoryRolledBack { mount_point } => {
                     writeln!(out, "    mkdir-rollback: {mount_point}")?;
                 }
-                crate::mount::model::AppliedAction::RollbackResidual {
-                    resource,
-                    reason,
-                } => {
+                crate::mount::model::AppliedAction::RollbackResidual { resource, reason } => {
                     writeln!(out, "    ROLLBACK-RESIDUAL: {resource} ({reason})")?;
                 }
             }
@@ -221,7 +218,8 @@ mod tests {
     use super::*;
     use crate::mount::model::{
         AppliedAction, FstabTransaction, MountProblem, MountRepairCleanup, MountRepairOutcome,
-        MountRepairPlan, MountVerification, PlannedFstabEdit, PlannedSubvolume, MountTargetIdentity,
+        MountRepairPlan, MountTargetIdentity, MountVerification, PlannedFstabEdit,
+        PlannedSubvolume,
     };
     use std::path::PathBuf;
 

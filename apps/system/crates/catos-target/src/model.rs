@@ -42,12 +42,11 @@ pub struct TargetIdentity {
 }
 
 // ===========================================================================
-// Storage device + candidate model (migrated from shared/model/storage/storage.rs)
+// Storage device + candidate model
 // ===========================================================================
 //
-// Re-exported here verbatim (no behaviour change) so the legacy flat
-// import path `crate::shared::model::<Type>` can be replaced mechanically
-// by `crate::model::<Type>`.
+// Target owns the canonical block-device and candidate types consumed by
+// every higher capability crate.
 
 /// Coarse device class.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]

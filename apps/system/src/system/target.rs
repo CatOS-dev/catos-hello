@@ -1,19 +1,19 @@
-use super::Phase2Outcome;
 use super::util::{fresh_session_root, mount_error_to_top_error};
+use super::Phase2Outcome;
 use std::path::Path;
 
-use crate::shared::cli::TargetSelection;
-use crate::shared::error::Error;
-use crate::mount::diagnose::fstab::{FstabEntry, FstabEntryKind, FstabSource};
-use crate::target::model::Warning;
-use crate::mount::model::MountError;
-use crate::mount::plan::session::{build_plan, PlanInputs};
-use crate::mount::plan::session::inspect_selected_root;
-use crate::mount::session::ReadOnlyMountSession;
+use crate::cli::TargetSelection;
+use crate::error::Error;
 use crate::mount::diagnose::fstab::parse_all_with_diagnostics;
-use crate::target::diagnose::filesystem::{FilesystemProbe, RealFilesystem};
+use crate::mount::diagnose::fstab::{FstabEntry, FstabEntryKind, FstabSource};
+use crate::mount::model::MountError;
+use crate::mount::plan::session::inspect_selected_root;
+use crate::mount::plan::session::{build_plan, PlanInputs};
+use crate::mount::session::ReadOnlyMountSession;
 use crate::target::diagnose::block::discover_devices;
+use crate::target::diagnose::filesystem::{FilesystemProbe, RealFilesystem};
 use crate::target::diagnose::system_root::SystemRoot;
+use crate::target::model::Warning;
 
 struct TargetInputs {
     devices: Vec<crate::target::model::BlockDevice>,
@@ -294,7 +294,9 @@ fn replace_esp_entry(
     Ok(())
 }
 
-pub(super) fn read_target_fstab(root: &SystemRoot) -> Result<(Vec<FstabEntry>, Vec<Warning>), Error> {
+pub(super) fn read_target_fstab(
+    root: &SystemRoot,
+) -> Result<(Vec<FstabEntry>, Vec<Warning>), Error> {
     let fs = RealFilesystem;
     match fs.rooted_read_to_string(root.canonical_path(), Path::new("etc/fstab")) {
         Ok(body) => {
@@ -313,8 +315,8 @@ pub(super) fn read_target_fstab(root: &SystemRoot) -> Result<(Vec<FstabEntry>, V
                 .collect();
             Ok((entries, warnings))
         }
-        Err(crate::shared::error::FsError::NotFound) => Ok((Vec::new(), Vec::new())),
-        Err(crate::shared::error::FsError::PermissionDenied) => Err(Error::PermissionDenied {
+        Err(crate::error::FsError::NotFound) => Ok((Vec::new(), Vec::new())),
+        Err(crate::error::FsError::PermissionDenied) => Err(Error::PermissionDenied {
             path: root.join("etc/fstab"),
             detail: "target fstab is not readable through confined root access".into(),
         }),
@@ -323,8 +325,6 @@ pub(super) fn read_target_fstab(root: &SystemRoot) -> Result<(Vec<FstabEntry>, V
         }),
     }
 }
-
-
 
 #[cfg(test)]
 mod tests {

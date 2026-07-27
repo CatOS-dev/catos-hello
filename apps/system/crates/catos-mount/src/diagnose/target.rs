@@ -1,9 +1,8 @@
 //! Mount target diagnosis + selection: the pure fstab/layout/device
 //! reasoning shared by Doctor's mount section and `catos-repair mount`.
 //!
-//! This module is dependency-clean: it depends only on `std`,
-//! `crate::target`, `crate::shared::{error,evidence}`, and sibling
-//! `crate::*` modules. The disk-touching observation path
+//! This module is dependency-clean: it depends only on `catos-target` and
+//! sibling Mount modules. The disk-touching observation path
 //! (`observe_target_inputs`) that enumerates btrfs subvolumes via the
 //! snapshot engine is deliberately NOT housed here — it stays in the
 //! repair orchestration layer, because the `mount` capability must

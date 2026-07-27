@@ -3,13 +3,13 @@
 use std::path::Path;
 
 use crate::boot::diagnose::provider::{detect, DetectionInputs, DetectionVerdict};
-use crate::mount::model::MountTargetIdentity as RepairTargetIdentity;
-use crate::shared::model::doctor::{
+use crate::doctor::model::{
     issue_code, recommendation_code, DoctorIssue, DoctorLimitation, DoctorRecommendation,
     DoctorReport, DoctorSection, DoctorSectionId, DoctorSectionStatus, DoctorSeverity,
 };
-use crate::shared::model::evidence::Evidence;
+use crate::mount::model::MountTargetIdentity as RepairTargetIdentity;
 use crate::target::model::TargetIdentity;
+use crate::target::Evidence;
 
 use super::{has_target_path, push_evidence, read_target_file, set_section, target_root_path};
 

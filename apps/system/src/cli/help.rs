@@ -1,4 +1,4 @@
-use crate::shared::error::exit_code;
+use crate::error::exit_code;
 
 pub fn help_text() -> String {
     format!(

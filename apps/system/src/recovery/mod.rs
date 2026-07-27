@@ -22,11 +22,11 @@ mod write;
 
 use std::path::PathBuf;
 
+use crate::cli::{RecoveryArgs, RecoverySubcommand};
+use crate::error::exit_code;
 use crate::recovery::model::{
     RecoveryInspectReport, RecoveryListReport, RecoveryRecommendation, RecoveryStatusReport,
 };
-use crate::shared::cli::{RecoveryArgs, RecoverySubcommand};
-use crate::shared::error::exit_code;
 use crate::snapshot::diagnose::identity::{validate_recovery_id, SubvolumePath};
 use crate::snapshot::model::{
     CleanupSummary, RecoveryPlan, SnapshotError, SnapshotErrorKind, TransactionRecord,

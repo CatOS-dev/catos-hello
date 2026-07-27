@@ -51,9 +51,9 @@ use catos_target::Evidence;
 
 /// Default session-root parent. Per-session subdirs are `<id>` under here.
 ///
-/// Re-exported from [`crate::shared::mount::secure_dir`] so phase 2 and phase 3
-/// share the same trusted root path. The constant value is part of the
-/// public contract.
+/// Re-exported from the Mount secure-directory implementation so all
+/// read-only sessions share the same trusted root path. The constant value is
+/// part of the public contract.
 pub use crate::execute::secure_dir::SESSION_ROOT_PARENT;
 
 /// A live mount session. Owns the namespace setup result and the list of

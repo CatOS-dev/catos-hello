@@ -10,7 +10,7 @@ use crate::boot::diagnose::target::{
 use crate::boot::execute::repair::run_boot_repair;
 use crate::boot::model::{BootRepairOutcome, BootRepairReport, FirmwareClass, PlatformFacts};
 use crate::mount::model::MountRepairCleanup;
-use crate::shared::model::evidence::Evidence;
+use crate::target::Evidence;
 
 /// Production CLI entry point for `catos-repair boot`.
 pub fn run_boot_repair_via_cli(

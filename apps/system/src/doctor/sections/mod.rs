@@ -7,10 +7,8 @@ mod recovery;
 
 use std::path::{Path, PathBuf};
 
-use crate::shared::model::doctor::{
-    DoctorIssue, DoctorSection, DoctorSectionId, DoctorSectionStatus,
-};
-use crate::shared::model::evidence::Evidence;
+use crate::doctor::model::{DoctorIssue, DoctorSection, DoctorSectionId, DoctorSectionStatus};
+use crate::target::Evidence;
 
 pub(in crate::doctor) use boot::{run_boot_section, run_secure_boot_section};
 pub(in crate::doctor) use filesystem::{
@@ -56,7 +54,9 @@ pub(in crate::doctor) fn push_evidence(
     entry.1.evidence.push(ev);
 }
 
-pub(in crate::doctor) fn target_root_path(_target: &crate::target::model::TargetIdentity) -> PathBuf {
+pub(in crate::doctor) fn target_root_path(
+    _target: &crate::target::model::TargetIdentity,
+) -> PathBuf {
     PathBuf::from("/")
 }
 

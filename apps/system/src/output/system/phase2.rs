@@ -4,10 +4,10 @@
 
 use std::io::Write;
 
-use crate::shared::error::Error;
+use crate::error::Error;
 use crate::mount::model::{CleanupReport, MountPlan, MountSession};
-use crate::target::model::StorageReport;
 use crate::system::Phase2Outcome;
+use crate::target::model::StorageReport;
 
 /// Render a phase-2 outcome as JSON. Wraps every variant in a top-level
 /// object with the same stable envelope keys as phase-1 reports:

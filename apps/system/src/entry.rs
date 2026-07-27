@@ -4,7 +4,7 @@
 
 use std::fmt;
 
-use crate::shared::error::{exit_code, Error};
+use crate::error::{exit_code, Error};
 
 mod chroot;
 
@@ -184,15 +184,15 @@ fn run_doctor() -> i32 {
     use std::io::Write;
 
     let report = crate::doctor::run_doctor();
-    let exit = crate::shared::output::doctor_exit_code_for(&report);
+    let exit = crate::output::doctor_exit_code_for(&report);
     let mut out = std::io::stdout();
-    if let Err(e) = crate::shared::output::render_doctor_human(&report, &mut out) {
+    if let Err(e) = crate::output::render_doctor_human(&report, &mut out) {
         eprintln!("catos-doctor: {e}");
         return e.exit_code();
     }
     if let Err(e) = out.flush() {
         eprintln!("catos-doctor: stdout write failed: {e}");
-        return crate::shared::error::exit_code::PROBE_FAILED;
+        return crate::error::exit_code::PROBE_FAILED;
     }
     exit
 }
@@ -209,14 +209,14 @@ fn run_via_full_parser(invocation: Invocation, argv: &[String]) -> i32 {
     {
         Ok(r) => r,
         Err(error) => {
-            let error: crate::shared::error::Error = error.into();
+            let error: crate::error::Error = error.into();
             eprintln!("{invocation}: {error}");
             return error.exit_code();
         }
     };
 
-    match crate::shared::cli::parse(argv, default_root) {
-        Ok(crate::shared::cli::ParseOutcome::Help(text)) => {
+    match crate::cli::parse(argv, default_root) {
+        Ok(crate::cli::ParseOutcome::Help(text)) => {
             // Replace the program name in the canned help text so users
             // invoking via a symlink see their invocation.
             let text = text.replacement_help_name(invocation);
@@ -224,12 +224,12 @@ fn run_via_full_parser(invocation: Invocation, argv: &[String]) -> i32 {
             std::io::stdout().flush().ok();
             exit_code::SUCCESS
         }
-        Ok(crate::shared::cli::ParseOutcome::Version(text)) => {
+        Ok(crate::cli::ParseOutcome::Version(text)) => {
             print!("{text}");
             std::io::stdout().flush().ok();
             exit_code::SUCCESS
         }
-        Ok(crate::shared::cli::ParseOutcome::Run(args)) => {
+        Ok(crate::cli::ParseOutcome::Run(args)) => {
             if args.command.is_phase1() {
                 run_phase1(invocation, *args)
             } else if args.command.is_phase2() {
@@ -344,17 +344,14 @@ fn run_repair_fs(argv: &[String]) -> i32 {
     let exit = outcome_exit_code(report.final_outcome);
 
     let render_result = if json {
-        crate::shared::output::render_repair_json(
-            &report,
-            "catos-repair",
-            std::path::Path::new("/"),
-        )
-        .and_then(|s| {
-            write_json_stdout(&s).map_err(|e| Error::SerializeFailed(format!("stdout write: {e}")))
-        })
+        crate::output::render_repair_json(&report, "catos-repair", std::path::Path::new("/"))
+            .and_then(|s| {
+                write_json_stdout(&s)
+                    .map_err(|e| Error::SerializeFailed(format!("stdout write: {e}")))
+            })
     } else {
         let mut out = std::io::stdout();
-        crate::shared::output::render_repair_human(&report, &mut out)
+        crate::output::render_repair_human(&report, &mut out)
             .and_then(|_| out.flush())
             .map_err(|e| Error::SerializeFailed(format!("stdout write: {e}")))
     };
@@ -514,17 +511,14 @@ fn run_repair_mount(argv: &[String]) -> i32 {
     let exit = mount_outcome_exit_code(report.final_outcome);
 
     let render_result = if json {
-        crate::shared::output::render_mount_repair_json(
-            &report,
-            "catos-repair",
-            std::path::Path::new("/"),
-        )
-        .and_then(|s| {
-            write_json_stdout(&s).map_err(|e| Error::SerializeFailed(format!("stdout write: {e}")))
-        })
+        crate::output::render_mount_repair_json(&report, "catos-repair", std::path::Path::new("/"))
+            .and_then(|s| {
+                write_json_stdout(&s)
+                    .map_err(|e| Error::SerializeFailed(format!("stdout write: {e}")))
+            })
     } else {
         let mut out = std::io::stdout();
-        crate::shared::output::render_mount_repair_human(&report, &mut out)
+        crate::output::render_mount_repair_human(&report, &mut out)
             .and_then(|_| out.flush())
             .map_err(|e| Error::SerializeFailed(format!("stdout write: {e}")))
     };
@@ -815,7 +809,7 @@ fn print_help(invocation: Invocation) -> i32 {
             // surface, so the full help text is appropriate. The
             // leading name is rebranded so operators invoking via a
             // symlink see their entry point identified.
-            let text = crate::shared::cli::help_text().replacement_help_name(invocation);
+            let text = crate::cli::help_text().replacement_help_name(invocation);
             print!("{text}");
         }
     }
@@ -825,20 +819,20 @@ fn print_help(invocation: Invocation) -> i32 {
 
 /// Dispatch a phase-1 command (environment / capabilities / inspect).
 /// Builds an InspectionReport and renders the selected view.
-fn run_phase1(invocation: Invocation, args: crate::shared::cli::CliArgs) -> i32 {
+fn run_phase1(invocation: Invocation, args: crate::cli::CliArgs) -> i32 {
     use std::io::Write;
 
     let view = args.command.view();
     match build_report(invocation, &args.root) {
         Ok(report) => {
             let result = if args.json {
-                crate::shared::output::render_json(&report, view).and_then(|s| {
+                crate::output::render_json(&report, view).and_then(|s| {
                     write_json_stdout(&s)
                         .map_err(|e| Error::SerializeFailed(format!("stdout write: {e}")))
                 })
             } else {
                 let mut out = std::io::stdout();
-                crate::shared::output::render_human(&report, view, &mut out)
+                crate::output::render_human(&report, view, &mut out)
                     .and_then(|_| out.flush())
                     .map_err(|e| Error::SerializeFailed(format!("stdout write: {e}")))
             };
@@ -859,15 +853,13 @@ fn run_phase1(invocation: Invocation, args: crate::shared::cli::CliArgs) -> i32 
 
 /// Dispatch a phase-2 command (storage scan / target plan / target mount).
 /// Builds the phase-2 outcome and renders it via the phase-2 output layer.
-fn run_phase2(invocation: Invocation, args: crate::shared::cli::CliArgs) -> i32 {
+fn run_phase2(invocation: Invocation, args: crate::cli::CliArgs) -> i32 {
     use std::io::Write;
 
     let outcome_result = match args.command {
-        crate::shared::cli::Command::StorageScan => crate::system::run_storage_scan(&args.root),
-        crate::shared::cli::Command::TargetPlan => {
-            crate::system::run_target_plan(&args.root, &args.target)
-        }
-        crate::shared::cli::Command::TargetMount => {
+        crate::cli::Command::StorageScan => crate::system::run_storage_scan(&args.root),
+        crate::cli::Command::TargetPlan => crate::system::run_target_plan(&args.root, &args.target),
+        crate::cli::Command::TargetMount => {
             crate::system::run_target_mount(&args.root, &args.target)
         }
         // Phase-1 commands never reach here (is_phase1() routes them away).
@@ -877,7 +869,7 @@ fn run_phase2(invocation: Invocation, args: crate::shared::cli::CliArgs) -> i32 
     match outcome_result {
         Ok(outcome) => {
             let result = if args.json {
-                crate::shared::output::render_phase2_json(
+                crate::output::render_phase2_json(
                     &outcome,
                     invocation.as_str(),
                     args.root.as_path(),
@@ -888,7 +880,7 @@ fn run_phase2(invocation: Invocation, args: crate::shared::cli::CliArgs) -> i32 
                 })
             } else {
                 let mut out = std::io::stdout();
-                crate::shared::output::render_phase2_human(&outcome, &mut out)
+                crate::output::render_phase2_human(&outcome, &mut out)
                     .and_then(|_| out.flush())
                     .map_err(|e| Error::SerializeFailed(format!("stdout write: {e}")))
             };
@@ -903,7 +895,7 @@ fn run_phase2(invocation: Invocation, args: crate::shared::cli::CliArgs) -> i32 
         Err(e) => {
             let exit = e.exit_code();
             if args.json {
-                match crate::shared::output::render_phase2_error_json(
+                match crate::output::render_phase2_error_json(
                     &e,
                     invocation.as_str(),
                     args.root.as_path(),
@@ -927,14 +919,14 @@ fn run_phase2(invocation: Invocation, args: crate::shared::cli::CliArgs) -> i32 
 }
 
 /// Dispatch a phase-3 recovery command.
-fn run_phase3(invocation: Invocation, args: crate::shared::cli::CliArgs) -> i32 {
+fn run_phase3(invocation: Invocation, args: crate::cli::CliArgs) -> i32 {
     use std::io::Write;
 
     let recovery_args = match args.recovery.clone() {
         Some(recovery_args) => recovery_args,
         None => {
             eprintln!("{invocation}: recovery subcommand selected but no recovery args parsed");
-            return crate::shared::error::exit_code::ARG_ERROR;
+            return crate::error::exit_code::ARG_ERROR;
         }
     };
     let outcome = crate::recovery::run_recovery(recovery_args);
@@ -994,7 +986,7 @@ mod tests {
     fn partially_repaired_boot_is_not_a_success_exit() {
         assert_ne!(
             boot_outcome_exit_code(BootRepairOutcome::PartiallyRepaired),
-            crate::shared::error::exit_code::SUCCESS
+            crate::error::exit_code::SUCCESS
         );
     }
 }

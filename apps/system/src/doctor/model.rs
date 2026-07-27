@@ -26,7 +26,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::shared::model::evidence::Evidence;
+use crate::target::Evidence;
 
 /// Schema version for the Doctor report. Bumped only on a
 /// backward-incompatible change to the top-level shape.

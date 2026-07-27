@@ -2,10 +2,10 @@ use super::Phase2Outcome;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use crate::shared::error::{exit_code, Error};
-use crate::target::model::Warning;
-use crate::mount::model::MountError;
+use crate::error::{exit_code, Error};
 use crate::mount::execute::secure_dir::SESSION_ROOT_PARENT;
+use crate::mount::model::MountError;
+use crate::target::model::Warning;
 
 pub(crate) static SESSION_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
@@ -47,15 +47,11 @@ pub fn exit_code_for(outcome: &Phase2Outcome) -> i32 {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::shared::error::exit_code;
-    use crate::mount::model::{
-        CleanupReport, MountSession, MountSessionState, NamespaceState, ResidualMount,
-        MountedResource,
-    };
+    use crate::error::exit_code;
+    use crate::mount::model::MountSession;
     use crate::target::model::TargetInspection;
     use std::path::PathBuf;
 

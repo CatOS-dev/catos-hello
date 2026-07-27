@@ -3,11 +3,11 @@
 
 use std::io::Write;
 
-use crate::shared::cli::View;
-use crate::target::model::{Capability, CapabilityStatus};
-use crate::shared::model::evidence::Evidence;
+use crate::cli::View;
 use crate::target::model::InspectionReport;
+use crate::target::model::{Capability, CapabilityStatus};
 use crate::target::model::{Detection, DetectionStatus, PrimaryRuntimeMode};
+use crate::target::Evidence;
 
 /// Render the report as human-readable text into `out`. The view controls
 /// which sections are emitted, matching the JSON contract: `environment`
@@ -189,8 +189,8 @@ fn detection_status_str(s: &DetectionStatus) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::target::model::{TargetInspection, Warning};
     use crate::target::model::RuntimeFacts;
+    use crate::target::model::{TargetInspection, Warning};
 
     fn empty_report() -> InspectionReport {
         InspectionReport {

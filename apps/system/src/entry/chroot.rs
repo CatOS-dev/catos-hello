@@ -11,7 +11,7 @@ use crate::chroot::execute::{
 use crate::chroot::model::{BlockDevice, ChrootExecutionOutcome, Subvolume};
 use crate::chroot::plan::{build_plan, ChrootPlanInputs, ExtraMountSelection};
 use crate::chroot::session::{establish_private_namespace, ChrootSessionRoot};
-use crate::shared::error::exit_code;
+use crate::error::exit_code;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 struct ChrootOptions {

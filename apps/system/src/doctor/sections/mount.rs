@@ -2,15 +2,17 @@
 
 use std::path::Path;
 
-use crate::shared::model::doctor::{
+use crate::doctor::model::{
     issue_code, recommendation_code, DoctorIssue, DoctorRecommendation, DoctorReport,
     DoctorSection, DoctorSectionId, DoctorSectionStatus, DoctorSeverity,
 };
-use crate::shared::model::evidence::Evidence;
+use crate::mount::diagnose::subvolume::{CatosConfirmation, SubvolFacts};
+use crate::mount::diagnose::target::{
+    diagnose as mount_diagnose, MountPointObservation, MountRepairInputs,
+};
 use crate::mount::model::{MountProblem, MountTargetIdentity as RepairTargetIdentity};
 use crate::target::model::TargetIdentity;
-use crate::mount::diagnose::target::{diagnose as mount_diagnose, MountPointObservation, MountRepairInputs};
-use crate::mount::diagnose::subvolume::{CatosConfirmation, SubvolFacts};
+use crate::target::Evidence;
 
 use super::{push_evidence, push_issue, set_section, target_root_path};
 
@@ -143,7 +145,9 @@ fn observe_path(path: &Path) -> MountPointObservation {
     }
 }
 
-pub(in crate::doctor) fn derive_mount_section_status(problems: &[MountProblem]) -> DoctorSectionStatus {
+pub(in crate::doctor) fn derive_mount_section_status(
+    problems: &[MountProblem],
+) -> DoctorSectionStatus {
     if problems.is_empty() {
         return DoctorSectionStatus::Healthy;
     }
@@ -176,7 +180,10 @@ pub(in crate::doctor) fn derive_mount_section_status(problems: &[MountProblem]) 
     DoctorSectionStatus::Degraded
 }
 
-pub(in crate::doctor) fn mount_problem_to_issue(problem: &MountProblem, section: DoctorSectionId) -> DoctorIssue {
+pub(in crate::doctor) fn mount_problem_to_issue(
+    problem: &MountProblem,
+    section: DoctorSectionId,
+) -> DoctorIssue {
     use MountProblem::*;
     let (code, severity, msg) = match problem {
         UnparseableLine { line, reason } => (
@@ -204,12 +211,19 @@ pub(in crate::doctor) fn mount_problem_to_issue(problem: &MountProblem, section:
             DoctorSeverity::Error,
             format!("root subvol is {actual}, expected /@"),
         ),
-        StandardWrongSubvol { mount_point, expected, actual } => (
+        StandardWrongSubvol {
+            mount_point,
+            expected,
+            actual,
+        } => (
             issue_code::STANDARD_SUBVOLUME_MISSING,
             DoctorSeverity::Error,
             format!("{mount_point}: expected subvol {expected}, got {actual}"),
         ),
-        MissingStandardEntry { mount_point, subvol } => (
+        MissingStandardEntry {
+            mount_point,
+            subvol,
+        } => (
             issue_code::STANDARD_SUBVOLUME_MISSING,
             DoctorSeverity::Error,
             format!("missing standard entry {mount_point} \u{2192} {subvol}"),
@@ -249,7 +263,10 @@ pub(in crate::doctor) fn mount_problem_to_issue(problem: &MountProblem, section:
             DoctorSeverity::Error,
             format!("standard mount-point {mount_point} is missing"),
         ),
-        UnsafeMountPoint { mount_point, reason } => (
+        UnsafeMountPoint {
+            mount_point,
+            reason,
+        } => (
             "UNSAFE_MOUNT_POINT",
             DoctorSeverity::Critical,
             format!("{mount_point}: {reason}"),
@@ -286,10 +303,7 @@ fn push_mount_evidence(
                     .as_deref()
                     .map(|p| p.display().to_string())
                     .unwrap_or_else(|| "<unknown>".to_string()),
-                target
-                    .root_fstype
-                    .as_deref()
-                    .unwrap_or("<unknown>"),
+                target.root_fstype.as_deref().unwrap_or("<unknown>"),
                 target.root_subvol
             ),
         ),

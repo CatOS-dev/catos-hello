@@ -2,6 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::cli::RecoveryArgs;
 use crate::mount::execute::secure_dir::SESSION_ROOT_PARENT;
 use crate::mount::model::CleanupReport;
 use crate::mount::plan::session::build_probe_plan;
@@ -9,7 +10,6 @@ use crate::mount::session::ReadOnlyMountSession;
 use crate::recovery::model::{
     RecoveryInspectReport, RecoveryListReport, RecoveryStatusReport, TransactionSummary,
 };
-use crate::shared::cli::RecoveryArgs;
 use crate::snapshot::diagnose::enumerate as btrfs;
 use crate::snapshot::diagnose::enumerate::probe_target_readonly;
 use crate::snapshot::diagnose::identity::{

@@ -20,30 +20,30 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+use crate::mount::diagnose::layout::detect_boot_mount_layout;
 use crate::mount::diagnose::target::{
     inspect_running_root, is_running_root_device, same_block_device, select_cli_root,
     select_mount_repair_esp, MountPointObservation,
 };
-use crate::mount::diagnose::layout::detect_boot_mount_layout;
 use crate::mount::execute::repair::execute_mount_repair;
 use crate::mount::model::{
-    AppliedAction, FstabDigest, FstabTransaction, MountRepairCleanup,
-    MountRepairOutcome, MountRepairPlan, MountRepairReport, MountTargetIdentity, MountVerification,
+    AppliedAction, FstabDigest, FstabTransaction, MountRepairCleanup, MountRepairOutcome,
+    MountRepairPlan, MountRepairReport, MountTargetIdentity, MountVerification,
 };
 use crate::mount::plan::repair::apply_in_memory as apply_in_memory_pure;
 use crate::mount::plan::session::{inspect_selected_root, probe_unmounted_candidates};
 use crate::mount::session::TargetMountRwSession;
-use crate::shared::model::evidence::Evidence;
-use crate::snapshot::model::CleanupSummary;
 use crate::snapshot::diagnose::enumerate as btrfs;
-use crate::target::execute::lock::DeviceLock;
+use crate::snapshot::model::CleanupSummary;
 use crate::target::diagnose::block::discover_devices;
 use crate::target::diagnose::filesystem::{FilesystemProbe, RealFilesystem};
+use crate::target::execute::lock::DeviceLock;
 use crate::target::model::{BlockDevice, DetectionStatus, Warning};
+use crate::target::Evidence;
 
 /// Re-export the inputs type so callers (`entry`, Doctor) keep a stable
 /// path. The canonical definition lives in `mount::diagnose::target`.
-pub use crate::mount::diagnose::target::{MountRepairInputs, diagnose};
+pub use crate::mount::diagnose::target::{diagnose, MountRepairInputs};
 pub use crate::mount::plan::repair::build_plan;
 
 /// In-memory apply: rewrite the fstab text per the plan and verify it
@@ -279,7 +279,7 @@ pub fn observe_target_inputs(
                         None
                     },
                 },
-                Err(crate::shared::error::FsError::NotFound) => MountPointObservation::missing(),
+                Err(crate::error::FsError::NotFound) => MountPointObservation::missing(),
                 Err(error) => {
                     return Err(format!(
                         "cannot safely inspect target mount point {}: {error}",
@@ -306,7 +306,7 @@ pub fn observe_target_inputs(
                     None
                 },
             },
-            Err(crate::shared::error::FsError::NotFound) => MountPointObservation::missing(),
+            Err(crate::error::FsError::NotFound) => MountPointObservation::missing(),
             Err(error) => {
                 return Err(format!(
                     "cannot safely inspect target mount point {mount_point}: {error}"
@@ -482,10 +482,11 @@ pub fn run_mount_repair_via_cli(
 
     // The btrfs subvolume creation hook: the only snapshot-engine
     // call site in the apply path. Delegated to the confined helper.
-    let mut report = execute_mount_repair(&inputs, &top, authorised, &devices, |top_level, subvol| {
-        crate::snapshot::execute::btrfs::create_btrfs_subvolume(top_level, subvol)
-            .map_err(|error| format!("{error}"))
-    });
+    let mut report =
+        execute_mount_repair(&inputs, &top, authorised, &devices, |top_level, subvol| {
+            crate::snapshot::execute::btrfs::create_btrfs_subvolume(top_level, subvol)
+                .map_err(|error| format!("{error}"))
+        });
 
     // Drive any pending btrfs subvolume rollbacks the pure-mount
     // rollback left for us. execute_mount_repair already recorded the
@@ -525,10 +526,17 @@ fn rollback_pending_subvolumes(report: &mut MountRepairReport, top: &Path) {
     let Some(plan) = report.plan.as_ref() else {
         return;
     };
-    let pending: Vec<String> = plan.subvolumes.iter().map(|s| s.subvol.clone()).rev().collect();
+    let pending: Vec<String> = plan
+        .subvolumes
+        .iter()
+        .map(|s| s.subvol.clone())
+        .rev()
+        .collect();
     for subvol in pending {
         match crate::snapshot::execute::btrfs::delete_empty_btrfs_subvolume(top, &subvol) {
-            Ok(()) => report.actions.push(AppliedAction::SubvolumeRolledBack { subvol }),
+            Ok(()) => report
+                .actions
+                .push(AppliedAction::SubvolumeRolledBack { subvol }),
             Err(error) => {
                 let reason = format!("{error}");
                 report.actions.push(AppliedAction::RollbackResidual {
@@ -691,11 +699,9 @@ fn boot_runtime_bind_flags(source: &str) -> u64 {
     }
 }
 
-struct SyscallAdapter;
-
 impl BootRepairTargetSession {
     fn mount_runtime_filesystems(&mut self) -> Result<(), String> {
-        use crate::mount::execute::syscall::{self, ms_flags};
+        use crate::mount::execute::syscall;
         for source in ["/dev", "/proc", "/sys", "/run"] {
             if !Path::new(source).is_dir() {
                 return Err(format!(
@@ -716,7 +722,7 @@ impl BootRepairTargetSession {
     }
 
     fn mount_boot_layout(&mut self) -> Result<(), String> {
-        use crate::mount::execute::syscall::{self, ms_flags};
+        use crate::mount::execute::syscall;
         use crate::mount::model::BootMountLayout;
         let Some(layout) = self.target.boot_layout.clone() else {
             return Err("target boot layout was not detected".into());
@@ -768,7 +774,13 @@ impl BootRepairTargetSession {
         device: &Path,
         target_relative: &str,
         options: Option<String>,
-        mount_fn: &impl Fn(Option<&str>, &Path, Option<&str>, u64, Option<&str>) -> Result<(), crate::mount::execute::syscall::SyscallError>,
+        mount_fn: &impl Fn(
+            Option<&str>,
+            &Path,
+            Option<&str>,
+            u64,
+            Option<&str>,
+        ) -> Result<(), crate::mount::execute::syscall::SyscallError>,
     ) -> Result<(), String> {
         use crate::mount::execute::syscall::ms_flags;
         let filesystem = self
@@ -820,9 +832,14 @@ impl BootRepairTargetSession {
         &mut self,
         source: &str,
         target_relative: &str,
-        mount_fn: &impl Fn(Option<&str>, &Path, Option<&str>, u64, Option<&str>) -> Result<(), crate::mount::execute::syscall::SyscallError>,
+        mount_fn: &impl Fn(
+            Option<&str>,
+            &Path,
+            Option<&str>,
+            u64,
+            Option<&str>,
+        ) -> Result<(), crate::mount::execute::syscall::SyscallError>,
     ) -> Result<(), String> {
-        use crate::mount::execute::syscall::ms_flags;
         let mount_point = self
             .target_root()
             .join(target_relative.trim_start_matches('/'));

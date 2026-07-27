@@ -5,8 +5,8 @@
 
 use std::path::Path;
 
+use crate::cli::RecoveryArgs;
 use crate::mount::session::BtrfsTopLevelRwSession;
-use crate::shared::cli::RecoveryArgs;
 use crate::snapshot::diagnose::identity::{
     ensure_supported_snapshot_layout, ensure_target_is_not_running_root,
     validate_mounted_filesystem,

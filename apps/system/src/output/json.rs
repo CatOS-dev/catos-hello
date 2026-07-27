@@ -4,8 +4,8 @@
 use serde::ser::SerializeMap;
 use serde::{Serialize, Serializer};
 
-use crate::shared::cli::View;
-use crate::shared::error::Error;
+use crate::cli::View;
+use crate::error::Error;
 use crate::target::model::InspectionReport;
 
 /// Serialise the report to a pretty-printed JSON string under the given
@@ -60,9 +60,9 @@ impl<'a> Serialize for ReportViewSerializer<'a> {
 mod tests {
     use super::*;
     use crate::target::model::{Capability, CapabilityKind, CapabilityStatus};
-    use crate::shared::model::evidence::Evidence;
-    use crate::target::model::{TargetInspection, Warning};
     use crate::target::model::{Detection, DetectionStatus, PrimaryRuntimeMode, RuntimeFacts};
+    use crate::target::model::{TargetInspection, Warning};
+    use crate::target::Evidence;
     use crate::SCHEMA_VERSION;
     use std::path::PathBuf;
 
