@@ -21,7 +21,8 @@ use super::rollback::{
 };
 use super::select::target_rooted_path;
 use super::verify::verify_written_target;
-use super::{apply_in_memory, build_plan, digest_of, MountRepairInputs};
+use super::plan::{build_plan, digest_of};
+use super::{apply_in_memory, MountRepairInputs};
 
 pub(super) fn execute_mount_repair(
     inputs: &MountRepairInputs,
