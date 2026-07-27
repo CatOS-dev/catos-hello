@@ -7,14 +7,33 @@ use crate::doctor::model::{
 };
 use crate::snapshot::model::TransactionRecord;
 use crate::snapshot::store;
-use crate::target::model::TargetIdentity;
 use crate::target::Evidence;
 
 use super::{push_evidence, push_issue, set_section};
+use crate::doctor::DoctorTargetContext;
 
 pub(in crate::doctor) fn run_recovery_section(
     sections: &mut [(DoctorSectionId, DoctorSection)],
-    target: &TargetIdentity,
+    context: Option<&DoctorTargetContext>,
+    options: Option<&crate::snapshot::execute::engine::EngineOptions>,
+    report: &mut DoctorReport,
+) -> Result<(), ()> {
+    let id = DoctorSectionId::Recovery;
+    let Some(context) = context else {
+        set_section(sections, id, DoctorSectionStatus::Unknown);
+        report.limitations.push(DoctorLimitation::new(
+            id,
+            "TARGET_CONTEXT_UNAVAILABLE",
+            "Recovery requires the selected readonly Doctor target context",
+        ));
+        return Ok(());
+    };
+    run_recovery_for_target(sections, &context.target, options, report)
+}
+
+fn run_recovery_for_target(
+    sections: &mut [(DoctorSectionId, DoctorSection)],
+    target: &crate::target::model::TargetIdentity,
     options: Option<&crate::snapshot::execute::engine::EngineOptions>,
     report: &mut DoctorReport,
 ) -> Result<(), ()> {
@@ -207,6 +226,7 @@ fn worse_of(current: DoctorSectionStatus, candidate: DoctorSectionStatus) -> Doc
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::target::model::TargetIdentity;
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -233,7 +253,7 @@ mod tests {
             .collect();
         let mut report = DoctorReport::default();
 
-        run_recovery_section(&mut sections, &target, None, &mut report).unwrap();
+        run_recovery_for_target(&mut sections, &target, None, &mut report).unwrap();
 
         let recovery = sections.iter().find(|(id, _)| *id == DoctorSectionId::Recovery).unwrap();
         assert_eq!(recovery.1.status, DoctorSectionStatus::Unknown);
