@@ -41,9 +41,30 @@ use crate::doctor::model::{
 };
 use crate::fs::command::FsCommandRunner;
 use crate::target::Evidence;
+use crate::target::discovery::{TargetCandidate, TargetSession};
 
 pub mod target_selection;
 use target_selection::TargetSelection;
+
+/// The single selected target and its readonly lifetime.  Section code receives
+/// this context instead of independently rediscovering a target.
+pub(crate) struct DoctorTargetContext {
+    pub target: crate::target::model::TargetIdentity,
+    pub candidate: TargetCandidate,
+    pub fstab: Result<String, String>,
+    session: TargetSession,
+}
+
+impl DoctorTargetContext {
+    fn new(target: crate::target::model::TargetIdentity, session: TargetSession) -> Self {
+        let candidate = session.candidate().clone();
+        let fstab = std::fs::read_to_string(target.root.join("etc/fstab"))
+            .map_err(|error| format!("cannot read selected target fstab: {error}"));
+        Self { target, candidate, fstab, session }
+    }
+
+    fn cleanup(self) -> crate::target::discovery::ProbeCleanup { self.session.cleanup() }
+}
 
 pub fn run_doctor() -> DoctorReport {
     let runner = crate::fs::command::TrustedRunner::new();
@@ -59,12 +80,13 @@ pub fn run_doctor() -> DoctorReport {
             return report;
         }
     };
+    let context = DoctorTargetContext::new(target, session);
     let mut report = DoctorReport::default();
     report.environment = environment.clone();
-    report.target = TargetSelection::Identified(target.clone()).to_target_summary();
-    report.sections = run_sections(&runner, &target, &environment, &mut report);
+    report.target = TargetSelection::Identified(context.target.clone()).to_target_summary();
+    report.sections = run_sections(&runner, &context.target, &environment, &mut report);
     aggregate(&mut report);
-    let cleanup = session.cleanup();
+    let cleanup = context.cleanup();
     report.cleanup = DoctorCleanup {
         cleaned: if cleanup.unmounted && cleanup.removed { vec![cleanup.mountpoint.display().to_string()] } else { Vec::new() },
         residual: cleanup.error.into_iter().map(|error| format!("{}: {error}", cleanup.mountpoint.display())).collect(),

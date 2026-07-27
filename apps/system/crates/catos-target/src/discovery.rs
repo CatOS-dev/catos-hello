@@ -42,6 +42,21 @@ pub struct TargetSession {
     probe: ReadonlyProbe,
 }
 
+/// A non-root filesystem attached to a selected target (for example its ESP)
+/// held on the same explicit readonly cleanup contract as [`TargetSession`].
+pub struct ReadonlySession {
+    probe: ReadonlyProbe,
+}
+
+impl ReadonlySession {
+    pub fn open(device: &Path, fstype: &str) -> Result<Self, String> {
+        Ok(Self { probe: ReadonlyProbe::mount(device, fstype, None)? })
+    }
+
+    pub fn root(&self) -> &Path { self.probe.path() }
+    pub fn cleanup(mut self) -> ProbeCleanup { self.probe.cleanup() }
+}
+
 impl TargetSession {
     pub fn open(candidate: TargetCandidate) -> Result<Self, String> {
         let probe = ReadonlyProbe::mount(
