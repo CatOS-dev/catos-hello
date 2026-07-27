@@ -27,6 +27,7 @@ pub use catos_mount as mount;
 pub mod output;
 pub mod recovery;
 pub mod repair;
+pub mod selection_ui;
 pub use catos_snapshot as snapshot;
 pub mod system;
 pub use catos_target as target;

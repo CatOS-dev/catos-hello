@@ -56,15 +56,11 @@ fn link_doctor() -> (TempDir, PathBuf) {
 }
 
 #[test]
-fn doctor_no_args_succeeds_with_zero_exit_code() {
+fn doctor_no_candidate_exits_nonzero_without_waiting_for_input() {
     let (_tmp, link) = link_doctor();
     let output = Command::new(&link).output().expect("spawn doctor");
-    assert!(
-        output.status.success(),
-        "doctor failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert_eq!(output.status.code(), Some(0));
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("no diagnosable CatOS system"));
 }
 
 #[test]
@@ -177,7 +173,7 @@ fn doctor_does_not_inherit_catos_system_subcommands() {
 fn doctor_outputs_all_seven_diagnostic_sections() {
     let (_tmp, link) = link_doctor();
     let output = Command::new(&link).output().unwrap();
-    assert!(output.status.success());
+    assert!(!output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
     for section in [
         "Environment",
@@ -199,7 +195,7 @@ fn doctor_outputs_all_seven_diagnostic_sections() {
 fn doctor_overall_status_is_emitted_with_complete_flag() {
     let (_tmp, link) = link_doctor();
     let output = Command::new(&link).output().unwrap();
-    assert!(output.status.success());
+    assert!(!output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("Overall status"));
     assert!(stdout.contains("status:"));

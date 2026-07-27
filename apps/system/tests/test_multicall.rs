@@ -205,11 +205,8 @@ fn doctor_without_arguments_outputs_diagnosis() {
     symlink(&bin, &link).unwrap();
 
     let output = Command::new(&link).output().expect("spawn doctor");
-    assert!(
-        output.status.success(),
-        "doctor failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("no diagnosable CatOS system"));
     let stdout = String::from_utf8(output.stdout).unwrap();
     // Stage-5 Doctor now produces an aggregated report whose
     // canonical sections are Environment, Storage, Filesystem, Mount,
@@ -599,8 +596,8 @@ fn doctor_remains_argumentless_after_routing_changes() {
     let tmp = TempDir::new("catos-doctor-routing-regression").unwrap();
     let link = link_to(&bin, &tmp, "catos-doctor");
     let (ok_no_args, code_no_args, stdout, _) = run_via(&link, &[]);
-    assert!(ok_no_args);
-    assert_eq!(code_no_args, 0);
+    assert!(!ok_no_args);
+    assert_eq!(code_no_args, 5);
     for section in [
         "Environment",
         "Storage",

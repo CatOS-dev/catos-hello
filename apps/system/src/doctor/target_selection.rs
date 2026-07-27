@@ -18,7 +18,10 @@
 
 use crate::doctor::model::{DoctorTarget, DoctorTargetKind};
 use crate::target::model::TargetIdentity;
-use crate::target::plan::{discover_target_plan, TargetPlan, TargetPlanKind};
+use crate::selection_ui::{select_target, Selection};
+use crate::target::discovery::discover_targets;
+#[cfg(test)]
+use crate::target::plan::{TargetPlan, TargetPlanKind};
 
 #[derive(Debug, Clone)]
 pub enum TargetSelection {
@@ -58,11 +61,26 @@ impl TargetSelection {
 }
 
 pub fn discover_target() -> TargetSelection {
-    from_plan(discover_target_plan())
+    match select_target(&discover_targets(), "catos-doctor") {
+        Selection::Selected(candidate) => TargetSelection::Identified(TargetIdentity {
+            // Group 1 deliberately does not retain a probe mount. A later
+            // diagnostic session mounts this candidate and replaces this
+            // inaccessible sentinel; it prevents any section from silently
+            // reading the Live host root meanwhile.
+            root: std::path::PathBuf::from("/run/catos-target-unmounted"),
+            root_device: Some(candidate.root_device),
+            root_fstype: Some(candidate.root_fstype),
+            root_subvol: candidate.root_subvolume,
+            root_uuid: candidate.root_uuid,
+        }),
+        Selection::Declined => TargetSelection::None { reason: "operator declined the discovered target".into() },
+        Selection::Unavailable(reason) => TargetSelection::None { reason },
+    }
 }
 
 /// Map a [`TargetPlan`] to a [`TargetSelection`] without any field
 /// remapping: the plan's [`TargetIdentity`] flows through unchanged.
+#[cfg(test)]
 pub(super) fn from_plan(plan: TargetPlan) -> TargetSelection {
     match plan.kind {
         TargetPlanKind::RunningRoot | TargetPlanKind::Offline => match plan.identity {

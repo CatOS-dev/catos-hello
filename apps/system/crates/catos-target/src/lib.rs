@@ -2,6 +2,7 @@
 //! primitives. This is the lowest domain crate in catos-system.
 
 pub mod diagnose;
+pub mod discovery;
 pub mod error;
 pub mod evidence;
 pub mod execute;

@@ -8,7 +8,7 @@ use crate::chroot::diagnose::fstab::read_from_device;
 use crate::chroot::execute::{
     authorize, execute_plan, open_luks, ChrootPrivilegeEvidence, OpenedLuks, SystemChrootEffects,
 };
-use crate::chroot::model::{BlockDevice, ChrootExecutionOutcome, Subvolume};
+use crate::chroot::model::{BlockDevice, ChrootExecutionOutcome};
 use crate::chroot::plan::{build_plan, ChrootPlanInputs, ExtraMountSelection};
 use crate::chroot::session::{establish_private_namespace, ChrootSessionRoot};
 use crate::error::exit_code;
@@ -62,11 +62,28 @@ pub fn run(argv: &[String]) -> i32 {
         }
     };
 
-    let mut root_device = match prompt_select_device("root", &devices, false) {
-        Some(device) => device,
-        None => {
-            eprintln!("catos-chroot: no root partition selected");
+    let selected_target = match crate::selection_ui::select_target(
+        &crate::target::discovery::discover_targets(),
+        "catos-chroot",
+    ) {
+        crate::selection_ui::Selection::Selected(candidate) => candidate,
+        crate::selection_ui::Selection::Declined => {
+            eprintln!("catos-chroot: target selection declined");
             return exit_code::ARG_ERROR;
+        }
+        crate::selection_ui::Selection::Unavailable(reason) => {
+            eprintln!("catos-chroot: {reason}");
+            return exit_code::PROBE_FAILED;
+        }
+    };
+    let mut root_device = match devices.iter().find(|device| {
+        std::path::Path::new(&device.name) == selected_target.root_device
+            || format!("/dev/{}", device.name) == selected_target.root_device.display().to_string()
+    }) {
+        Some(device) => device.clone(),
+        None => {
+            eprintln!("catos-chroot: selected device {} disappeared from inventory", selected_target.root_device.display());
+            return exit_code::PROBE_FAILED;
         }
     };
 
@@ -111,11 +128,14 @@ pub fn run(argv: &[String]) -> i32 {
                 return exit_code::PROBE_FAILED;
             }
         };
-        match prompt_select_subvolume(&root_device.name, &subvolumes) {
-            Some(subvolume) => Some(subvolume),
+        match selected_target.root_subvolume.as_deref() {
+            Some(path) => match subvolumes.into_iter().find(|subvolume| subvolume.name == path.trim_start_matches('/')) {
+                Some(subvolume) => Some(subvolume),
+                None => { eprintln!("catos-chroot: selected Btrfs subvolume {path} disappeared"); return exit_code::PROBE_FAILED; }
+            },
             None => {
-                eprintln!("catos-chroot: no subvolume selected");
-                return exit_code::ARG_ERROR;
+                eprintln!("catos-chroot: selected Btrfs target has no discovered root subvolume");
+                return exit_code::PROBE_FAILED;
             }
         }
     } else {
@@ -277,40 +297,6 @@ fn prompt_select_device(
         };
         if let Some(device) = devices.get(candidate) {
             return Some(device.clone());
-        }
-        eprintln!("catos-chroot: index out of range");
-    }
-}
-
-fn prompt_select_subvolume(device_name: &str, subvolumes: &[Subvolume]) -> Option<Subvolume> {
-    if subvolumes.is_empty() {
-        return None;
-    }
-    println!("\nBtrfs subvolumes on {device_name}:");
-    for (index, subvolume) in subvolumes.iter().enumerate() {
-        println!("  {index}: {subvolume}");
-    }
-    let upper = subvolumes.len() - 1;
-    loop {
-        print!("catos-chroot: pick subvolume [0-{upper}] (default 0): ");
-        std::io::stdout().flush().ok();
-        let mut line = String::new();
-        if std::io::stdin().read_line(&mut line).is_err() {
-            return None;
-        }
-        let index = if line.trim().is_empty() {
-            0
-        } else {
-            match line.trim().parse::<usize>() {
-                Ok(index) => index,
-                Err(_) => {
-                    eprintln!("catos-chroot: not a number: {:?}", line.trim());
-                    continue;
-                }
-            }
-        };
-        if let Some(subvolume) = subvolumes.get(index) {
-            return Some(subvolume.clone());
         }
         eprintln!("catos-chroot: index out of range");
     }

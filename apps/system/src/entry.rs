@@ -194,7 +194,11 @@ fn run_doctor() -> i32 {
         eprintln!("catos-doctor: stdout write failed: {e}");
         return crate::error::exit_code::PROBE_FAILED;
     }
-    exit
+    if matches!(report.target.kind, crate::doctor::model::DoctorTargetKind::None) {
+        crate::error::exit_code::PROBE_FAILED
+    } else {
+        exit
+    }
 }
 
 /// Drive the canonical `catos-system` parser + phase orchestrators.
