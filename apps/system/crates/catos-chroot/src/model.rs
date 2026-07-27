@@ -113,6 +113,27 @@ pub struct ChrootPlan {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChrootRuntimeMount {
+    Proc,
+    Sys,
+    Dev,
+    Run,
+}
+
+impl ChrootRuntimeMount {
+    pub const ALL: [Self; 4] = [Self::Proc, Self::Sys, Self::Dev, Self::Run];
+
+    pub fn mount_point(self) -> &'static str {
+        match self {
+            Self::Proc => "/proc",
+            Self::Sys => "/sys",
+            Self::Dev => "/dev",
+            Self::Run => "/run",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChrootExecutionOutcome {
     Entered,
     MountFailed,
@@ -127,6 +148,7 @@ pub struct ChrootExecutionReport {
     pub cleanup_complete: bool,
     pub failure: Option<String>,
     pub mounted_paths: Vec<PathBuf>,
+    pub residual_paths: Vec<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]

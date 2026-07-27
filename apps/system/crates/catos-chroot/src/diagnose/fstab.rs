@@ -2,16 +2,14 @@
 //!
 //! Only the fields the chroot auto-mount logic consults are decoded:
 //! `fs_spec`, `mountpoint`, `vfs_type`. `mount_options` and the
-//! numeric dump/pass fields are kept as raw strings so btrfs
-//! `subvolid=` / `subvol=` options can be matched when needed. The
-//! parser is deliberately line-oriented and forgiving: malformed rows
-//! are skipped with a warning, never fatal — chroot is a recovery
-//! tool and a half-broken fstab should not prevent entering the
-//! target.
+//! numeric dump/pass fields are validated by the shared target parser.
+//! Production reads fail closed on malformed rows or a missing root entry;
+//! the small tolerant `parse` helper remains only for legacy parser tests.
 
 use crate::model::{BlockDevice, FsTabEntry, Subvolume};
 use crate::session::ReadOnlyMountProbe;
 use catos_target::execute::confined::{read_rooted_file, rooted_regular_file_size};
+use catos_target::fstab::{self, FstabSource};
 use catos_target::FsError;
 
 pub fn read_from_device(
@@ -28,9 +26,11 @@ pub fn read_from_device(
                 .map_err(|error| format!("cannot read target /etc/fstab: {error}"))?;
             let contents = String::from_utf8(bytes)
                 .map_err(|error| format!("target /etc/fstab is not UTF-8: {error}"))?;
-            Ok(parse(&contents))
+            parse_strict(&contents)
         }
-        Ok(None) | Err(FsError::NotFound) => Ok(Vec::new()),
+        Ok(None) | Err(FsError::NotFound) => {
+            Err("target /etc/fstab is missing; refusing incomplete chroot mount plan".into())
+        }
         Err(error) => Err(format!("cannot inspect target /etc/fstab: {error}")),
     })();
     let cleanup_result = probe.cleanup();
@@ -72,6 +72,49 @@ pub fn parse(contents: &str) -> Vec<FsTabEntry> {
         });
     }
     entries
+}
+
+pub fn parse_strict(contents: &str) -> Result<Vec<FsTabEntry>, String> {
+    let (entries, diagnostics) = fstab::parse_all_with_diagnostics(contents);
+    if !diagnostics.is_empty() {
+        let details = diagnostics
+            .iter()
+            .map(|diagnostic| {
+                format!(
+                    "line {} ({:?}): {}",
+                    diagnostic.line, diagnostic.kind, diagnostic.text
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("; ");
+        return Err(format!(
+            "target /etc/fstab contains malformed entries: {details}"
+        ));
+    }
+
+    let entries = entries
+        .into_iter()
+        .map(|entry| FsTabEntry {
+            fs_spec: source_as_spec(entry.source),
+            mountpoint: entry.target,
+            vfs_type: entry.fstype,
+            mount_options: entry.options,
+        })
+        .collect::<Vec<_>>();
+    if !entries.iter().any(|entry| entry.mountpoint == "/") {
+        return Err("target /etc/fstab has no root entry".into());
+    }
+    Ok(entries)
+}
+
+fn source_as_spec(source: FstabSource) -> String {
+    match source {
+        FstabSource::Uuid(value) => format!("UUID={value}"),
+        FstabSource::PartUuid(value) => format!("PARTUUID={value}"),
+        FstabSource::Label(value) => format!("LABEL={value}"),
+        FstabSource::PartLabel(value) => format!("PARTLABEL={value}"),
+        FstabSource::Path(value) | FstabSource::Pseudo(value) => value,
+    }
 }
 
 #[cfg(test)]
@@ -118,5 +161,17 @@ mod tests {
         let entries = parse("one two\nUUID=abc / ext4 rw 0 1\n");
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].fs_spec, "UUID=abc");
+    }
+
+    #[test]
+    fn strict_parser_rejects_malformed_rows() {
+        let error = parse_strict("one two\nUUID=abc / ext4 rw 0 1\n").unwrap_err();
+        assert!(error.contains("line 1"));
+    }
+
+    #[test]
+    fn strict_parser_requires_root_entry() {
+        let error = parse_strict("UUID=boot /boot ext4 defaults 0 2\n").unwrap_err();
+        assert!(error.contains("root entry"));
     }
 }
