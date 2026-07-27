@@ -37,7 +37,7 @@ mod sections;
 use crate::doctor::model::{
     issue_code, recommendation_code, DoctorCleanup, DoctorEnvironment, DoctorIssue,
     DoctorOverallStatus, DoctorRecommendation, DoctorReport, DoctorSection, DoctorSectionId,
-    DoctorSectionStatus, DoctorSeverity,
+    DoctorSectionStatus, DoctorSeverity, DoctorTarget, DoctorTargetKind,
 };
 use crate::fs::command::FsCommandRunner;
 use crate::target::Evidence;
@@ -52,9 +52,21 @@ pub(crate) struct DoctorTargetContext {
     pub target: crate::target::model::TargetIdentity,
     pub candidate: TargetCandidate,
     pub fstab: Result<String, String>,
+    pub devices: Vec<crate::target::model::BlockDevice>,
+    pub esp: Result<Option<DoctorEsp>, String>,
     top_level: Result<Option<ReadonlySession>, String>,
     pub recovery_options: Result<Option<crate::snapshot::execute::engine::EngineOptions>, String>,
     session: TargetSession,
+}
+
+/// A separately mounted ESP that belongs to the selected target.  This is
+/// deliberately session-owned: no section may inspect the live host ESP in
+/// place of the selected target's one.
+pub(crate) struct DoctorEsp {
+    pub device: std::path::PathBuf,
+    pub uuid: Option<String>,
+    pub mount_point: String,
+    pub root: ReadonlySession,
 }
 
 impl DoctorTargetContext {
@@ -62,6 +74,11 @@ impl DoctorTargetContext {
         let candidate = session.candidate().clone();
         let fstab = std::fs::read_to_string(target.root.join("etc/fstab"))
             .map_err(|error| format!("cannot read selected target fstab: {error}"));
+        let devices = crate::target::discovery::discover_inventory();
+        let esp = match &fstab {
+            Ok(fstab) => open_target_esp(fstab, &devices),
+            Err(error) => Err(format!("cannot resolve selected target ESP without fstab: {error}")),
+        };
         let top_level = if candidate.root_fstype == "btrfs" {
             ReadonlySession::open_with_options(&candidate.root_device, "btrfs", "ro,norecovery,subvolid=5").map(Some)
         } else {
@@ -78,13 +95,71 @@ impl DoctorTargetContext {
             Ok(None) => Ok(None),
             Err(error) => Err(format!("cannot open selected Btrfs top-level: {error}")),
         };
-        Self { target, candidate, fstab, top_level, recovery_options, session }
+        Self { target, candidate, fstab, devices, esp, top_level, recovery_options, session }
     }
 
     fn cleanup(self) -> Vec<crate::target::discovery::ProbeCleanup> {
-        let mut cleanup = vec![self.session.cleanup()];
+        let mut cleanup = Vec::new();
+        if let Ok(Some(esp)) = self.esp { cleanup.push(esp.root.cleanup()); }
         if let Ok(Some(session)) = self.top_level { cleanup.push(session.cleanup()); }
+        cleanup.push(self.session.cleanup());
         cleanup
+    }
+
+    fn target_summary(&self) -> DoctorTarget {
+        let esp = self.esp.as_ref().ok().and_then(|value| value.as_ref());
+        DoctorTarget {
+            kind: if self.candidate.running_environment_member {
+                DoctorTargetKind::RunningRoot
+            } else {
+                DoctorTargetKind::Offline
+            },
+            root_device: self.target.root_device.as_ref().map(|path| path.display().to_string()),
+            root_fstype: self.target.root_fstype.clone(),
+            root_subvolume: self.target.root_subvol.clone(),
+            esp_device: esp.map(|value| value.device.display().to_string()),
+            boot_layout: esp.map(|value| format!("esp:{}", value.mount_point)),
+        }
+    }
+}
+
+fn open_target_esp(
+    fstab: &str,
+    devices: &[crate::target::model::BlockDevice],
+) -> Result<Option<DoctorEsp>, String> {
+    let entries: Vec<_> = crate::target::fstab::parse_all(fstab)
+        .into_iter()
+        .filter(|entry| {
+            matches!(entry.target.as_str(), "/efi" | "/boot/efi")
+                || (entry.target == "/boot"
+                    && matches!(entry.fstype.as_str(), "vfat" | "fat" | "fat32" | "fat16" | "fat12"))
+        })
+        .collect();
+    match entries.as_slice() {
+        [] => Ok(None),
+        [entry] => {
+            let matches: Vec<_> = devices
+                .iter()
+                .filter(|device| crate::target::diagnose::candidate::device_matches_fstab_source(device, &entry.source))
+                .filter(|device| matches!(device.filesystem.as_deref(), Some("vfat" | "fat" | "fat32" | "fat16" | "fat12")))
+                .collect();
+            let device = match matches.as_slice() {
+                [device] => *device,
+                [] => return Err(format!("selected target ESP entry {} does not resolve to one FAT device", entry.target)),
+                _ => return Err(format!("selected target ESP entry {} resolves to multiple FAT devices", entry.target)),
+            };
+            let path = device.dev_path.as_ref().ok_or_else(|| "resolved selected target ESP has no device path".to_string())?;
+            let fstype = device.filesystem.as_deref().ok_or_else(|| "resolved selected target ESP has no filesystem type".to_string())?;
+            let root = ReadonlySession::open(path, fstype)
+                .map_err(|error| format!("cannot open selected target ESP {} read-only: {error}", path.display()))?;
+            Ok(Some(DoctorEsp {
+                device: path.clone(),
+                uuid: device.uuid.clone(),
+                mount_point: entry.target.clone(),
+                root,
+            }))
+        }
+        _ => Err("selected target fstab has multiple ESP entries".to_string()),
     }
 }
 
@@ -105,7 +180,7 @@ pub fn run_doctor() -> DoctorReport {
     let context = DoctorTargetContext::new(target, session);
     let mut report = DoctorReport::default();
     report.environment = environment.clone();
-    report.target = TargetSelection::Identified(context.target.clone()).to_target_summary();
+    report.target = context.target_summary();
     report.evidence.push(Evidence::new(
         "DOCTOR_TARGET_CONTEXT",
         "doctor::context",
@@ -122,6 +197,13 @@ pub fn run_doctor() -> DoctorReport {
         report.limitations.push(crate::doctor::model::DoctorLimitation::new(
             DoctorSectionId::Recovery,
             "RECOVERY_FACTS_INCOMPLETE",
+            error.clone(),
+        ));
+    }
+    if let Err(error) = &context.esp {
+        report.limitations.push(crate::doctor::model::DoctorLimitation::new(
+            DoctorSectionId::Storage,
+            "ESP_FACTS_INCOMPLETE",
             error.clone(),
         ));
     }
@@ -414,5 +496,22 @@ pub mod tests {
         };
         let summary = sel.to_target_summary();
         assert_eq!(summary.kind, DoctorTargetKind::None);
+    }
+
+    #[test]
+    fn configured_esp_without_inventory_match_fails_closed() {
+        let result = open_target_esp(
+            "UUID=esp-uuid /efi vfat defaults 0 2\n",
+            &[],
+        );
+
+        assert!(matches!(result, Err(ref error) if error.contains("does not resolve")));
+    }
+
+    #[test]
+    fn absent_esp_fstab_entry_is_not_replaced_with_a_live_device() {
+        let result = open_target_esp("UUID=root / ext4 defaults 0 1\n", &[]).unwrap();
+
+        assert!(result.is_none());
     }
 }
