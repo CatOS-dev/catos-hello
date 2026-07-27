@@ -112,8 +112,8 @@ impl DoctorTargetContext {
 
     fn cleanup(self) -> Vec<crate::target::discovery::ProbeCleanup> {
         let mut cleanup = Vec::new();
-        if let Ok(Some(esp)) = self.esp { cleanup.push(esp.root.cleanup()); }
         if let Ok(Some(session)) = self.top_level { cleanup.push(session.cleanup()); }
+        if let Ok(Some(esp)) = self.esp { cleanup.push(esp.root.cleanup()); }
         cleanup.push(self.session.cleanup());
         cleanup
     }
