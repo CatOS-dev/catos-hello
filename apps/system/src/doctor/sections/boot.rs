@@ -9,7 +9,7 @@ use crate::doctor::model::{
 };
 use crate::target::Evidence;
 
-use super::{has_target_path, push_evidence, read_target_file, set_section, target_root_path};
+use super::{push_evidence, read_target_file, set_section, target_root_path};
 use crate::doctor::DoctorTargetContext;
 
 pub(in crate::doctor) fn run_boot_section(
@@ -78,6 +78,14 @@ pub(in crate::doctor) fn run_boot_section(
             for ev in evidence {
                 push_evidence(sections, id, provider_evidence_to_evidence(ev));
             }
+            let summary = match provider_asset_summary(context, provider) {
+                Ok(summary) => summary,
+                Err(message) => {
+                    set_section(sections, id, DoctorSectionStatus::Unknown);
+                    report.limitations.push(DoctorLimitation::new(id, "BOOT_ASSETS_INCOMPLETE", message));
+                    return Ok(());
+                }
+            };
             push_evidence(
                 sections,
                 id,
@@ -101,7 +109,7 @@ pub(in crate::doctor) fn run_boot_section(
                 Evidence::new(
                     "PROVIDER_ASSET_PATHS",
                     "doctor::boot-assets",
-                    provider_asset_summary(context, provider),
+                    summary,
                 ),
             );
             if assets_ok {
@@ -167,76 +175,105 @@ fn collect_detection_inputs(context: &DoctorTargetContext) -> Result<DetectionIn
     let root = target_root_path(&context.target);
     let esp = context.esp.as_ref().map_err(Clone::clone)?.as_ref();
     Ok(DetectionInputs {
-        grub_defaults_catos: read_target_file(&root, "etc/default/grub.d/00-catos.cfg"),
-        limine_defaults: read_target_file(&root, "etc/default/limine"),
-        kernel_install_catos: read_target_file(
+        grub_defaults_catos: read_optional_file(&root, "etc/default/grub.d/00-catos.cfg")?,
+        limine_defaults: read_optional_file(&root, "etc/default/limine")?,
+        kernel_install_catos: read_optional_file(
             &root,
             "etc/kernel/install.conf.d/20-catos-bootloadu.conf",
-        ),
-        firmware_boot_conf: read_target_file(&root, "etc/catos/firmware-boot.conf"),
-        kernel_cmdline: read_target_file(&root, "etc/kernel/cmdline"),
+        )?,
+        firmware_boot_conf: read_optional_file(&root, "etc/catos/firmware-boot.conf")?,
+        kernel_cmdline: read_optional_file(&root, "etc/kernel/cmdline")?,
         has_boot_grub: boot_asset_exists(context, "grub")?,
-        has_esp_limine_conf: esp.is_some_and(|esp| target_path_exists(esp.root.root(), "limine.conf")),
-        has_systemd_boot_loader: esp.is_some_and(|esp| target_path_exists(esp.root.root(), "loader/loader.conf") || target_path_exists(esp.root.root(), "loader/entries")),
-        has_catos_uki_deployed: esp.is_some_and(|esp| target_path_exists(esp.root.root(), "EFI/CatOS")),
-        has_efistub_deployed: esp.is_some_and(|esp| target_path_exists(esp.root.root(), "EFI/CatOS")),
+        has_esp_limine_conf: esp.map_or(Ok(false), |esp| target_path_exists(esp.root.root(), "limine.conf"))?,
+        has_systemd_boot_loader: esp.map_or(Ok(false), |esp| target_path_exists(esp.root.root(), "loader/loader.conf"))?,
+        has_catos_uki_deployed: esp.map_or(Ok(false), |esp| target_path_exists(esp.root.root(), "EFI/CatOS"))?,
+        has_efistub_deployed: esp.map_or(Ok(false), |esp| target_path_exists(esp.root.root(), "EFI/CatOS"))?,
         installed_packages: installed_packages(&root)?,
     })
 }
 
-fn target_path_exists(root: &Path, relative: &str) -> bool {
-    std::fs::symlink_metadata(root.join(relative)).is_ok()
+fn read_optional_file(root: &Path, relative: &str) -> Result<Option<String>, String> {
+    match std::fs::read_to_string(root.join(relative)) {
+        Ok(body) => Ok(Some(body)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(format!("cannot read target file {}: {error}", root.join(relative).display())),
+    }
 }
 
-fn nonempty_regular_file(root: &Path, relative: &str) -> bool {
-    let path = root.join(relative);
-    std::fs::metadata(path).ok().is_some_and(|meta| meta.is_file() && meta.len() > 0)
+fn target_path_exists(root: &Path, relative: &str) -> Result<bool, String> {
+    match std::fs::symlink_metadata(root.join(relative)) {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(format!("cannot inspect target path {}: {error}", root.join(relative).display())),
+    }
 }
 
-fn valid_grub_config(root: &Path) -> bool {
-    let path = root.join("boot/grub/grub.cfg");
-    let Ok(body) = std::fs::read_to_string(path) else { return false };
-    !body.trim().is_empty() && body.lines().any(|line| line.contains("menuentry") || line.contains("linux"))
+fn valid_grub_config(root: &Path) -> Result<bool, String> {
+    let path = root.join("grub/grub.cfg");
+    let body = match std::fs::read_to_string(&path) {
+        Ok(body) => body,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(format!("cannot read GRUB config {}: {error}", path.display())),
+    };
+    let meaningful: Vec<&str> = body.lines().map(str::trim).filter(|line| !line.is_empty() && !line.starts_with('#')).collect();
+    Ok(!meaningful.is_empty()
+        && meaningful.iter().any(|line| line.contains("menuentry"))
+        && meaningful.iter().any(|line| line.starts_with("linux ") || line.starts_with("linuxefi ")))
 }
 
-fn valid_limine_config(root: &Path) -> bool {
-    let Ok(body) = std::fs::read_to_string(root.join("limine.conf")) else { return false };
-    !body.trim().is_empty() && body.lines().any(|line| {
-        let line = line.trim();
-        !line.is_empty() && !line.starts_with('#') && (line.contains('=') || line.contains(':'))
-    })
+fn valid_limine_config(root: &Path) -> Result<bool, String> {
+    let path = root.join("limine.conf");
+    let body = match std::fs::read_to_string(&path) {
+        Ok(body) => body,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(format!("cannot read Limine config {}: {error}", path.display())),
+    };
+    let lines: Vec<&str> = body.lines().map(str::trim).filter(|line| !line.is_empty() && !line.starts_with('#')).collect();
+    Ok(lines.iter().enumerate().any(|(index, line)| {
+        line.starts_with(':') && lines[index + 1..].iter().any(|entry| entry.starts_with("KERNEL_PATH=") || entry.starts_with("LINUX=") || entry.starts_with("PROTOCOL="))
+    }))
 }
 
-fn valid_systemd_loader(root: &Path) -> bool {
-    let loader = nonempty_regular_file(root, "loader/loader.conf");
+fn valid_systemd_loader(root: &Path) -> Result<bool, String> {
     let entries = root.join("loader/entries");
-    let entry = std::fs::read_dir(entries).ok().into_iter().flatten().filter_map(Result::ok).any(|entry| {
+    let entries = match std::fs::read_dir(&entries) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(format!("cannot read systemd-boot entries {}: {error}", entries.display())),
+    };
+    let entry = entries.map(|entry| -> Result<bool, String> {
+        let entry = entry.map_err(|error| format!("cannot enumerate systemd-boot entries: {error}"))?;
         let path = entry.path();
-        let Ok(body) = std::fs::read_to_string(path) else { return false };
-        !body.trim().is_empty()
+        let body = std::fs::read_to_string(&path).map_err(|error| format!("cannot read systemd-boot entry {}: {error}", path.display()))?;
+        Ok(!body.trim().is_empty()
             && body.lines().any(|line| line.trim_start().starts_with("title "))
-            && body.lines().any(|line| line.trim_start().starts_with("linux "))
-    });
-    loader || entry
+            && body.lines().any(|line| line.trim_start().starts_with("linux ") || line.trim_start().starts_with("efi ")))
+    }).collect::<Result<Vec<_>, _>>()?.into_iter().any(|valid| valid);
+    Ok(entry)
 }
 
-fn efi_asset(root: &Path, needle: &str) -> Option<String> {
+fn efi_asset(root: &Path, needle: &str) -> Result<Option<String>, String> {
     let mut stack = vec![root.to_path_buf()];
     while let Some(path) = stack.pop() {
-        let entries = std::fs::read_dir(&path).ok()?;
-        for entry in entries.filter_map(Result::ok) {
+        let entries = match std::fs::read_dir(&path) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(format!("cannot inspect EFI asset directory {}: {error}", path.display())),
+        };
+        for entry in entries {
+            let entry = entry.map_err(|error| format!("cannot enumerate EFI asset directory {}: {error}", path.display()))?;
             let path = entry.path();
-            let kind = entry.file_type().ok()?;
+            let kind = entry.file_type().map_err(|error| format!("cannot inspect EFI asset {}: {error}", path.display()))?;
             if kind.is_dir() {
                 stack.push(path);
             } else if kind.is_file() && path.file_name().and_then(|name| name.to_str()).is_some_and(|name| {
                 name.to_ascii_lowercase().ends_with(".efi") && name.to_ascii_lowercase().contains(needle)
             }) {
-                return path.to_str().map(str::to_string);
+                return Ok(path.to_str().map(str::to_string));
             }
         }
     }
-    None
+    Ok(None)
 }
 
 fn installed_packages(root: &Path) -> Result<Vec<String>, String> {
@@ -274,29 +311,54 @@ fn inspect_provider_assets(
     let esp = context.esp.as_ref().ok().and_then(|esp| esp.as_ref());
     Ok(match provider {
         crate::boot::model::ProviderId::Grub => {
-            valid_grub_config(&root) && esp.is_some_and(|esp| efi_asset(esp.root.root(), "grub").is_some())
+            let boot_root = boot_content_root(context)?;
+            valid_grub_config(&boot_root)? && esp.map_or(Ok(false), |esp| efi_asset(esp.root.root(), "grub").map(|asset| asset.is_some()))?
         }
         crate::boot::model::ProviderId::Limine => {
-            esp.is_some_and(|esp| valid_limine_config(esp.root.root()) && efi_asset(esp.root.root(), "limine").is_some())
+            let Some(esp) = esp else { return Ok(false) };
+            valid_limine_config(esp.root.root())? && efi_asset(esp.root.root(), "limine")?.is_some()
         }
         crate::boot::model::ProviderId::SystemdBoot => {
-            esp.is_some_and(|esp| valid_systemd_loader(esp.root.root()) && efi_asset(esp.root.root(), "systemd-boot").is_some())
+            let Some(esp) = esp else { return Ok(false) };
+            valid_systemd_loader(esp.root.root())? && efi_asset(esp.root.root(), "systemd-boot")?.is_some()
         }
         crate::boot::model::ProviderId::Uki | crate::boot::model::ProviderId::Efistub => {
             let Some(esp) = esp else { return Ok(false) };
-            provider_firmware_asset_present(esp.root.root(), provider, read_target_file(&root, "etc/catos/firmware-boot.conf").as_deref())
+            provider_firmware_asset_present(esp.root.root(), provider, read_optional_file(&root, "etc/catos/firmware-boot.conf")?.as_deref())?
         }
     })
 }
 
-fn provider_asset_summary(context: &DoctorTargetContext, provider: crate::boot::model::ProviderId) -> String {
-    let root = target_root_path(&context.target);
+fn provider_asset_summary(context: &DoctorTargetContext, provider: crate::boot::model::ProviderId) -> Result<String, String> {
     let esp = context.esp.as_ref().ok().and_then(|esp| esp.as_ref()).map(|esp| esp.root.root());
     match provider {
-        crate::boot::model::ProviderId::Grub => format!("config={} asset={:?}", root.join("boot/grub/grub.cfg").display(), esp.and_then(|root| efi_asset(root, "grub"))),
-        crate::boot::model::ProviderId::Limine => format!("config={} asset={:?}", esp.map(|root| root.join("limine.conf").display().to_string()).unwrap_or_else(|| "<unknown>".into()), esp.and_then(|root| efi_asset(root, "limine"))),
-        crate::boot::model::ProviderId::SystemdBoot => format!("loader={} entry={} asset={:?}", esp.map(|root| root.join("loader/loader.conf").display().to_string()).unwrap_or_else(|| "<unknown>".into()), esp.map(|root| root.join("loader/entries").display().to_string()).unwrap_or_else(|| "<unknown>".into()), esp.and_then(|root| efi_asset(root, "systemd-boot"))),
-        _ => "firmware provider asset paths are checked from target firmware-boot.conf and ESP".into(),
+        crate::boot::model::ProviderId::Grub => Ok(format!("config={} asset={:?}", boot_content_root(context)?.join("grub/grub.cfg").display(), esp.map(|root| efi_asset(root, "grub")).transpose()?.flatten())),
+        crate::boot::model::ProviderId::Limine => Ok(format!("config={} asset={:?}", esp.map(|root| root.join("limine.conf").display().to_string()).unwrap_or_else(|| "<unknown>".into()), esp.map(|root| efi_asset(root, "limine")).transpose()?.flatten())),
+        crate::boot::model::ProviderId::SystemdBoot => Ok(format!("loader={} entry={} asset={:?}", esp.map(|root| root.join("loader/loader.conf").display().to_string()).unwrap_or_else(|| "<unknown>".into()), esp.map(|root| root.join("loader/entries").display().to_string()).unwrap_or_else(|| "<unknown>".into()), esp.map(|root| efi_asset(root, "systemd-boot")).transpose()?.flatten())),
+        _ => Ok("firmware provider asset paths are checked from target firmware-boot.conf and ESP".into()),
+    }
+}
+
+fn boot_content_root(context: &DoctorTargetContext) -> Result<std::path::PathBuf, String> {
+    use crate::mount::model::BootMountLayout;
+    match context.boot_layout.as_ref().map_err(Clone::clone)? {
+        BootMountLayout::SeparateBootAndEsp { .. } | BootMountLayout::BootBtrfsSubvolume { .. } => context
+            .boot
+            .as_ref()
+            .map_err(Clone::clone)?
+            .as_ref()
+            .map(|session| session.root().to_path_buf())
+            .ok_or_else(|| "selected target external /boot session is unavailable".to_string()),
+        BootMountLayout::EspAtBoot { .. } => context
+            .esp
+            .as_ref()
+            .map_err(Clone::clone)?
+            .as_ref()
+            .map(|esp| esp.root.root().to_path_buf())
+            .ok_or_else(|| "selected target FAT /boot session is unavailable".to_string()),
+        BootMountLayout::BootInsideRoot
+        | BootMountLayout::EspAtBootEfi { .. }
+        | BootMountLayout::EspAtEfi { .. } => Ok(context.target.root.join("boot")),
     }
 }
 
@@ -307,16 +369,16 @@ fn boot_asset_exists(context: &DoctorTargetContext, relative: &str) -> Result<bo
         BootMountLayout::SeparateBootAndEsp { .. } | BootMountLayout::BootBtrfsSubvolume { .. } => {
             let session = context.boot.as_ref().map_err(Clone::clone)?
                 .as_ref().ok_or_else(|| "selected target has an external /boot but no readonly boot session".to_string())?;
-            Ok(target_path_exists(session.root(), relative))
+            target_path_exists(session.root(), relative)
         }
         BootMountLayout::EspAtBoot { .. } => {
             let esp = context.esp.as_ref().map_err(Clone::clone)?
                 .as_ref().ok_or_else(|| "selected target has FAT /boot but no readonly ESP session".to_string())?;
-            Ok(target_path_exists(esp.root.root(), relative))
+            target_path_exists(esp.root.root(), relative)
         }
         BootMountLayout::BootInsideRoot
         | BootMountLayout::EspAtBootEfi { .. }
-        | BootMountLayout::EspAtEfi { .. } => Ok(has_target_path(&context.target.root, &format!("boot/{relative}"))),
+        | BootMountLayout::EspAtEfi { .. } => target_path_exists(&context.target.root, &format!("boot/{relative}")),
     }
 }
 
@@ -324,31 +386,37 @@ fn provider_firmware_asset_present(
     esp_root: &Path,
     provider: crate::boot::model::ProviderId,
     firmware_boot_conf: Option<&str>,
-) -> bool {
-    let Some(firmware_boot_conf) = firmware_boot_conf else { return false };
+) -> Result<bool, String> {
+    let Some(firmware_boot_conf) = firmware_boot_conf else { return Ok(false) };
     match provider {
         crate::boot::model::ProviderId::Uki => {
-            firmware_boot_conf.contains("method=uki")
-                && target_path_exists(esp_root, "EFI/Linux")
-                && has_efi_file(esp_root.join("EFI/Linux"))
+            Ok(firmware_boot_conf.contains("method=uki")
+                && target_path_exists(esp_root, "EFI/Linux")?
+                && has_efi_file(esp_root.join("EFI/Linux"))?)
         }
         crate::boot::model::ProviderId::Efistub => {
-            firmware_boot_conf.contains("method=efistub")
-                && target_path_exists(esp_root, "EFI/CatOS")
-                && has_efi_file(esp_root.join("EFI/CatOS"))
+            Ok(firmware_boot_conf.contains("method=efistub")
+                && target_path_exists(esp_root, "EFI/CatOS")?
+                && has_efi_file(esp_root.join("EFI/CatOS"))?)
         }
-        _ => false,
+        _ => Ok(false),
     }
 }
 
-fn has_efi_file(directory: std::path::PathBuf) -> bool {
-    std::fs::read_dir(directory)
-        .ok()
-        .into_iter()
-        .flatten()
-        .filter_map(Result::ok)
-        .any(|entry| entry.file_type().ok().is_some_and(|kind| kind.is_file())
-            && entry.file_name().to_str().is_some_and(|name| name.ends_with(".efi")))
+fn has_efi_file(directory: std::path::PathBuf) -> Result<bool, String> {
+    let entries = match std::fs::read_dir(&directory) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(format!("cannot inspect EFI directory {}: {error}", directory.display())),
+    };
+    for entry in entries {
+        let entry = entry.map_err(|error| format!("cannot enumerate EFI directory {}: {error}", directory.display()))?;
+        let kind = entry.file_type().map_err(|error| format!("cannot inspect EFI file {}: {error}", entry.path().display()))?;
+        if kind.is_file() && entry.file_name().to_str().is_some_and(|name| name.ends_with(".efi")) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 fn provider_evidence_to_evidence(ev: crate::boot::model::ProviderEvidence) -> Evidence {
@@ -507,8 +575,8 @@ mod tests {
         std::fs::create_dir_all(root.join("EFI/Linux")).unwrap();
         std::fs::write(root.join("EFI/Linux/catos.efi"), b"efi").unwrap();
 
-        assert!(provider_firmware_asset_present(&root, ProviderId::Uki, Some("method=uki")));
-        assert!(!provider_firmware_asset_present(&root, ProviderId::Efistub, Some("method=uki")));
+        assert!(provider_firmware_asset_present(&root, ProviderId::Uki, Some("method=uki")).unwrap());
+        assert!(!provider_firmware_asset_present(&root, ProviderId::Efistub, Some("method=uki")).unwrap());
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -517,7 +585,7 @@ mod tests {
         let root = scratch("efistub-empty");
         std::fs::create_dir_all(root.join("EFI/CatOS")).unwrap();
 
-        assert!(!provider_firmware_asset_present(&root, ProviderId::Efistub, Some("method=efistub")));
+        assert!(!provider_firmware_asset_present(&root, ProviderId::Efistub, Some("method=efistub")).unwrap());
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -532,14 +600,14 @@ mod tests {
     #[test]
     fn grub_asset_matrix_requires_config_and_efi_binary() {
         let root = scratch("grub-matrix");
-        std::fs::create_dir_all(root.join("boot/grub")).unwrap();
+        std::fs::create_dir_all(root.join("grub")).unwrap();
         std::fs::create_dir_all(root.join("EFI/GRUB")).unwrap();
-        std::fs::write(root.join("boot/grub/grub.cfg"), "menuentry 'CatOS' { linux /vmlinuz; }").unwrap();
+        std::fs::write(root.join("grub/grub.cfg"), "# menuentry fake\nmenuentry 'CatOS' {\n linux /vmlinuz\n}").unwrap();
         std::fs::write(root.join("EFI/GRUB/grubx64.efi"), b"efi").unwrap();
-        assert!(valid_grub_config(&root));
-        assert!(efi_asset(&root, "grub").is_some());
-        std::fs::write(root.join("boot/grub/grub.cfg"), b"\n").unwrap();
-        assert!(!valid_grub_config(&root));
+        assert!(valid_grub_config(&root).unwrap());
+        assert!(efi_asset(&root, "grub").unwrap().is_some());
+        std::fs::write(root.join("grub/grub.cfg"), b"# menuentry fake\nmenuentry 'CatOS' {\n echo no kernel\n}").unwrap();
+        assert!(!valid_grub_config(&root).unwrap());
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -548,8 +616,13 @@ mod tests {
         let root = scratch("limine-matrix");
         std::fs::create_dir_all(&root).unwrap();
         std::fs::write(root.join("limine.conf"), "TIMEOUT=5\n:CatOS\n").unwrap();
-        assert!(valid_limine_config(&root));
-        assert!(efi_asset(&root, "limine").is_none());
+        assert!(!valid_limine_config(&root).unwrap());
+        std::fs::write(root.join("limine.conf"), "TIMEOUT=5\n:CatOS\nKERNEL_PATH=boot:///vmlinuz\n").unwrap();
+        std::fs::write(root.join("liminex64.efi"), b"efi").unwrap();
+        assert!(valid_limine_config(&root).unwrap());
+        assert!(efi_asset(&root, "limine").unwrap().is_some());
+        std::fs::remove_file(root.join("liminex64.efi")).unwrap();
+        assert!(efi_asset(&root, "limine").unwrap().is_none());
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -561,10 +634,10 @@ mod tests {
         std::fs::write(root.join("loader/loader.conf"), "default catos.conf\n").unwrap();
         std::fs::write(root.join("loader/entries/catos.conf"), "title CatOS\nlinux /vmlinuz\n").unwrap();
         std::fs::write(root.join("EFI/systemd-bootx64.efi"), b"efi").unwrap();
-        assert!(valid_systemd_loader(&root));
-        assert!(efi_asset(&root, "systemd-boot").is_some());
+        assert!(valid_systemd_loader(&root).unwrap());
+        assert!(efi_asset(&root, "systemd-boot").unwrap().is_some());
         std::fs::remove_file(root.join("EFI/systemd-bootx64.efi")).unwrap();
-        assert!(efi_asset(&root, "systemd-boot").is_none());
+        assert!(efi_asset(&root, "systemd-boot").unwrap().is_none());
         std::fs::remove_dir_all(root).unwrap();
     }
 
