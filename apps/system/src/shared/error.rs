@@ -6,7 +6,7 @@
 use std::fmt;
 use std::path::PathBuf;
 
-use crate::shared::model::mount::MountError;
+use crate::mount::model::MountError;
 
 /// Stable exit codes. Numbers are part of the public CLI contract and must
 /// not be renumbered without a schema-version bump.

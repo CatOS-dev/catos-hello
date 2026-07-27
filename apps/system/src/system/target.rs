@@ -4,13 +4,13 @@ use std::path::Path;
 
 use crate::shared::cli::TargetSelection;
 use crate::shared::error::Error;
-use crate::shared::model::fstab::{FstabEntry, FstabEntryKind, FstabSource};
+use crate::mount::diagnose::fstab::{FstabEntry, FstabEntryKind, FstabSource};
 use crate::target::model::Warning;
-use crate::shared::model::mount::MountError;
-use crate::shared::mount::plan::{build_plan, PlanInputs};
-use crate::shared::mount::probe::inspect_selected_root;
-use crate::shared::mount::session::Session;
-use crate::shared::parse::fstab::parse_all_with_diagnostics;
+use crate::mount::model::MountError;
+use crate::mount::plan::session::{build_plan, PlanInputs};
+use crate::mount::plan::session::inspect_selected_root;
+use crate::mount::session::ReadOnlyMountSession;
+use crate::mount::diagnose::fstab::parse_all_with_diagnostics;
 use crate::target::diagnose::filesystem::{FilesystemProbe, RealFilesystem};
 use crate::target::diagnose::block::discover_devices;
 use crate::target::diagnose::system_root::SystemRoot;
@@ -66,7 +66,7 @@ pub fn run_target_mount(
         .and_then(|n| n.to_str())
         .unwrap_or("anon")
         .to_string();
-    let mut session = Session::new(session_id, &plan);
+    let mut session = ReadOnlyMountSession::new(session_id, &plan);
     match session.run(&plan) {
         Ok(snapshot) => {
             let target_root =
@@ -143,7 +143,7 @@ fn prepare_target_inputs(
     }
     if !probe.cleanup.all_clean {
         return Err(Error::MountFailed(MountError {
-            kind: crate::shared::model::mount::MountErrorKind::CleanupIncomplete,
+            kind: crate::mount::model::MountErrorKind::CleanupIncomplete,
             message: "selected-root discovery probe did not clean up completely".into(),
             device_or_path: Some(root_path.display().to_string()),
             errno: None,
@@ -179,7 +179,7 @@ fn find_selected_device<'a>(
         .find(|device| device.dev_path.as_deref() == Some(path))
         .ok_or_else(|| {
             Error::MountFailed(MountError {
-                kind: crate::shared::model::mount::MountErrorKind::DeviceNotFound,
+                kind: crate::mount::model::MountErrorKind::DeviceNotFound,
                 message: "explicitly selected block device was not discovered".into(),
                 device_or_path: Some(path.display().to_string()),
                 errno: None,
@@ -204,7 +204,7 @@ fn replace_root_entry(
         })?;
     let fstype = device.filesystem.clone().ok_or_else(|| {
         Error::MountFailed(MountError {
-            kind: crate::shared::model::mount::MountErrorKind::UnsupportedFilesystem,
+            kind: crate::mount::model::MountErrorKind::UnsupportedFilesystem,
             message: "selected root filesystem type is unknown".into(),
             device_or_path: Some(source.to_string()),
             errno: None,
@@ -244,7 +244,7 @@ fn replace_esp_entry(
         })?;
     let fstype = device.filesystem.as_deref().ok_or_else(|| {
         Error::MountFailed(MountError {
-            kind: crate::shared::model::mount::MountErrorKind::UnsupportedFilesystem,
+            kind: crate::mount::model::MountErrorKind::UnsupportedFilesystem,
             message: "selected ESP filesystem type is unknown".into(),
             device_or_path: Some(source.to_string()),
             errno: None,
@@ -255,7 +255,7 @@ fn replace_esp_entry(
     })?;
     if !matches!(fstype, "vfat" | "fat" | "fat32" | "fat16" | "fat12") {
         return Err(Error::MountFailed(MountError {
-            kind: crate::shared::model::mount::MountErrorKind::WrongFilesystemType,
+            kind: crate::mount::model::MountErrorKind::WrongFilesystemType,
             message: "selected ESP is not a FAT filesystem".into(),
             device_or_path: Some(source.to_string()),
             errno: None,

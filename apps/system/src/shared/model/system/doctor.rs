@@ -407,7 +407,7 @@ impl DoctorCleanup {
 }
 
 /// Identity of the selected diagnosis target. Mirrors the relevant
-/// subset of [`crate::shared::model::mount_repair::TargetIdentity`] so Doctor
+/// subset of [`crate::mount::model::TargetIdentity`] so Doctor
 /// output is self-contained without dragging in the full plan-bound
 /// shape.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

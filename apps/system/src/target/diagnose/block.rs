@@ -9,7 +9,7 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 
 use crate::shared::model::evidence::Evidence;
-use crate::shared::parse::mountinfo;
+use crate::mount::diagnose::mountinfo;
 use crate::shared::process::run_trusted_tool;
 use crate::target::diagnose::filesystem::FilesystemProbe;
 use crate::target::model::{BlockDevice, DeviceClass, DiskKind, MountObservation, PartitionRole, Warning};

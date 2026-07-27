@@ -1,7 +1,7 @@
 //! Boot-provider repair data model. Pure data + serde, no I/O.
 //!
 //! This is the structured result of `catos-repair boot`. It is NOT a
-//! [`crate::shared::model::mount_repair::MountRepairReport`] and NOT a
+//! [`crate::mount::model::MountRepairReport`] and NOT a
 //! [`crate::shared::model::recovery::RecoveryPlan`]; boot repair is the
 //! re-application of an existing bootloader provider recipe, not a
 //! generic bootloader-transaction framework.
@@ -20,8 +20,8 @@
 //!   [`BootRepairOutcome::PartiallyRepaired`] or
 //!   [`BootRepairOutcome::ManualInterventionRequired`], never as
 //!   `Repaired`.
-//! * The model reuses [`crate::shared::model::mount_repair::TargetIdentity`]
-//!   and [`crate::shared::model::mount_repair::MountRepairCleanup`] so the
+//! * The model reuses [`crate::mount::model::MountTargetIdentity`]
+//!   and [`crate::mount::model::MountRepairCleanup`] so the
 //!   stage 1–3 device-lock, mount-session, and cleanup contracts
 //!   remain the single source for those concerns.
 
@@ -31,7 +31,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::shared::model::evidence::Evidence;
 use crate::target::model::Warning;
-use crate::shared::model::mount_repair::{MountRepairCleanup, TargetIdentity};
+use crate::mount::model::{MountRepairCleanup, MountTargetIdentity};
 
 // ---------------------------------------------------------------------------
 // Provider identity
@@ -197,7 +197,7 @@ pub struct PlatformFacts {
 /// Single source of truth for "what happened" during a boot repair.
 ///
 /// Where a variant has the same meaning as
-/// [`crate::shared::model::mount_repair::MountRepairOutcome`], the snake_case
+/// [`crate::mount::model::MountRepairOutcome`], the snake_case
 /// code is identical so consumers can reuse rendering logic.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
@@ -441,7 +441,7 @@ pub struct BootRepairReport {
     /// Target identity snapshot at detection time. `None` only when
     /// we refused before identifying a target.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub target: Option<TargetIdentity>,
+    pub target: Option<MountTargetIdentity>,
     /// Platform facts observed for the target. Required for the
     /// platform support matrix.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -508,7 +508,7 @@ impl BootRepairReport {
     }
 
     /// Convenience constructor for a clean report.
-    pub fn clean(target: TargetIdentity, provider: ProviderId) -> Self {
+    pub fn clean(target: MountTargetIdentity, provider: ProviderId) -> Self {
         Self {
             target: Some(target),
             detected_provider: Some(provider),

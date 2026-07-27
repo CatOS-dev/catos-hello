@@ -75,7 +75,7 @@ pub(in crate::doctor) fn is_device_mounted_rw(device: &Path) -> bool {
         Ok(s) => s,
         Err(_) => return false,
     };
-    let mounts = crate::shared::parse::mountinfo::parse_all(&body);
+    let mounts = crate::mount::diagnose::mountinfo::parse_all(&body);
     let dev_str = match device.to_str() {
         Some(s) => s,
         None => return false,

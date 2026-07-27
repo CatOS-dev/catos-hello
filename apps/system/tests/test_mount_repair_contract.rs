@@ -28,19 +28,21 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use catos_system::shared::model::mount_repair::{
+use catos_system::mount::model::{
     AppliedAction, MountProblem, MountRepairOutcome, MountRepairReport, PlannedFstabEdit,
-    TargetIdentity, CATOS_STANDARD_SUBVOLS,
+    MountTargetIdentity, CATOS_STANDARD_SUBVOLS,
 };
-use catos_system::repair::fstab_edit::{apply_edits, FstabEditError};
-use catos_system::repair::mount_repair::{
-    apply_in_memory, build_plan, detect_drift, diagnose, run_mount_repair_diagnosis,
-    MountPointObservation, MountRepairInputs,
+use catos_system::mount::plan::repair::{apply_edits, FstabEditError};
+use catos_system::repair::mount::{
+    apply_in_memory, build_plan, detect_drift, run_mount_repair_diagnosis,
 };
-use catos_system::repair::path_safety::{
+use catos_system::mount::diagnose::target::{
+    diagnose, MountPointObservation, MountRepairInputs,
+};
+use catos_system::mount::plan::repair::{
     validate_directory_creation, validate_mount_point_path, PathObservation, PathRejection,
 };
-use catos_system::repair::subvol_decision::{
+use catos_system::mount::diagnose::subvolume::{
     decide_all, history_from_entries, CatosConfirmation, SubvolDecision, SubvolFacts,
     SubvolObservation,
 };
@@ -53,8 +55,8 @@ fn bin_path() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_catos-system"))
 }
 
-fn target(uuid: &str) -> TargetIdentity {
-    TargetIdentity {
+fn target(uuid: &str) -> MountTargetIdentity {
+    MountTargetIdentity {
         root_device: PathBuf::from("/dev/sda2"),
         root_fstype: "btrfs".into(),
         root_subvol: Some("/@".into()),
@@ -192,7 +194,7 @@ fn editor_preserves_noauto_nofail_unrelated_lines() {
 
 #[test]
 fn subvol_decision_fstab_history_authorises_rebuild() {
-    let history = catos_system::repair::subvol_decision::FstabHistory {
+    let history = catos_system::mount::diagnose::subvolume::FstabHistory {
         correct: vec!["/home".into()],
         wrong_subvol: vec![],
     };
@@ -206,7 +208,7 @@ fn subvol_decision_fstab_history_authorises_rebuild() {
 
 #[test]
 fn subvol_decision_existing_subvol_is_noop() {
-    let history = catos_system::repair::subvol_decision::FstabHistory {
+    let history = catos_system::mount::diagnose::subvolume::FstabHistory {
         correct: vec!["/home".into()],
         wrong_subvol: vec![],
     };
@@ -220,7 +222,7 @@ fn subvol_decision_existing_subvol_is_noop() {
 
 #[test]
 fn subvol_decision_no_history_unconfirmed_target_refuses() {
-    let history = catos_system::repair::subvol_decision::FstabHistory::default();
+    let history = catos_system::mount::diagnose::subvolume::FstabHistory::default();
     let facts = SubvolFacts::default();
     let decisions = decide_all(&history, &facts, CatosConfirmation::NotConfirmed);
     let home = decisions.iter().find(|d| d.subvol() == "/@home").unwrap();
@@ -229,7 +231,7 @@ fn subvol_decision_no_history_unconfirmed_target_refuses() {
 
 #[test]
 fn subvol_decision_confirmed_catos_authorises_missing_standard_entries() {
-    let history = catos_system::repair::subvol_decision::FstabHistory::default();
+    let history = catos_system::mount::diagnose::subvolume::FstabHistory::default();
     let facts = SubvolFacts::default();
     let decisions = decide_all(&history, &facts, CatosConfirmation::Confirmed);
     for d in &decisions {
@@ -244,7 +246,7 @@ fn subvol_decision_confirmed_catos_authorises_missing_standard_entries() {
 fn subvol_decision_mount_point_with_data_marks_data_conflict() {
     let mut o = subvol_missing("/@home");
     o.mount_point_entry_count = Some(3);
-    let history = catos_system::repair::subvol_decision::FstabHistory {
+    let history = catos_system::mount::diagnose::subvolume::FstabHistory {
         correct: vec!["/home".into()],
         wrong_subvol: vec![],
     };
@@ -263,7 +265,7 @@ fn subvol_decision_mount_point_with_data_marks_data_conflict() {
 fn subvol_decision_path_occupied_by_directory_refuses() {
     let mut o = subvol_missing("/@home");
     o.exists_as_directory = true;
-    let history = catos_system::repair::subvol_decision::FstabHistory {
+    let history = catos_system::mount::diagnose::subvolume::FstabHistory {
         correct: vec!["/home".into()],
         wrong_subvol: vec![],
     };
@@ -279,7 +281,7 @@ fn subvol_decision_path_occupied_by_directory_refuses() {
 fn snapshots_subvol_does_not_trigger_destructive_action() {
     let mut o = subvol_missing("/@snapshots");
     o.mount_point_entry_count = Some(7);
-    let history = catos_system::repair::subvol_decision::FstabHistory {
+    let history = catos_system::mount::diagnose::subvolume::FstabHistory {
         correct: vec!["/.snapshots".into()],
         wrong_subvol: vec![],
     };
@@ -533,7 +535,7 @@ fn detect_drift_flags_fstab_change() {
         ..Default::default()
     };
     let plan = build_plan(&inputs);
-    let new_digest = catos_system::shared::model::mount_repair::FstabDigest {
+    let new_digest = catos_system::mount::model::FstabDigest {
         sha256: "different".into(),
         byte_len: 1,
     };
@@ -742,7 +744,7 @@ fn history_from_entries_classifies_correct_and_wrong_subvol() {
         "UUID=root  /data  btrfs  defaults,subvol=/@data  0 0",
     ]
     .into_iter()
-    .map(|l| catos_system::shared::parse::fstab::parse_line(l).unwrap().unwrap())
+    .map(|l| catos_system::mount::diagnose::fstab::parse_line(l).unwrap().unwrap())
     .collect();
     let history = history_from_entries(&entries);
     assert!(history.has_correct_entry("/home"));
@@ -835,15 +837,15 @@ fn topology_device(
     }
 }
 
-fn topology_fstab(body: &str) -> Vec<catos_system::shared::model::fstab::FstabEntry> {
-    catos_system::shared::parse::fstab::parse_all_with_diagnostics(body).0
+fn topology_fstab(body: &str) -> Vec<catos_system::mount::diagnose::fstab::FstabEntry> {
+    catos_system::mount::diagnose::fstab::parse_all_with_diagnostics(body).0
 }
 
 #[test]
 fn detects_all_six_boot_and_esp_layouts() {
-    use catos_system::shared::model::mount_repair::BootMountLayout;
+    use catos_system::mount::model::BootMountLayout;
     use catos_system::target::model::PartitionRole;
-    use catos_system::repair::mount_repair::detect_boot_mount_layout;
+    use catos_system::mount::diagnose::layout::detect_boot_mount_layout;
 
     let root = topology_device(
         "root",
@@ -915,7 +917,7 @@ fn detects_all_six_boot_and_esp_layouts() {
 
 #[test]
 fn separate_boot_entry_is_not_rewritten_as_the_esp() {
-    use catos_system::shared::model::mount_repair::BootMountLayout;
+    use catos_system::mount::model::BootMountLayout;
 
     let fstab = "UUID=root-uuid / btrfs defaults,subvol=/@ 0 0\n\
                  UUID=boot-uuid /boot ext4 defaults 0 2\n\

@@ -8,9 +8,9 @@ use crate::shared::model::recovery::{
     BtrfsFilesystemIdentity, BtrfsSubvolumeIdentity, BootLayout, BootConsistencyReport,
     CatosIdentity, FstabRootDefinition, RecoveryError, RecoveryErrorKind,
 };
-use crate::shared::mount::plan::build_probe_plan;
-use crate::shared::mount::session::Session;
-use crate::shared::parse::fstab::{self, FstabEntry, FstabEntryKind, FstabSource};
+use crate::mount::plan::session::build_probe_plan;
+use crate::mount::session::ReadOnlyMountSession;
+use crate::mount::diagnose::fstab::{self, FstabEntry, FstabEntryKind, FstabSource};
 use crate::target::execute::confined;
 use crate::shared::snapshot_engine::external as btrfs;
 use crate::shared::snapshot_engine::identity::{
@@ -47,7 +47,7 @@ pub(crate) fn probe_target_readonly(
     let (canonical_device, _) = canonical_block_identity(device)?;
 
     let session_root =
-        PathBuf::from(crate::shared::mount::secure_dir::SESSION_ROOT_PARENT)
+        PathBuf::from(crate::mount::execute::secure_dir::SESSION_ROOT_PARENT)
             .join(format!("recovery-ro-{}", std::process::id()));
     let source = canonical_device.to_str().ok_or_else(|| {
         RecoveryError::new(
@@ -58,7 +58,7 @@ pub(crate) fn probe_target_readonly(
     let mount_plan = build_probe_plan(session_root, source, "btrfs", Some("subvolid=5"))
         .map_err(|error| RecoveryError::new(RecoveryErrorKind::SyscallFailed, error.to_string()))?;
     let id = format!("recovery-ro-{}", std::process::id());
-    let mut session = Session::new(id, &mount_plan);
+    let mut session = ReadOnlyMountSession::new(id, &mount_plan);
     let mounted = session.run(&mount_plan).map_err(|error| {
         let mut recovery_error = RecoveryError::new(
             RecoveryErrorKind::SyscallFailed,

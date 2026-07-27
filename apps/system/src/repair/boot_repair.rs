@@ -22,8 +22,8 @@
 //! ## What this module does NOT own
 //!
 //! * Target discovery, mount session, and device locks: those are
-//!   the stage 1–3 surfaces (`repair::mount_repair`,
-//!   `crate::recovery::RecoveryRwSession`, `recovery::lock`).
+//!   the stage 1–3 surfaces (`repair::mount`,
+//!   `crate::mount::session::BtrfsTopLevelRwSession`, `snapshot_engine::lock`).
 //! * Bootloader migration: repair restores the provider the target
 //!   already uses. It never swaps GRUB for systemd-boot, etc.
 //! * Arbitrary chroot / shell API: the only target commands that
@@ -64,7 +64,7 @@ use crate::shared::model::boot_repair::{
     SecureBootReport,
 };
 use crate::shared::model::evidence::Evidence;
-use crate::shared::model::mount_repair::{MountRepairCleanup, TargetIdentity};
+use crate::mount::model::{MountRepairCleanup, MountTargetIdentity};
 use crate::repair::boot_repair::cmdline::{build_kernel_cmdline, CmdlineInputs};
 use crate::repair::boot_repair::detect::{detect, DetectionInputs, DetectionVerdict};
 use crate::repair::boot_repair::providers::{build_ctx, build_provider};
@@ -87,7 +87,7 @@ pub use registry::ProviderProfile;
 /// ESP is mounted inside the namespace, when applicable.
 #[allow(clippy::too_many_arguments)]
 pub fn run_boot_repair(
-    target: &TargetIdentity,
+    target: &MountTargetIdentity,
     platform: PlatformFacts,
     target_root: &Path,
     esp_root: Option<&Path>,
@@ -548,7 +548,7 @@ fn run_boot_repair_mounted(
     root_subvolume: Option<&str>,
     esp_device: Option<&str>,
 ) -> BootRepairReport {
-    let mut session = match crate::repair::mount_repair::open_boot_repair_target_session(
+    let mut session = match crate::repair::mount::open_boot_repair_target_session(
         root_device,
         root_subvolume,
         esp_device,
@@ -703,8 +703,8 @@ mod tests {
         }
     }
 
-    fn btrfs_target() -> TargetIdentity {
-        TargetIdentity {
+    fn btrfs_target() -> MountTargetIdentity {
+        MountTargetIdentity {
             root_device: PathBuf::from("/dev/nvme0n1p2"),
             root_fstype: "btrfs".into(),
             root_subvol: Some("/@".into()),

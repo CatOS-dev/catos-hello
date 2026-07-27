@@ -17,10 +17,7 @@
 
 mod probe;
 mod read;
-mod session;
 mod write;
-
-pub use session::RecoveryRwSession;
 
 use std::path::PathBuf;
 

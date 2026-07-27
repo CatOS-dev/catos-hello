@@ -20,7 +20,7 @@
 
 use std::path::Path;
 
-use crate::shared::model::fstab::{FstabEntry, FstabSource};
+use crate::mount::diagnose::fstab::{FstabEntry, FstabSource};
 use crate::shared::model::recovery::{
     BootConsistencyReport, BootConsistencyStatus, BootLayout, RecoveryError, RecoveryErrorKind,
 };
@@ -281,7 +281,7 @@ fn has_initramfs_files(root: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::shared::model::fstab::{FstabEntry, FstabEntryKind, FstabSource};
+    use crate::mount::diagnose::fstab::{FstabEntry, FstabEntryKind, FstabSource};
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
 

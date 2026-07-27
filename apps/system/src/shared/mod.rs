@@ -8,7 +8,6 @@
 pub mod cli;
 pub mod error;
 pub mod model;
-pub mod mount;
 pub mod output;
 pub mod parse;
 pub mod process;

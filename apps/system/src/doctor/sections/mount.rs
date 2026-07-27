@@ -7,10 +7,10 @@ use crate::shared::model::doctor::{
     DoctorSection, DoctorSectionId, DoctorSectionStatus, DoctorSeverity,
 };
 use crate::shared::model::evidence::Evidence;
-use crate::shared::model::mount_repair::{MountProblem, TargetIdentity as RepairTargetIdentity};
+use crate::mount::model::{MountProblem, MountTargetIdentity as RepairTargetIdentity};
 use crate::target::model::TargetIdentity;
-use crate::repair::mount_repair::{MountPointObservation, MountRepairInputs};
-use crate::repair::subvol_decision::{CatosConfirmation, SubvolFacts};
+use crate::mount::diagnose::target::{diagnose as mount_diagnose, MountPointObservation, MountRepairInputs};
+use crate::mount::diagnose::subvolume::{CatosConfirmation, SubvolFacts};
 
 use super::{push_evidence, push_issue, set_section, target_root_path};
 
@@ -21,7 +21,7 @@ pub(in crate::doctor) fn run_mount_section(
 ) -> Result<(), ()> {
     let id = DoctorSectionId::Mount;
     let inputs = build_mount_inputs(target);
-    let problems = crate::repair::mount_repair::diagnose(&inputs);
+    let problems = mount_diagnose(&inputs);
     push_mount_evidence(sections, id, target);
 
     let status = derive_mount_section_status(&problems);
@@ -76,8 +76,8 @@ fn build_mount_inputs(target: &TargetIdentity) -> MountRepairInputs {
     }
 }
 
-/// Construct the rich `repair::mount_repair::TargetIdentity` that
-/// [`crate::repair::mount_repair::diagnose`] consumes from the minimal
+/// Construct the rich `mount::model::MountTargetIdentity` that
+/// [`crate::mount::diagnose::target::diagnose`] consumes from the minimal
 /// [`TargetIdentity`] Doctor carries. ESP and boot-layout signals are
 /// unknown on the `target::plan` path (Doctor does not mount or detect
 /// them); they are left `None`. Wiring real ESP/boot-layout discovery
@@ -107,7 +107,7 @@ fn collect_mount_point_observations(
         return out;
     }
     let root = target_root_path(target);
-    for spec in crate::shared::model::mount_repair::CATOS_STANDARD_SUBVOLS {
+    for spec in crate::mount::model::CATOS_STANDARD_SUBVOLS {
         if spec.mount_point == "/" {
             continue;
         }
@@ -278,7 +278,7 @@ fn push_mount_evidence(
         id,
         Evidence::new(
             "ROOT_IDENTITY",
-            "repair::mount_repair::diagnose",
+            "mount::diagnose::target::diagnose",
             format!(
                 "root_device={}, fstype={}, subvol={:?}",
                 target

@@ -37,18 +37,15 @@
 //!   is unmounted before we return.
 
 pub mod boot_repair;
-pub mod fstab_edit;
-pub mod mount_repair;
+pub mod mount;
 pub mod orchestrator;
-pub mod path_safety;
 pub mod runner;
 pub mod fs_flows;
 pub mod safety;
-pub mod subvol_decision;
 pub mod verify;
 
 pub use boot_repair::run_boot_repair;
-pub use mount_repair::{
+pub use mount::{
     build_plan, diagnose, run_mount_repair_diagnosis, run_mount_repair_via_cli, MountRepairInputs,
 };
 

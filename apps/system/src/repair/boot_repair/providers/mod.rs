@@ -8,7 +8,7 @@ pub mod limine;
 pub mod systemd_boot;
 
 use crate::shared::model::boot_repair::{FirmwareMethod, ProviderId};
-use crate::shared::model::mount_repair::TargetIdentity;
+use crate::mount::model::MountTargetIdentity;
 use crate::repair::boot_repair::mkinitcpio::{self, Kernel};
 use crate::repair::boot_repair::providers::base::{BootProvider, ProviderCtx};
 
@@ -54,7 +54,7 @@ pub fn build_provider<'a>(
 /// the provider trait methods.
 #[allow(clippy::too_many_arguments)]
 pub fn build_ctx<'a>(
-    target: &'a TargetIdentity,
+    target: &'a MountTargetIdentity,
     provider: ProviderId,
     cmdline: String,
     esp_mount_point: Option<String>,

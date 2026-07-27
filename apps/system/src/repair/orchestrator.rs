@@ -42,7 +42,7 @@ use crate::target::model::Warning;
 use crate::shared::model::repair::{FsRepairOutcome, FsRepairReport, RepairCleanup, RepairTool};
 use crate::target::model::DetectionStatus;
 use crate::target::model::{BlockDevice, DeviceClass, PartitionRole, RootCandidateConfidence};
-use crate::shared::mount::probe::probe_unmounted_candidates;
+use crate::mount::plan::session::probe_unmounted_candidates;
 use crate::target::diagnose::block::discover_devices;
 use crate::target::diagnose::filesystem::RealFilesystem;
 use crate::shared::snapshot_engine::lock::DeviceLock;
@@ -581,7 +581,7 @@ fn verify_target_unchanged(device: &Path, expected_major_minor: &str) -> Result<
     }
     let mountinfo = std::fs::read_to_string("/proc/self/mountinfo")
         .map_err(|error| format!("cannot re-read mount table: {error}"))?;
-    if crate::shared::parse::mountinfo::parse_all(&mountinfo)
+    if crate::mount::diagnose::mountinfo::parse_all(&mountinfo)
         .iter()
         .any(|mount| mount.major_minor == expected_major_minor)
     {
@@ -629,7 +629,7 @@ fn ambiguous_message(candidates: &[String]) -> String {
 /// by the orchestrator to refuse repairing the live root.
 fn read_running_root() -> Option<RunningRootDevice> {
     let body = std::fs::read_to_string("/proc/self/mountinfo").ok()?;
-    let mounts = crate::shared::parse::mountinfo::parse_all(&body);
+    let mounts = crate::mount::diagnose::mountinfo::parse_all(&body);
     let root_mount = mounts
         .iter()
         .find(|m| m.mount_point == Path::new("/"))?

@@ -19,14 +19,14 @@
 //! runner, and the kernel cmdline.
 
 use crate::shared::model::boot_repair::{BootAction, BootVerification, ProviderId, TargetCommandResult};
-use crate::shared::model::mount_repair::TargetIdentity;
+use crate::mount::model::MountTargetIdentity;
 use crate::repair::boot_repair::target_exec::{TargetRequest, TargetRunner};
 
 /// Shared read-only context every provider receives. Built by the
 /// orchestrator after detection and cmdline generation.
 #[derive(Debug, Clone)]
 pub struct ProviderCtx<'a> {
-    pub target: &'a TargetIdentity,
+    pub target: &'a MountTargetIdentity,
     pub provider: ProviderId,
     /// Kernel cmdline the recipe will write to `/etc/kernel/cmdline`
     /// (Limine, systemd-boot, UKI, EFI Stub) or embed in

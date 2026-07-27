@@ -6,7 +6,7 @@ use std::collections::HashSet;
 use crate::shared::error::Error;
 use crate::target::model::Warning;
 use crate::target::model::StorageReport;
-use crate::shared::mount::probe::probe_unmounted_candidates;
+use crate::mount::plan::session::probe_unmounted_candidates;
 use crate::target::diagnose::candidate::candidate_ambiguities;
 use crate::target::diagnose::filesystem::RealFilesystem;
 use crate::target::diagnose::block::discover_devices;

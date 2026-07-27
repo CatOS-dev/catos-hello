@@ -4,8 +4,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::shared::error::{exit_code, Error};
 use crate::target::model::Warning;
-use crate::shared::model::mount::MountError;
-use crate::shared::mount::session::SESSION_ROOT_PARENT;
+use crate::mount::model::MountError;
+use crate::mount::execute::secure_dir::SESSION_ROOT_PARENT;
 
 pub(crate) static SESSION_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
@@ -52,7 +52,7 @@ pub fn exit_code_for(outcome: &Phase2Outcome) -> i32 {
 mod tests {
     use super::*;
     use crate::shared::error::exit_code;
-    use crate::shared::model::mount::{
+    use crate::mount::model::{
         CleanupReport, MountSession, MountSessionState, NamespaceState, ResidualMount,
         MountedResource,
     };
@@ -76,15 +76,15 @@ mod tests {
         let outcome = Phase2Outcome::TargetMount {
             session: MountSession {
                 id: "test".into(),
-                state: crate::shared::model::mount::MountSessionState::Active,
-                namespace: crate::shared::model::mount::NamespaceState::PrivateNamespace,
+                state: crate::mount::model::MountSessionState::Active,
+                namespace: crate::mount::model::NamespaceState::PrivateNamespace,
                 session_root: PathBuf::from("/tmp/x"),
                 target_root: PathBuf::from("/tmp/x/target"),
                 mounts: vec![],
                 warnings: vec![],
             },
             inspection: Box::new(TargetInspection::default()),
-            cleanup: crate::shared::model::mount::CleanupReport::default(),
+            cleanup: crate::mount::model::CleanupReport::default(),
             warnings: vec![],
         };
         assert_eq!(exit_code_for(&outcome), exit_code::SUCCESS);
@@ -96,17 +96,17 @@ mod tests {
         let outcome = Phase2Outcome::TargetMount {
             session: MountSession {
                 id: "test".into(),
-                state: crate::shared::model::mount::MountSessionState::CleanupIncomplete,
-                namespace: crate::shared::model::mount::NamespaceState::PrivateNamespace,
+                state: crate::mount::model::MountSessionState::CleanupIncomplete,
+                namespace: crate::mount::model::NamespaceState::PrivateNamespace,
                 session_root: PathBuf::from("/tmp/x"),
                 target_root: PathBuf::from("/tmp/x/target"),
                 mounts: vec![],
                 warnings: vec![],
             },
             inspection: Box::new(TargetInspection::default()),
-            cleanup: crate::shared::model::mount::CleanupReport {
-                residual: vec![crate::shared::model::mount::ResidualMount {
-                    resource: crate::shared::model::mount::MountedResource {
+            cleanup: crate::mount::model::CleanupReport {
+                residual: vec![crate::mount::model::ResidualMount {
+                    resource: crate::mount::model::MountedResource {
                         order: 1,
                         source: "/dev/sda1".into(),
                         target: PathBuf::from("/tmp/x/target"),

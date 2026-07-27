@@ -498,7 +498,7 @@ fn run_repair_mount(argv: &[String]) -> i32 {
         }
     }
 
-    let report = crate::repair::mount_repair::run_mount_repair_via_cli(
+    let report = crate::repair::mount::run_mount_repair_via_cli(
         root_device.as_deref(),
         root_subvolume.as_deref(),
         esp_device.as_deref(),
@@ -527,8 +527,8 @@ fn run_repair_mount(argv: &[String]) -> i32 {
     }
 }
 
-fn mount_outcome_exit_code(outcome: crate::shared::model::mount_repair::MountRepairOutcome) -> i32 {
-    use crate::shared::model::mount_repair::MountRepairOutcome as O;
+fn mount_outcome_exit_code(outcome: crate::mount::model::MountRepairOutcome) -> i32 {
+    use crate::mount::model::MountRepairOutcome as O;
     match outcome {
         O::Clean | O::Repaired | O::PartiallyRepaired => exit_code::SUCCESS,
         O::AmbiguousTarget

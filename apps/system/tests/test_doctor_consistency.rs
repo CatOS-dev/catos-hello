@@ -11,14 +11,14 @@
 #![allow(clippy::field_reassign_with_default)]
 
 use catos_system::shared::model::boot_repair::ProviderId;
-use catos_system::shared::model::mount_repair::{MountProblem, TargetIdentity};
+use catos_system::mount::model::{MountProblem, MountTargetIdentity};
 use catos_system::repair::boot_repair::detect::{detect, DetectionInputs, DetectionVerdict};
-use catos_system::repair::mount_repair::{diagnose as mount_diagnose, MountRepairInputs};
-use catos_system::repair::subvol_decision::CatosConfirmation;
+use catos_system::repair::mount::{diagnose as mount_diagnose, MountRepairInputs};
+use catos_system::mount::diagnose::subvolume::CatosConfirmation;
 use std::path::PathBuf;
 
-fn btrfs_target() -> TargetIdentity {
-    TargetIdentity {
+fn btrfs_target() -> MountTargetIdentity {
+    MountTargetIdentity {
         root_device: PathBuf::from("/dev/nvme0n1p2"),
         root_fstype: "btrfs".into(),
         root_subvol: Some("/@".into()),

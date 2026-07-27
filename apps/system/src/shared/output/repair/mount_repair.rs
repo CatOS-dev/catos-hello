@@ -6,7 +6,7 @@
 use std::io::Write;
 
 use crate::shared::error::Error;
-use crate::shared::model::mount_repair::MountRepairReport;
+use crate::mount::model::MountRepairReport;
 
 pub fn render_mount_repair_json(
     report: &MountRepairReport,
@@ -93,34 +93,34 @@ pub fn render_mount_repair_human<W: Write>(
         writeln!(out, "  Actions")?;
         for action in &report.actions {
             match action {
-                crate::shared::model::mount_repair::AppliedAction::FstabEdited { edit } => {
+                crate::mount::model::AppliedAction::FstabEdited { edit } => {
                     writeln!(out, "    fstab-edit: {}", edit_reason(edit))?;
                 }
-                crate::shared::model::mount_repair::AppliedAction::FstabEditSkipped { edit, reason } => {
+                crate::mount::model::AppliedAction::FstabEditSkipped { edit, reason } => {
                     writeln!(out, "    fstab-skip: {} ({reason})", edit_reason(edit))?;
                 }
-                crate::shared::model::mount_repair::AppliedAction::SubvolumeCreated { subvol } => {
+                crate::mount::model::AppliedAction::SubvolumeCreated { subvol } => {
                     writeln!(out, "    subvol-create: {subvol}")?;
                 }
-                crate::shared::model::mount_repair::AppliedAction::SubvolumeSkipped { subvol, reason } => {
+                crate::mount::model::AppliedAction::SubvolumeSkipped { subvol, reason } => {
                     writeln!(out, "    subvol-skip: {subvol} ({reason})")?;
                 }
-                crate::shared::model::mount_repair::AppliedAction::SubvolumeRolledBack { subvol } => {
+                crate::mount::model::AppliedAction::SubvolumeRolledBack { subvol } => {
                     writeln!(out, "    subvol-rollback: {subvol}")?;
                 }
-                crate::shared::model::mount_repair::AppliedAction::DirectoryCreated { mount_point } => {
+                crate::mount::model::AppliedAction::DirectoryCreated { mount_point } => {
                     writeln!(out, "    mkdir: {mount_point}")?;
                 }
-                crate::shared::model::mount_repair::AppliedAction::DirectorySkipped {
+                crate::mount::model::AppliedAction::DirectorySkipped {
                     mount_point,
                     reason,
                 } => {
                     writeln!(out, "    mkdir-skip: {mount_point} ({reason})")?;
                 }
-                crate::shared::model::mount_repair::AppliedAction::DirectoryRolledBack { mount_point } => {
+                crate::mount::model::AppliedAction::DirectoryRolledBack { mount_point } => {
                     writeln!(out, "    mkdir-rollback: {mount_point}")?;
                 }
-                crate::shared::model::mount_repair::AppliedAction::RollbackResidual {
+                crate::mount::model::AppliedAction::RollbackResidual {
                     resource,
                     reason,
                 } => {
@@ -207,27 +207,27 @@ pub fn render_mount_repair_human<W: Write>(
     Ok(())
 }
 
-fn edit_reason(edit: &crate::shared::model::mount_repair::PlannedFstabEdit) -> &str {
+fn edit_reason(edit: &crate::mount::model::PlannedFstabEdit) -> &str {
     match edit {
-        crate::shared::model::mount_repair::PlannedFstabEdit::ReplaceSource { reason, .. }
-        | crate::shared::model::mount_repair::PlannedFstabEdit::ReplaceEntry { reason, .. }
-        | crate::shared::model::mount_repair::PlannedFstabEdit::AppendEntry { reason, .. }
-        | crate::shared::model::mount_repair::PlannedFstabEdit::DropDuplicate { reason, .. } => reason,
+        crate::mount::model::PlannedFstabEdit::ReplaceSource { reason, .. }
+        | crate::mount::model::PlannedFstabEdit::ReplaceEntry { reason, .. }
+        | crate::mount::model::PlannedFstabEdit::AppendEntry { reason, .. }
+        | crate::mount::model::PlannedFstabEdit::DropDuplicate { reason, .. } => reason,
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::shared::model::mount_repair::{
+    use crate::mount::model::{
         AppliedAction, FstabTransaction, MountProblem, MountRepairCleanup, MountRepairOutcome,
-        MountRepairPlan, MountVerification, PlannedFstabEdit, PlannedSubvolume, TargetIdentity,
+        MountRepairPlan, MountVerification, PlannedFstabEdit, PlannedSubvolume, MountTargetIdentity,
     };
     use std::path::PathBuf;
 
     fn sample_report() -> MountRepairReport {
         MountRepairReport {
-            target: Some(TargetIdentity {
+            target: Some(MountTargetIdentity {
                 root_device: PathBuf::from("/dev/nvme0n1p2"),
                 root_fstype: "btrfs".into(),
                 root_subvol: Some("/@".into()),

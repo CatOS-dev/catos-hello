@@ -7,7 +7,7 @@ use crate::shared::model::doctor::{
     DoctorReport, DoctorSection, DoctorSectionId, DoctorSectionStatus, DoctorSeverity,
 };
 use crate::shared::model::evidence::Evidence;
-use crate::shared::model::mount_repair::TargetIdentity as RepairTargetIdentity;
+use crate::mount::model::MountTargetIdentity as RepairTargetIdentity;
 use crate::target::model::TargetIdentity;
 use crate::repair::boot_repair::detect::{detect, DetectionInputs, DetectionVerdict};
 

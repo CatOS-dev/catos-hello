@@ -12,7 +12,7 @@ pub use target::*;
 pub use util::*;
 
 use crate::target::model::{TargetInspection, Warning};
-use crate::shared::model::mount::{MountPlan, MountSession};
+use crate::mount::model::{MountPlan, MountSession};
 use crate::target::model::StorageReport;
 
 /// Outcome of a phase-2 command. Each variant carries the structured
@@ -26,7 +26,7 @@ pub enum Phase2Outcome {
     TargetMount {
         session: MountSession,
         inspection: Box<TargetInspection>,
-        cleanup: crate::shared::model::mount::CleanupReport,
+        cleanup: crate::mount::model::CleanupReport,
         warnings: Vec<Warning>,
     },
 }

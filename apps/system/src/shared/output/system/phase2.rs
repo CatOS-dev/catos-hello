@@ -5,7 +5,7 @@
 use std::io::Write;
 
 use crate::shared::error::Error;
-use crate::shared::model::mount::{CleanupReport, MountPlan, MountSession};
+use crate::mount::model::{CleanupReport, MountPlan, MountSession};
 use crate::target::model::StorageReport;
 use crate::system::Phase2Outcome;
 
@@ -368,8 +368,8 @@ mod tests {
 
     #[test]
     fn mount_failure_json_preserves_structured_fields() {
-        let error = Error::MountFailed(crate::shared::model::mount::MountError {
-            kind: crate::shared::model::mount::MountErrorKind::DeviceNotFound,
+        let error = Error::MountFailed(crate::mount::model::MountError {
+            kind: crate::mount::model::MountErrorKind::DeviceNotFound,
             message: "missing device".into(),
             device_or_path: Some("/dev/missing".into()),
             errno: Some(2),

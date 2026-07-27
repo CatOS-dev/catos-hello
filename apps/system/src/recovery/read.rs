@@ -8,9 +8,9 @@ use crate::shared::model::recovery::{
     RecoveryError, RecoveryErrorKind, RecoveryInspectReport, RecoveryListReport,
     RecoveryPlan, RecoveryStatusReport, TransactionPaths, TransactionSummary,
 };
-use crate::shared::mount::plan::build_probe_plan;
-use crate::shared::mount::secure_dir::SESSION_ROOT_PARENT;
-use crate::shared::mount::session::Session;
+use crate::mount::plan::session::build_probe_plan;
+use crate::mount::execute::secure_dir::SESSION_ROOT_PARENT;
+use crate::mount::session::ReadOnlyMountSession;
 use crate::shared::snapshot_engine::identity::validate_mounted_filesystem;
 use crate::shared::snapshot_engine::external as btrfs;
 use crate::shared::snapshot_engine::plan::{
@@ -40,7 +40,7 @@ pub(super) fn run_list(args: &RecoveryArgs) -> Result<RecoveryListReport, Recove
     })?;
     let mount_plan = build_probe_plan(session_root, source, "btrfs", Some("subvolid=5"))
         .map_err(|error| RecoveryError::new(RecoveryErrorKind::SyscallFailed, error.to_string()))?;
-    let mut session = Session::new(format!("recovery-list-{}", std::process::id()), &mount_plan);
+    let mut session = ReadOnlyMountSession::new(format!("recovery-list-{}", std::process::id()), &mount_plan);
     let mounted = session.run(&mount_plan).map_err(|error| {
         RecoveryError::new(
             RecoveryErrorKind::SyscallFailed,

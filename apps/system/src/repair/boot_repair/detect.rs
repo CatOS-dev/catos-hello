@@ -22,7 +22,7 @@
 //!   corroborating signals exist.
 
 use crate::shared::model::boot_repair::{FirmwareMethod, ProviderEvidence, ProviderId};
-use crate::shared::model::mount_repair::TargetIdentity;
+use crate::mount::model::MountTargetIdentity;
 
 /// Inputs supplied by the orchestrator. All fields are observed
 /// through the confined target reader; this module does no I/O.
@@ -82,7 +82,7 @@ pub enum DetectionVerdict {
 }
 
 /// Run the evidence-based detection.
-pub fn detect(inputs: &DetectionInputs, _target: &TargetIdentity) -> DetectionVerdict {
+pub fn detect(inputs: &DetectionInputs, _target: &MountTargetIdentity) -> DetectionVerdict {
     let mut all_evidence: Vec<ProviderEvidence> = Vec::new();
     let mut authoritative: Vec<(ProviderId, Option<FirmwareMethod>)> = Vec::new();
 
@@ -290,8 +290,8 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
 
-    fn empty_target() -> TargetIdentity {
-        TargetIdentity {
+    fn empty_target() -> MountTargetIdentity {
+        MountTargetIdentity {
             root_device: PathBuf::from("/dev/sda2"),
             root_fstype: "btrfs".into(),
             root_subvol: Some("/@".into()),

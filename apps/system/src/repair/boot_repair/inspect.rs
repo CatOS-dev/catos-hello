@@ -3,7 +3,7 @@
 use std::path::Path;
 use crate::repair::boot_repair::detect::DetectionInputs;
 use crate::repair::boot_repair::mkinitcpio::Kernel;
-use crate::shared::model::mount_repair::TargetIdentity;
+use crate::mount::model::MountTargetIdentity;
 use super::{has_target_path, read_target_file};
 
 pub(super) fn detect_target_architecture(root: &Path) -> Option<crate::shared::model::boot_repair::Architecture> {
@@ -18,7 +18,7 @@ pub(super) fn detect_target_architecture(root: &Path) -> Option<crate::shared::m
 }
 
 pub(super) fn detect_partition_table(
-    target: &TargetIdentity,
+    target: &MountTargetIdentity,
     devices: &[crate::target::model::BlockDevice],
 ) -> crate::shared::model::boot_repair::PartitionTable {
     use crate::target::model::DiskKind;
@@ -37,7 +37,7 @@ pub(super) fn detect_partition_table(
 }
 
 pub(super) fn derive_bios_install_disk(
-    target: &TargetIdentity,
+    target: &MountTargetIdentity,
     devices: &[crate::target::model::BlockDevice],
 ) -> Option<String> {
     let root = devices.iter().find(|device| {
@@ -62,7 +62,7 @@ pub(super) fn derive_bios_install_disk(
 }
 
 pub(super) fn derive_efi_device(
-    target: &TargetIdentity,
+    target: &MountTargetIdentity,
     devices: &[crate::target::model::BlockDevice],
 ) -> Option<(String, u32)> {
     let esp_path = target.esp_device.as_deref()?;

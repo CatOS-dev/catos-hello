@@ -35,11 +35,12 @@
 use std::path::{Path, PathBuf};
 
 use crate::shared::model::evidence::Evidence;
-use crate::shared::model::mount::{CleanupReport, MountError, MountPlan};
+use crate::mount::model::{CleanupReport, MountError, MountPlan};
 use crate::shared::model::repair::VerificationMount;
-use crate::shared::mount::plan::build_probe_plan;
-use crate::shared::mount::session::{Session, SESSION_ROOT_PARENT};
-use crate::shared::parse::mountinfo;
+use crate::mount::plan::session::build_probe_plan;
+use crate::mount::session::ReadOnlyMountSession;
+use crate::mount::execute::secure_dir::SESSION_ROOT_PARENT;
+use crate::mount::diagnose::mountinfo;
 
 /// Outcome of the verification mount. Distinct from
 /// [`VerificationMount`] (the model) because the orchestrator needs
@@ -145,7 +146,7 @@ pub fn verify_with<R: RepairRunnerProbe>(
         .and_then(|n| n.to_str())
         .unwrap_or("verify")
         .to_string();
-    let mut session = Session::new(session_id, &plan);
+    let mut session = ReadOnlyMountSession::new(session_id, &plan);
     let mounted_snapshot = match session.run(&plan) {
         Ok(snapshot) => snapshot,
         Err(error) => {

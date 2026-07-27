@@ -167,13 +167,13 @@ pub fn shell_quote(value: &str) -> String {
 mod tests {
     use super::*;
     use crate::shared::model::boot_repair::ProviderId;
-    use crate::shared::model::mount_repair::TargetIdentity;
+    use crate::mount::model::MountTargetIdentity;
     use crate::repair::boot_repair::providers::base::ProviderCtx;
     use crate::repair::boot_repair::target_exec::RecordedTargetRunner;
     use std::path::PathBuf;
 
     fn ctx(arch: Architecture, esp: Option<&str>) -> ProviderCtx<'static> {
-        let target = Box::leak(Box::new(TargetIdentity {
+        let target = Box::leak(Box::new(MountTargetIdentity {
             root_device: PathBuf::from("/dev/sda2"),
             root_fstype: "btrfs".into(),
             root_subvol: Some("/@".into()),

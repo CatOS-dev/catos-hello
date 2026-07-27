@@ -1,6 +1,6 @@
 //! Kernel cmdline builder. Port of `providers/base.kernel_cmdline`
 //! from the bootloadu Calamares module, adjusted to use the
-//! [`crate::shared::model::mount_repair::TargetIdentity`] the stage 1–3
+//! [`crate::mount::model::MountTargetIdentity`] the stage 1–3
 //! discovery already established.
 //!
 //! ## Hard rules
@@ -19,14 +19,14 @@
 //!   Btrfs and a subvolume path is known.
 
 use crate::shared::model::boot_repair::CmdlineConflict;
-use crate::shared::model::mount_repair::TargetIdentity;
+use crate::mount::model::MountTargetIdentity;
 
 /// Inputs to [`build_kernel_cmdline`].
 #[derive(Debug, Clone)]
 pub struct CmdlineInputs<'a> {
     /// Target identity discovered by the stage 1–3 path. Carries the
     /// root device, UUID, fstype, and subvolume.
-    pub target: &'a TargetIdentity,
+    pub target: &'a MountTargetIdentity,
     /// Existing `/etc/kernel/cmdline` content (or equivalent GRUB
     /// defaults) read from the target. May be empty for a fresh
     /// install. Used to preserve user-added parameters.
@@ -184,8 +184,8 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
 
-    fn btrfs_target() -> TargetIdentity {
-        TargetIdentity {
+    fn btrfs_target() -> MountTargetIdentity {
+        MountTargetIdentity {
             root_device: PathBuf::from("/dev/nvme0n1p2"),
             root_fstype: "btrfs".into(),
             root_subvol: Some("/@".into()),
@@ -196,8 +196,8 @@ mod tests {
         }
     }
 
-    fn ext4_target() -> TargetIdentity {
-        TargetIdentity {
+    fn ext4_target() -> MountTargetIdentity {
+        MountTargetIdentity {
             root_device: PathBuf::from("/dev/sda2"),
             root_fstype: "ext4".into(),
             root_subvol: None,
@@ -256,7 +256,7 @@ mod tests {
 
     #[test]
     fn luks_root_uses_cryptdevice_and_mapper() {
-        let target = TargetIdentity {
+        let target = MountTargetIdentity {
             root_device: PathBuf::from("/dev/mapper/cryptroot"),
             root_fstype: "btrfs".into(),
             root_subvol: Some("/@".into()),

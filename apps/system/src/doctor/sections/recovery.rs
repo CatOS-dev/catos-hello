@@ -223,9 +223,9 @@ fn enumerate_recovery_records(device: &str) -> Result<Vec<TransactionRecord>, St
 }
 
 fn mount_btrfs_top_level_ro(device: &str) -> Result<Option<PathBuf>, String> {
-    use crate::shared::mount::namespace::establish_private_namespace;
-    use crate::shared::mount::secure_dir::{create_session_dir, SESSION_ROOT_PARENT};
-    use crate::shared::mount::syscall::{self, ms_flags};
+    use crate::mount::execute::namespace::establish_private_namespace;
+    use crate::mount::execute::secure_dir::{create_session_dir, SESSION_ROOT_PARENT};
+    use crate::mount::execute::syscall::{self, ms_flags};
 
     if establish_private_namespace().is_err() {
         return Ok(None);
@@ -243,7 +243,7 @@ fn mount_btrfs_top_level_ro(device: &str) -> Result<Option<PathBuf>, String> {
     );
     if let Err(e) = result {
         let _ = syscall::umount2(&mount_root, 0);
-        let _ = crate::shared::mount::secure_dir::remove_session_dir(
+        let _ = crate::mount::execute::secure_dir::remove_session_dir(
             Path::new(SESSION_ROOT_PARENT),
             &session_dir,
         );

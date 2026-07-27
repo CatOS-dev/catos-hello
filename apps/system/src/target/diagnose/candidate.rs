@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 use crate::shared::error::FsError;
 use crate::shared::model::evidence::Evidence;
-use crate::shared::model::fstab::{FstabEntry, FstabEntryKind, FstabSource};
+use crate::mount::diagnose::fstab::{FstabEntry, FstabEntryKind, FstabSource};
 use crate::target::diagnose::filesystem::{FilesystemProbe, MetaData, RealFilesystem};
 use crate::target::diagnose::system_root::SystemRoot;
 use crate::target::model::{

@@ -10,10 +10,10 @@ use crate::shared::model::recovery::{
     BtrfsSubvolumeIdentity, CleanupSummary, DiskFacts, FstabRootDefinition, RecoveryError,
     RecoveryErrorKind, TransactionRecord,
 };
-use crate::shared::model::mount::CleanupReport;
-use crate::shared::mount::plan::build_probe_plan;
-use crate::shared::mount::secure_dir::SESSION_ROOT_PARENT;
-use crate::shared::mount::session::Session;
+use crate::mount::model::CleanupReport;
+use crate::mount::plan::session::build_probe_plan;
+use crate::mount::execute::secure_dir::SESSION_ROOT_PARENT;
+use crate::mount::session::ReadOnlyMountSession;
 use crate::target::execute::confined;
 use crate::shared::snapshot_engine::engine::{Engine, EngineOptions};
 use crate::shared::snapshot_engine::external as btrfs;
@@ -52,7 +52,7 @@ pub(super) fn probe_existing_transaction_readonly(
     })?;
     let mount_plan = build_probe_plan(session_root, source, "btrfs", Some("subvolid=5"))
         .map_err(|error| RecoveryError::new(RecoveryErrorKind::SyscallFailed, error.to_string()))?;
-    let mut session = Session::new(format!("recovery-existing-{transaction_id}"), &mount_plan);
+    let mut session = ReadOnlyMountSession::new(format!("recovery-existing-{transaction_id}"), &mount_plan);
     let mounted = session.run(&mount_plan).map_err(|error| {
         RecoveryError::new(
             RecoveryErrorKind::SyscallFailed,

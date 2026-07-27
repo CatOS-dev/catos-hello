@@ -121,13 +121,13 @@ pub fn build_firmware_boot_conf(
 mod tests {
     use super::*;
     use crate::shared::model::boot_repair::{Architecture, ProviderId};
-    use crate::shared::model::mount_repair::TargetIdentity;
+    use crate::mount::model::MountTargetIdentity;
     use crate::repair::boot_repair::providers::base::ProviderCtx;
     use crate::repair::boot_repair::target_exec::RecordedTargetRunner;
     use std::path::PathBuf;
 
     fn ctx() -> ProviderCtx<'static> {
-        let target = Box::leak(Box::new(TargetIdentity {
+        let target = Box::leak(Box::new(MountTargetIdentity {
             root_device: PathBuf::from("/dev/nvme0n1p2"),
             root_fstype: "btrfs".into(),
             root_subvol: Some("/@".into()),

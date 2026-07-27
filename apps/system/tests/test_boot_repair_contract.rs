@@ -26,7 +26,7 @@ use std::process::Command;
 use catos_system::shared::model::boot_repair::{
     Architecture, BootRepairOutcome, FirmwareClass, FirmwareMethod, PartitionTable, ProviderId,
 };
-use catos_system::shared::model::mount_repair::TargetIdentity;
+use catos_system::mount::model::MountTargetIdentity;
 use catos_system::repair::boot_repair::cmdline::{build_kernel_cmdline, CmdlineInputs};
 use catos_system::repair::boot_repair::detect::{detect, DetectionInputs, DetectionVerdict};
 use catos_system::repair::boot_repair::mkinitcpio;
@@ -50,9 +50,9 @@ fn bin_path() -> std::path::PathBuf {
     std::path::PathBuf::from(env!("CARGO_BIN_EXE_catos-system"))
 }
 
-fn btrfs_target() -> TargetIdentity {
+fn btrfs_target() -> MountTargetIdentity {
     use std::path::PathBuf;
-    TargetIdentity {
+    MountTargetIdentity {
         root_device: PathBuf::from("/dev/nvme0n1p2"),
         root_fstype: "btrfs".into(),
         root_subvol: Some("/@".into()),
@@ -309,7 +309,7 @@ fn mkinitcpio_removes_stale_managed_keyfile() {
 #[test]
 fn grub_defaults_omit_cryptodisk_when_root_unencrypted() {
     use std::path::PathBuf;
-    let target = Box::leak(Box::new(TargetIdentity {
+    let target = Box::leak(Box::new(MountTargetIdentity {
         root_device: PathBuf::from("/dev/sda2"),
         root_fstype: "ext4".into(),
         root_subvol: None,
@@ -340,7 +340,7 @@ fn grub_defaults_omit_cryptodisk_when_root_unencrypted() {
 #[test]
 fn systemd_boot_persists_boot_root_policy() {
     use std::path::PathBuf;
-    let target = Box::leak(Box::new(TargetIdentity {
+    let target = Box::leak(Box::new(MountTargetIdentity {
         root_device: PathBuf::from("/dev/nvme0n1p2"),
         root_fstype: "btrfs".into(),
         root_subvol: Some("/@".into()),
@@ -371,7 +371,7 @@ fn systemd_boot_persists_boot_root_policy() {
 #[test]
 fn firmware_provider_uses_plain_branding_label() {
     use std::path::PathBuf;
-    let target = Box::leak(Box::new(TargetIdentity {
+    let target = Box::leak(Box::new(MountTargetIdentity {
         root_device: PathBuf::from("/dev/nvme0n1p2"),
         root_fstype: "btrfs".into(),
         root_subvol: Some("/@".into()),
@@ -406,7 +406,7 @@ fn firmware_provider_uses_plain_branding_label() {
 #[test]
 fn limine_verify_records_limine_list() {
     use std::path::PathBuf;
-    let target = Box::leak(Box::new(TargetIdentity {
+    let target = Box::leak(Box::new(MountTargetIdentity {
         root_device: PathBuf::from("/dev/nvme0n1p2"),
         root_fstype: "btrfs".into(),
         root_subvol: Some("/@".into()),
@@ -434,7 +434,7 @@ fn limine_verify_records_limine_list() {
 #[test]
 fn limine_verify_fails_when_limine_list_exits_nonzero() {
     use std::path::PathBuf;
-    let target = Box::leak(Box::new(TargetIdentity {
+    let target = Box::leak(Box::new(MountTargetIdentity {
         root_device: PathBuf::from("/dev/nvme0n1p2"),
         root_fstype: "btrfs".into(),
         root_subvol: Some("/@".into()),
@@ -465,7 +465,7 @@ fn limine_verify_fails_when_limine_list_exits_nonzero() {
 
 fn grub_ctx() -> ProviderCtx<'static> {
     use std::path::PathBuf;
-    let target = Box::leak(Box::new(TargetIdentity {
+    let target = Box::leak(Box::new(MountTargetIdentity {
         root_device: PathBuf::from("/dev/sda2"),
         root_fstype: "btrfs".into(),
         root_subvol: Some("/@".into()),
@@ -595,7 +595,7 @@ fn firmware_verify_uses_force_and_verify_flags() {
 
 fn grub_ctx_provider(provider: ProviderId) -> ProviderCtx<'static> {
     use std::path::PathBuf;
-    let target = Box::leak(Box::new(TargetIdentity {
+    let target = Box::leak(Box::new(MountTargetIdentity {
         root_device: PathBuf::from("/dev/nvme0n1p2"),
         root_fstype: "btrfs".into(),
         root_subvol: Some("/@".into()),
@@ -816,7 +816,7 @@ impl AllowedBinariesLookup for () {
 #[test]
 fn systemd_boot_runs_kernel_install_for_each_discovered_kernel() {
     use std::path::PathBuf;
-    let target = Box::leak(Box::new(TargetIdentity {
+    let target = Box::leak(Box::new(MountTargetIdentity {
         root_device: PathBuf::from("/dev/nvme0n1p2"),
         root_fstype: "btrfs".into(),
         root_subvol: Some("/@".into()),
@@ -867,7 +867,7 @@ fn systemd_boot_runs_kernel_install_for_each_discovered_kernel() {
 #[test]
 fn systemd_boot_execute_stops_on_first_kernel_install_failure() {
     use std::path::PathBuf;
-    let target = Box::leak(Box::new(TargetIdentity {
+    let target = Box::leak(Box::new(MountTargetIdentity {
         root_device: PathBuf::from("/dev/nvme0n1p2"),
         root_fstype: "btrfs".into(),
         root_subvol: Some("/@".into()),

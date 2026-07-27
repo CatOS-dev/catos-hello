@@ -5,6 +5,9 @@
 
 use std::path::Path;
 
+use crate::mount::model::CleanupReport;
+use crate::mount::session::cleanup::MountSessionError;
+use crate::mount::session::BtrfsTopLevelRwSession;
 use crate::shared::cli::RecoveryArgs;
 use crate::shared::model::recovery::{
     BtrfsFilesystemIdentity, CleanupSummary, RecoveryError, RecoveryErrorKind, TransactionRecord,
@@ -19,8 +22,41 @@ use crate::shared::snapshot_engine::store;
 
 use super::probe::probe_existing_transaction_readonly;
 use super::probe::probe_target_readonly;
-use super::session::RecoveryRwSession;
 use super::{ensure_cli_root_matches_plan, require_root, require_transaction_id};
+
+// Bridge the `mount` capability's session error/cleanup taxonomy into
+// the recovery domain. These live here (in the recovery application
+// layer) because the `mount` capability is forbidden from depending
+// on the recovery-domain model; the consumer owns the adaptation.
+impl From<MountSessionError> for RecoveryError {
+    fn from(error: MountSessionError) -> Self {
+        RecoveryError::new(
+            RecoveryErrorKind::SyscallFailed,
+            format!(
+                "btrfs top-level rw session: {} (kind={:?})",
+                error.message, error.kind
+            ),
+        )
+    }
+}
+
+impl From<CleanupReport> for CleanupSummary {
+    fn from(report: CleanupReport) -> Self {
+        CleanupSummary {
+            unmounted: report
+                .unmounted
+                .iter()
+                .map(|resource| resource.target.display().to_string())
+                .collect(),
+            residual: report
+                .residual
+                .iter()
+                .map(|residual| residual.resource.target.display().to_string())
+                .collect(),
+            all_clean: report.all_clean,
+        }
+    }
+}
 
 // ---------------------------------------------------------------------------
 // apply
@@ -104,7 +140,7 @@ pub(super) fn run_apply(
     ensure_target_is_not_running_root(&fresh.filesystem, &fresh.current_root)?;
     let device = fresh.canonical_device;
 
-    let mut mount_session = RecoveryRwSession::mount(&device)?;
+    let mut mount_session = BtrfsTopLevelRwSession::mount(&device)?;
     let top_level_mount = mount_session.top_level_mount().to_path_buf();
     let rw_target = validate_mounted_filesystem(&top_level_mount, &device)?;
     let validated_filesystem = rw_target.filesystem.clone();
@@ -131,12 +167,12 @@ pub(super) fn run_apply(
     let (mut engine, final_state) = match drive_outcome {
         Ok(pair) => pair,
         Err(mut error) => {
-            let cleanup_summary = mount_session.cleanup();
+            let cleanup_summary = mount_session.cleanup().into();
             engine_attach_cleanup_into_error(&mut error, cleanup_summary);
             return Err(error);
         }
     };
-    let real_cleanup = mount_session.cleanup();
+    let real_cleanup: CleanupSummary = mount_session.cleanup().into();
     // Keep the in-memory record consistent with the renderer output.
     engine.record_mut().last_cleanup = Some(real_cleanup.clone());
     let transaction_id = engine.record().transaction_id.clone();
@@ -174,11 +210,11 @@ pub(super) fn run_resume(
         true,
     )?;
     let device = probe.canonical_device;
-    let mut mount_session = RecoveryRwSession::mount(&device)?;
+    let mut mount_session = BtrfsTopLevelRwSession::mount(&device)?;
     let top_level_mount = mount_session.top_level_mount().to_path_buf();
     let target = validate_mounted_filesystem(&top_level_mount, &device)?;
     if target.filesystem != probe.filesystem {
-        let cleanup = mount_session.cleanup();
+        let cleanup = mount_session.cleanup().into();
         let mut error = RecoveryError::new(
             RecoveryErrorKind::TargetChanged,
             "target filesystem identity changed between read-only preflight and write mount",
@@ -205,12 +241,12 @@ pub(super) fn run_resume(
     let (mut engine, final_state) = match drive_outcome {
         Ok(pair) => pair,
         Err(mut error) => {
-            let cleanup_summary = mount_session.cleanup();
+            let cleanup_summary = mount_session.cleanup().into();
             engine_attach_cleanup_into_error(&mut error, cleanup_summary);
             return Err(error);
         }
     };
-    let real_cleanup = mount_session.cleanup();
+    let real_cleanup: CleanupSummary = mount_session.cleanup().into();
     engine.record_mut().last_cleanup = Some(real_cleanup.clone());
     let transaction_id = engine.record().transaction_id.clone();
     let returned_record = engine.record().clone();
@@ -253,11 +289,11 @@ pub(super) fn run_revert(
         true,
     )?;
     let device = probe.canonical_device;
-    let mut mount_session = RecoveryRwSession::mount(&device)?;
+    let mut mount_session = BtrfsTopLevelRwSession::mount(&device)?;
     let top_level_mount = mount_session.top_level_mount().to_path_buf();
     let target = validate_mounted_filesystem(&top_level_mount, &device)?;
     if target.filesystem != probe.filesystem {
-        let cleanup = mount_session.cleanup();
+        let cleanup = mount_session.cleanup().into();
         let mut error = RecoveryError::new(
             RecoveryErrorKind::TargetChanged,
             "target filesystem identity changed between read-only preflight and write mount",
@@ -285,12 +321,12 @@ pub(super) fn run_revert(
     let (mut engine, final_state) = match revert_outcome {
         Ok(pair) => pair,
         Err(mut error) => {
-            let cleanup_summary = mount_session.cleanup();
+            let cleanup_summary = mount_session.cleanup().into();
             engine_attach_cleanup_into_error(&mut error, cleanup_summary);
             return Err(error);
         }
     };
-    let real_cleanup = mount_session.cleanup();
+    let real_cleanup: CleanupSummary = mount_session.cleanup().into();
     engine.record_mut().last_cleanup = Some(real_cleanup.clone());
     let transaction_id = engine.record().transaction_id.clone();
     let returned_record = engine.record().clone();
@@ -327,7 +363,7 @@ fn persist_real_cleanup_after_teardown(
     validated_filesystem: &BtrfsFilesystemIdentity,
     real_cleanup: CleanupSummary,
 ) -> Result<(), RecoveryError> {
-    let mut session = RecoveryRwSession::mount(device)?;
+    let mut session = BtrfsTopLevelRwSession::mount(device)?;
     let top_level_mount = session.top_level_mount().to_path_buf();
     let persist_outcome = (|| {
         let mut engine = Engine::load_for_write(
@@ -340,7 +376,7 @@ fn persist_real_cleanup_after_teardown(
         )?;
         engine.attach_cleanup(real_cleanup)
     })();
-    let session_cleanup = session.cleanup();
+    let session_cleanup = session.cleanup().into();
     finish_cleanup_persistence(persist_outcome, session_cleanup)
 }
 
