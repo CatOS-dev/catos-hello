@@ -12,6 +12,25 @@ use crate::target::Evidence;
 use super::{push_evidence, push_issue, set_section};
 use crate::doctor::DoctorTargetContext;
 
+#[derive(Debug, Clone)]
+struct RecoveryRecordView {
+    transaction_id: String,
+    state: crate::snapshot::model::TransactionState,
+    last_error: Option<crate::snapshot::model::SnapshotError>,
+    last_cleanup: Option<crate::snapshot::model::CleanupSummary>,
+}
+
+impl RecoveryRecordView {
+    fn from_record(record: &TransactionRecord) -> Self {
+        Self {
+            transaction_id: record.transaction_id.clone(),
+            state: record.state,
+            last_error: record.last_error.clone(),
+            last_cleanup: record.last_cleanup.clone(),
+        }
+    }
+}
+
 pub(in crate::doctor) fn run_recovery_section(
     sections: &mut [(DoctorSectionId, DoctorSection)],
     context: Option<&DoctorTargetContext>,
@@ -84,8 +103,14 @@ fn run_recovery_for_target(
 
     let mut section_status = DoctorSectionStatus::Healthy;
     for (_, record) in &records {
-        let mut engine = match crate::snapshot::execute::engine::Engine::load(options.clone(), &record.transaction_id) {
-            Ok(engine) => engine,
+        let reconciled = load_and_reconcile_record(&record.transaction_id, || {
+            let mut engine = crate::snapshot::execute::engine::Engine::load(options.clone(), &record.transaction_id)
+                .map_err(|error| error.to_string())?;
+            engine.reconcile_status();
+            Ok(RecoveryRecordView::from_record(engine.record()))
+        });
+        let reconciled = match reconciled {
+            Ok(record) => record,
             Err(error) => {
                 section_status = DoctorSectionStatus::Unknown;
                 report.limitations.push(DoctorLimitation::new(id, "RECOVERY_RECONCILE_FAILED", format!("cannot load {} read-only: {error}", record.transaction_id)));
@@ -93,18 +118,28 @@ fn run_recovery_for_target(
                 continue;
             }
         };
-        engine.reconcile_status();
-        inspect_single_record(sections, report, id, engine.record(), &mut section_status);
+        inspect_single_record(sections, report, id, &reconciled, &mut section_status);
     }
     set_section(sections, id, section_status);
     Ok(())
+}
+
+fn load_and_reconcile_record<F>(transaction_id: &str, load: F) -> Result<RecoveryRecordView, String>
+where
+    F: FnOnce() -> Result<RecoveryRecordView, String>,
+{
+    let record = load()?;
+    if record.transaction_id != transaction_id {
+        return Err(format!("reconciled record id {} does not match requested {transaction_id}", record.transaction_id));
+    }
+    Ok(record)
 }
 
 fn inspect_single_record(
     sections: &mut [(DoctorSectionId, DoctorSection)],
     report: &mut DoctorReport,
     id: DoctorSectionId,
-    record: &TransactionRecord,
+    record: &RecoveryRecordView,
     section_status: &mut DoctorSectionStatus,
 ) {
     push_evidence(
@@ -260,5 +295,46 @@ mod tests {
         assert!(recovery.1.issues.iter().any(|issue| issue.code == "RECOVERY_RECORD_UNREADABLE"));
         assert!(report.limitations.iter().any(|limitation| limitation.code == "RECOVERY_INSPECT_FAILED"));
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn reporting_consumes_reconciled_terminal_record_not_persisted_nonterminal_record() {
+        use std::cell::Cell;
+        let loads = Cell::new(0);
+        let writes = Cell::new(0);
+        let persisted = RecoveryRecordView {
+            transaction_id: "tx-reconcile".into(),
+            state: crate::snapshot::model::TransactionState::Locked,
+            last_error: None,
+            last_cleanup: None,
+        };
+        let reconciled = load_and_reconcile_record("tx-reconcile", || {
+            loads.set(loads.get() + 1);
+            assert!(!persisted.state.is_terminal());
+            Ok(RecoveryRecordView {
+                state: crate::snapshot::model::TransactionState::Completed,
+                ..persisted.clone()
+            })
+        })
+        .expect("reconcile fake must return a record");
+        let mut sections: Vec<(DoctorSectionId, DoctorSection)> = DoctorSectionId::all()
+            .iter()
+            .map(|id| (*id, DoctorSection::new(*id, DoctorSectionStatus::Unknown)))
+            .collect();
+        let mut report = DoctorReport::default();
+        let mut status = DoctorSectionStatus::Healthy;
+        inspect_single_record(
+            &mut sections,
+            &mut report,
+            DoctorSectionId::Recovery,
+            &reconciled,
+            &mut status,
+        );
+
+        assert_eq!(loads.get(), 1);
+        assert_eq!(writes.get(), 0);
+        let recovery = sections.iter().find(|(id, _)| *id == DoctorSectionId::Recovery).unwrap();
+        assert!(!recovery.1.issues.iter().any(|issue| issue.code == issue_code::RECOVERY_TRANSACTION_INTERRUPTED));
+        assert!(recovery.1.issues.iter().any(|issue| issue.code == issue_code::RECOVERY_BACKUP_PRESENT));
     }
 }
