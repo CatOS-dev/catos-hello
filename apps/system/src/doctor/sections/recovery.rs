@@ -1,8 +1,6 @@
 //! Recovery transaction section: enumerate and assess in-flight
 //! snapshot recovery transactions on the target.
 
-use std::path::{Path, PathBuf};
-
 use crate::doctor::model::{
     issue_code, recommendation_code, DoctorIssue, DoctorLimitation, DoctorRecommendation,
     DoctorReport, DoctorSection, DoctorSectionId, DoctorSectionStatus, DoctorSeverity,
@@ -29,16 +27,23 @@ pub(in crate::doctor) fn run_recovery_section(
         ));
         return Ok(());
     }
-    let device = match target.root_device.as_deref().and_then(Path::to_str) {
-        Some(s) => s.to_string(),
-        None => {
-            set_section(sections, id, DoctorSectionStatus::Unknown);
-            return Ok(());
+    let transaction_dir = target.root.join(".catos-recovery/transactions");
+    let (records, errors) = store::list_records(&transaction_dir);
+    if !errors.is_empty() {
+        let section = set_section(sections, id, DoctorSectionStatus::Unknown);
+        for error in errors {
+            let message = format!("cannot inspect recovery transactions at {}: {error}", transaction_dir.display());
+            report.limitations.push(DoctorLimitation::new(id, "RECOVERY_INSPECT_FAILED", message.clone()));
+            section.issues.push(DoctorIssue::new(
+                "RECOVERY_RECORD_UNREADABLE",
+                DoctorSeverity::Warning,
+                id,
+                message,
+            ));
         }
-    };
-
-    let records = match enumerate_recovery_records(&device) {
-        Ok(records) if records.is_empty() => {
+        return Ok(());
+    }
+    if records.is_empty() {
             set_section(sections, id, DoctorSectionStatus::Healthy);
             push_evidence(
                 sections,
@@ -50,21 +55,10 @@ pub(in crate::doctor) fn run_recovery_section(
                 ),
             );
             return Ok(());
-        }
-        Ok(records) => records,
-        Err(message) => {
-            set_section(sections, id, DoctorSectionStatus::Unknown);
-            report.limitations.push(DoctorLimitation::new(
-                id,
-                "RECOVERY_INSPECT_FAILED",
-                format!("could not enumerate recovery records: {message}"),
-            ));
-            return Ok(());
-        }
-    };
+    }
 
     let mut section_status = DoctorSectionStatus::Healthy;
-    for record in &records {
+    for (_, record) in &records {
         inspect_single_record(sections, report, id, record, &mut section_status);
     }
     set_section(sections, id, section_status);
@@ -192,62 +186,4 @@ fn worse_of(current: DoctorSectionStatus, candidate: DoctorSectionStatus) -> Doc
     } else {
         current
     }
-}
-
-fn enumerate_recovery_records(device: &str) -> Result<Vec<TransactionRecord>, String> {
-    let mount_session = mount_btrfs_top_level_ro(device)?;
-    let top_level = match mount_session {
-        Some(path) => path,
-        None => return Ok(Vec::new()),
-    };
-
-    let state_dir = top_level.join(".catos-recovery");
-    let names = match std::fs::read_dir(&state_dir) {
-        Ok(rd) => rd
-            .flatten()
-            .map(|e| e.file_name().to_string_lossy().into_owned())
-            .filter(|n| n.ends_with(".state.json"))
-            .collect::<Vec<_>>(),
-        Err(_) => return Ok(Vec::new()),
-    };
-
-    let mut records = Vec::new();
-    for name in names {
-        let path = state_dir.join(&name);
-        match store::load_record(&path) {
-            Ok(record) => records.push(record),
-            Err(_) => continue,
-        }
-    }
-    Ok(records)
-}
-
-fn mount_btrfs_top_level_ro(device: &str) -> Result<Option<PathBuf>, String> {
-    use crate::mount::execute::namespace::establish_private_namespace;
-    use crate::mount::execute::secure_dir::{create_session_dir, SESSION_ROOT_PARENT};
-    use crate::mount::execute::syscall::{self, ms_flags};
-
-    if establish_private_namespace().is_err() {
-        return Ok(None);
-    }
-    let session_dir = create_session_dir(Path::new(SESSION_ROOT_PARENT), "doctor-recovery-ro")
-        .map_err(|e| format!("cannot create session dir: {e}"))?;
-    let mount_root = session_dir.join("top");
-    std::fs::create_dir(&mount_root).map_err(|e| format!("cannot mkdir: {e}"))?;
-    let result = syscall::mount(
-        Some(device),
-        &mount_root,
-        Some("btrfs"),
-        ms_flags::MS_RDONLY | ms_flags::MS_NOSUID | ms_flags::MS_NODEV,
-        Some("subvolid=0,ro"),
-    );
-    if let Err(e) = result {
-        let _ = syscall::umount2(&mount_root, 0);
-        let _ = crate::mount::execute::secure_dir::remove_session_dir(
-            Path::new(SESSION_ROOT_PARENT),
-            &session_dir,
-        );
-        return Err(format!("cannot mount btrfs top-level RO: {e}"));
-    }
-    Ok(Some(mount_root))
 }

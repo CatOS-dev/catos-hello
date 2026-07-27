@@ -110,7 +110,7 @@ fn run_sections<R: FsCommandRunner + ?Sized>(
         .collect();
 
     let _ = sections::run_environment_section(&mut sections, env);
-    let _ = sections::run_storage_section(&mut sections, target);
+    let _ = sections::run_storage_section(&mut sections, target, report);
     let _ = sections::run_filesystem_section(runner, &mut sections, target, report);
     let _ = sections::run_mount_section(&mut sections, target, report);
     let _ = sections::run_boot_section(&mut sections, target, report);

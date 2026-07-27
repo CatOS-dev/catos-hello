@@ -55,9 +55,9 @@ pub(in crate::doctor) fn push_evidence(
 }
 
 pub(in crate::doctor) fn target_root_path(
-    _target: &crate::target::model::TargetIdentity,
+    target: &crate::target::model::TargetIdentity,
 ) -> PathBuf {
-    PathBuf::from("/")
+    target.root.clone()
 }
 
 pub(in crate::doctor) fn read_target_file(root: &Path, relative: &str) -> Option<String> {
@@ -83,4 +83,24 @@ pub(in crate::doctor) fn is_device_mounted_rw(device: &Path) -> bool {
     mounts
         .iter()
         .any(|m| m.source == dev_str && !m.super_options.iter().any(|o| o == "ro"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::target_root_path;
+    use crate::target::model::TargetIdentity;
+    use std::path::PathBuf;
+
+    #[test]
+    fn selected_session_root_is_not_replaced_by_live_root() {
+        let target = TargetIdentity {
+            root: PathBuf::from("/run/catos-target-session/root"),
+            ..TargetIdentity::default()
+        };
+
+        assert_eq!(
+            target_root_path(&target),
+            PathBuf::from("/run/catos-target-session/root")
+        );
+    }
 }
