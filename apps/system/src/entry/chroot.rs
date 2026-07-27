@@ -49,27 +49,46 @@ pub fn run(argv: &[String]) -> i32 {
         return exit_code::PROBE_FAILED;
     }
 
-    let mut devices = target_inventory_for_chroot();
+    let devices = target_inventory_for_chroot();
     if devices.is_empty() {
             eprintln!("catos-chroot: no usable block devices found");
             return exit_code::PROBE_FAILED;
     }
 
-    let selected_target = match crate::selection_ui::select_target(
-        &crate::target::discovery::discover_targets(),
-        "catos-chroot",
-    ) {
+    let discovery = crate::target::discovery::discover_targets();
+    let mut opened_luks: Option<OpenedLuks> = None;
+    let selected_target = match crate::selection_ui::select_target(&discovery, "catos-chroot") {
         crate::selection_ui::Selection::Selected(candidate) => candidate,
         crate::selection_ui::Selection::Declined => {
             eprintln!("catos-chroot: target selection declined");
             return exit_code::ARG_ERROR;
         }
-        crate::selection_ui::Selection::Unavailable(reason) => {
-            eprintln!("catos-chroot: {reason}");
-            return exit_code::PROBE_FAILED;
+        crate::selection_ui::Selection::Unavailable(reason) if discovery.candidates.is_empty() => {
+            let encrypted = match crate::selection_ui::select_luks_device(&crate::target::discovery::discover_inventory(), "catos-chroot") {
+                Ok(Some(device)) => device,
+                Ok(None) => { eprintln!("catos-chroot: {reason}"); return exit_code::PROBE_FAILED; }
+                Err(error) => { eprintln!("catos-chroot: {error}"); return exit_code::PROBE_FAILED; }
+            };
+            let Some(luks_device) = target_block_to_chroot(&encrypted) else {
+                eprintln!("catos-chroot: encrypted inventory device has no path");
+                return exit_code::PROBE_FAILED;
+            };
+            let opened = match open_luks(&luks_device, authorization) {
+                Ok(opened) => opened,
+                Err(error) => { eprintln!("catos-chroot: {error}"); return exit_code::PROBE_FAILED; }
+            };
+            let rediscovered = crate::target::discovery::discover_targets();
+            let selected = match crate::selection_ui::select_target(&rediscovered, "catos-chroot") {
+                crate::selection_ui::Selection::Selected(candidate) => candidate,
+                crate::selection_ui::Selection::Declined => { eprintln!("catos-chroot: target selection declined"); return exit_code::ARG_ERROR; }
+                crate::selection_ui::Selection::Unavailable(error) => { eprintln!("catos-chroot: unlocked mapper did not yield a CatOS candidate: {error}"); return exit_code::PROBE_FAILED; }
+            };
+            opened_luks = Some(opened);
+            selected
         }
+        crate::selection_ui::Selection::Unavailable(reason) => { eprintln!("catos-chroot: {reason}"); return exit_code::PROBE_FAILED; }
     };
-    let mut root_device = match devices.iter().find(|device| {
+    let root_device = match devices.iter().find(|device| {
         std::path::Path::new(&device.name) == selected_target.root_device
             || format!("/dev/{}", device.name) == selected_target.root_device.display().to_string()
     }) {
@@ -79,33 +98,6 @@ pub fn run(argv: &[String]) -> i32 {
             return exit_code::PROBE_FAILED;
         }
     };
-
-    let mut opened_luks: Option<OpenedLuks> = None;
-    if root_device.is_crypto_luks() {
-        let opened = match open_luks(&root_device, authorization) {
-            Ok(opened) => opened,
-            Err(message) => {
-                eprintln!("catos-chroot: {message}");
-                return exit_code::PROBE_FAILED;
-            }
-        };
-        let mapper = opened.mapper_path().to_path_buf();
-        devices = target_inventory_for_chroot();
-        root_device = match devices
-            .iter()
-            .find(|device| device.name == mapper.to_string_lossy())
-        {
-            Some(device) => device.clone(),
-            None => {
-                eprintln!(
-                    "catos-chroot: unlocked mapper {} was not reported by lsblk",
-                    mapper.display()
-                );
-                return exit_code::PROBE_FAILED;
-            }
-        };
-        opened_luks = Some(opened);
-    }
 
     let selected_subvolume = if root_device.is_btrfs() {
         let subvolumes = match list_subvolumes(&root_device, options.show_btrfs_dot_snapshots) {
@@ -205,6 +197,13 @@ fn target_inventory_for_chroot() -> Vec<BlockDevice> {
             partlabel: device.part_label,
         }))
         .collect()
+}
+
+fn target_block_to_chroot(device: &crate::target::model::BlockDevice) -> Option<BlockDevice> {
+    Some(BlockDevice {
+        name: device.dev_path.as_ref()?.display().to_string(), fs_type: device.filesystem.clone(), uuid: device.uuid.clone(),
+        partuuid: device.part_uuid.clone(), label: device.label.clone(), partlabel: device.part_label.clone(),
+    })
 }
 
 pub fn print_help() {
