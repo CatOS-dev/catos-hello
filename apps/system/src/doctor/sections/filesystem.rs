@@ -75,12 +75,14 @@ pub(in crate::doctor) fn run_environment_section(
 pub(in crate::doctor) fn run_storage_section(
     sections: &mut [(DoctorSectionId, DoctorSection)],
     target: &TargetIdentity,
+    report: &mut DoctorReport,
 ) -> Result<(), ()> {
-    let section = set_section(
-        sections,
-        DoctorSectionId::Storage,
-        DoctorSectionStatus::Healthy,
-    );
+    let id = DoctorSectionId::Storage;
+    let complete = target.root_device.is_some()
+        && target.root_fstype.is_some()
+        && target.root_uuid.is_some()
+        && (target.root_fstype.as_deref() != Some("btrfs") || target.root_subvol.is_some());
+    let section = set_section(sections, id, if complete { DoctorSectionStatus::Healthy } else { DoctorSectionStatus::Unknown });
     section.evidence.push(Evidence::new(
         "ROOT_DEVICE",
         "doctor::storage",
@@ -93,9 +95,35 @@ pub(in crate::doctor) fn run_storage_section(
                 .unwrap_or_else(|| "<unknown>".to_string())
         ),
     ));
-    // ESP device is not discovered by the minimal `target::plan` path;
-    // surfacing it here is an open design point for a later phase that
-    // wires the section through its own ESP-detection capability.
+    section.evidence.push(Evidence::new(
+        "ROOT_FILESYSTEM",
+        "doctor::storage",
+        format!("root filesystem: {}", target.root_fstype.as_deref().unwrap_or("<unknown>")),
+    ));
+    section.evidence.push(Evidence::new(
+        "ROOT_UUID",
+        "doctor::storage",
+        format!("root UUID: {}", target.root_uuid.as_deref().unwrap_or("<unknown>")),
+    ));
+    section.evidence.push(Evidence::new(
+        "ROOT_SUBVOLUME",
+        "doctor::storage",
+        format!("root subvolume: {}", target.root_subvol.as_deref().unwrap_or("<unknown>")),
+    ));
+    if !complete {
+        report.limitations.push(DoctorLimitation::new(
+            id,
+            "STORAGE_FACTS_INCOMPLETE",
+            "selected target lacks required root identity fields; ESP and boot-device facts were not inferred",
+        ));
+    } else {
+        report.limitations.push(DoctorLimitation::new(
+            id,
+            "ESP_FACTS_INCOMPLETE",
+            "selected readonly root session does not include a separately mounted ESP; ESP device and UUID remain unknown",
+        ));
+        set_section(sections, id, DoctorSectionStatus::Unknown);
+    }
     Ok(())
 }
 
@@ -106,7 +134,18 @@ pub(in crate::doctor) fn run_filesystem_section<R: FsCommandRunner + ?Sized>(
     report: &mut DoctorReport,
 ) -> Result<(), ()> {
     let id = DoctorSectionId::Filesystem;
-    let fstype = target.root_fstype.as_deref().unwrap_or("");
+    let fstype = match target.root_fstype.as_deref() {
+        Some(fstype) => fstype,
+        None => {
+            set_section(sections, id, DoctorSectionStatus::Unknown);
+            report.limitations.push(DoctorLimitation::new(
+                id,
+                "ROOT_FILESYSTEM_UNKNOWN",
+                "selected target has no root filesystem type; read-only check was not attempted",
+            ));
+            return Ok(());
+        }
+    };
     let device = match target.root_device.as_deref().and_then(Path::to_str) {
         Some(s) => s.to_string(),
         None => {

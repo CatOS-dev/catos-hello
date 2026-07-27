@@ -7,7 +7,6 @@ use crate::doctor::model::{
     issue_code, recommendation_code, DoctorIssue, DoctorLimitation, DoctorRecommendation,
     DoctorReport, DoctorSection, DoctorSectionId, DoctorSectionStatus, DoctorSeverity,
 };
-use crate::mount::model::MountTargetIdentity as RepairTargetIdentity;
 use crate::target::model::TargetIdentity;
 use crate::target::Evidence;
 
@@ -19,9 +18,38 @@ pub(in crate::doctor) fn run_boot_section(
     report: &mut DoctorReport,
 ) -> Result<(), ()> {
     let id = DoctorSectionId::Boot;
-    let inputs = collect_detection_inputs(target);
+    let inputs = match collect_detection_inputs(target) {
+        Ok(inputs) => inputs,
+        Err(message) => {
+            set_section(sections, id, DoctorSectionStatus::Unknown);
+            report.limitations.push(DoctorLimitation::new(id, "BOOT_FACTS_INCOMPLETE", message));
+            return Ok(());
+        }
+    };
     push_boot_evidence(sections, id, &inputs);
-    let repair_target = repair_identity_from(target);
+    let repair_target = crate::mount::model::MountTargetIdentity {
+        root_device: match target.root_device.clone() {
+            Some(device) => device,
+            None => {
+                set_section(sections, id, DoctorSectionStatus::Unknown);
+                report.limitations.push(DoctorLimitation::new(id, "BOOT_FACTS_INCOMPLETE", "selected target has no root device"));
+                return Ok(());
+            }
+        },
+        root_fstype: match target.root_fstype.clone() {
+            Some(fstype) => fstype,
+            None => {
+                set_section(sections, id, DoctorSectionStatus::Unknown);
+                report.limitations.push(DoctorLimitation::new(id, "BOOT_FACTS_INCOMPLETE", "selected target has no root filesystem type"));
+                return Ok(());
+            }
+        },
+        root_subvol: target.root_subvol.clone(),
+        root_uuid: target.root_uuid.clone(),
+        esp_device: None,
+        esp_uuid: None,
+        boot_layout: None,
+    };
     let verdict = detect(&inputs, &repair_target);
     match verdict {
         DetectionVerdict::Detected {
@@ -101,21 +129,12 @@ pub(in crate::doctor) fn run_boot_section(
     Ok(())
 }
 
-fn repair_identity_from(target: &TargetIdentity) -> RepairTargetIdentity {
-    RepairTargetIdentity {
-        root_device: target.root_device.clone().unwrap_or_default(),
-        root_fstype: target.root_fstype.clone().unwrap_or_default(),
-        root_subvol: target.root_subvol.clone(),
-        root_uuid: target.root_uuid.clone(),
-        esp_device: None,
-        esp_uuid: None,
-        boot_layout: None,
-    }
-}
-
-fn collect_detection_inputs(target: &TargetIdentity) -> DetectionInputs {
+fn collect_detection_inputs(target: &TargetIdentity) -> Result<DetectionInputs, String> {
     let root = target_root_path(target);
-    DetectionInputs {
+    if target_has_separate_esp(&root)? {
+        return Err("target ESP is a separate filesystem and is not mounted in Doctor's selected readonly root session".to_string());
+    }
+    Ok(DetectionInputs {
         grub_defaults_catos: read_target_file(&root, "etc/default/grub.d/00-catos.cfg"),
         limine_defaults: read_target_file(&root, "etc/default/limine"),
         kernel_install_catos: read_target_file(
@@ -125,12 +144,36 @@ fn collect_detection_inputs(target: &TargetIdentity) -> DetectionInputs {
         firmware_boot_conf: read_target_file(&root, "etc/catos/firmware-boot.conf"),
         kernel_cmdline: read_target_file(&root, "etc/kernel/cmdline"),
         has_boot_grub: has_target_path(&root, "boot/grub"),
-        has_esp_limine_conf: false,
-        has_systemd_boot_loader: false,
-        has_catos_uki_deployed: false,
-        has_efistub_deployed: false,
-        installed_packages: Vec::new(),
-    }
+        has_esp_limine_conf: target_path_exists(&root, "boot/efi/limine.conf") || target_path_exists(&root, "efi/limine.conf"),
+        has_systemd_boot_loader: target_path_exists(&root, "boot/efi/loader/loader.conf") || target_path_exists(&root, "efi/loader/loader.conf"),
+        has_catos_uki_deployed: target_path_exists(&root, "boot/efi/EFI/CatOS") || target_path_exists(&root, "efi/EFI/CatOS"),
+        has_efistub_deployed: target_path_exists(&root, "boot/efi/EFI/CatOS") || target_path_exists(&root, "efi/EFI/CatOS"),
+        installed_packages: installed_packages(&root)?,
+    })
+}
+
+fn target_has_separate_esp(root: &Path) -> Result<bool, String> {
+    let fstab = std::fs::read_to_string(root.join("etc/fstab"))
+        .map_err(|error| format!("cannot read target fstab for ESP layout: {error}"))?;
+    Ok(crate::target::fstab::parse_all(&fstab).iter().any(|entry| {
+        matches!(entry.target.as_str(), "/efi" | "/boot/efi")
+    }))
+}
+
+fn target_path_exists(root: &Path, relative: &str) -> bool {
+    std::fs::symlink_metadata(root.join(relative)).is_ok()
+}
+
+fn installed_packages(root: &Path) -> Result<Vec<String>, String> {
+    let db = root.join("var/lib/pacman/local");
+    let entries = std::fs::read_dir(&db)
+        .map_err(|error| format!("cannot read target package database {}: {error}", db.display()))?;
+    let mut packages: Vec<String> = entries
+        .filter_map(Result::ok)
+        .filter_map(|entry| entry.file_name().to_str().map(str::to_string))
+        .collect();
+    packages.sort();
+    Ok(packages)
 }
 
 fn inspect_provider_assets(
@@ -219,22 +262,26 @@ pub(in crate::doctor) fn run_secure_boot_section(
         ),
     );
 
-    // boot_layout (and therefore the ESP mount-point signal it carries)
-    // is not discovered on the minimal `target::plan` path. Until a
-    // later phase wires this section through its own layout-detection
-    // capability, treat ESP as absent here.
-    let esp_present = false;
-    if !esp_present && firmware_sb_on.is_none() && firmware_boot_conf.is_none() {
-        set_section(sections, id, DoctorSectionStatus::NotApplicable);
+    if firmware_sb_on.is_none() {
+        set_section(sections, id, DoctorSectionStatus::Unknown);
         report.limitations.push(DoctorLimitation::new(
             id,
-            "SECURE_BOOT_NOT_APPLICABLE",
-            "target appears to be a BIOS layout; Secure Boot is not applicable",
+            "FIRMWARE_SECURE_BOOT_UNAVAILABLE",
+            "current-machine firmware state is unavailable and cannot be inferred from an offline target",
+        ));
+        return Ok(());
+    }
+    if firmware_boot_conf.is_none() {
+        set_section(sections, id, DoctorSectionStatus::Unknown);
+        report.limitations.push(DoctorLimitation::new(
+            id,
+            "SECURE_BOOT_POLICY_INCOMPLETE",
+            "target Secure Boot policy configuration is unavailable; absence is not treated as disabled",
         ));
         return Ok(());
     }
 
-    let policy_inconsistent = target_marker != firmware_sb_on.unwrap_or(false)
+    let policy_inconsistent = target_marker != firmware_sb_on.expect("checked firmware Secure Boot state")
         || (target_marker && firmware_boot_conf.is_none());
     if policy_inconsistent {
         let section = set_section(sections, id, DoctorSectionStatus::Unhealthy);

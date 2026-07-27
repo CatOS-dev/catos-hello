@@ -1,12 +1,13 @@
 //! Mount layout section: fstab validation, subvolume/mount-point checks.
 
 use std::path::Path;
+use std::time::Duration;
 
 use crate::doctor::model::{
     issue_code, recommendation_code, DoctorIssue, DoctorRecommendation, DoctorReport,
     DoctorSection, DoctorSectionId, DoctorSectionStatus, DoctorSeverity,
 };
-use crate::mount::diagnose::subvolume::{CatosConfirmation, SubvolFacts};
+use crate::mount::diagnose::subvolume::{CatosConfirmation, SubvolFacts, SubvolObservation};
 use crate::mount::diagnose::target::{
     diagnose as mount_diagnose, MountPointObservation, MountRepairInputs,
 };
@@ -22,7 +23,18 @@ pub(in crate::doctor) fn run_mount_section(
     report: &mut DoctorReport,
 ) -> Result<(), ()> {
     let id = DoctorSectionId::Mount;
-    let inputs = build_mount_inputs(target);
+    let inputs = match build_mount_inputs(target) {
+        Ok(inputs) => inputs,
+        Err(message) => {
+            set_section(sections, id, DoctorSectionStatus::Unknown);
+            report.limitations.push(crate::doctor::model::DoctorLimitation::new(
+                id,
+                "MOUNT_FACTS_INCOMPLETE",
+                message,
+            ));
+            return Ok(());
+        }
+    };
     let problems = mount_diagnose(&inputs);
     push_mount_evidence(sections, id, target);
 
@@ -62,43 +74,73 @@ pub(in crate::doctor) fn run_mount_section(
     Ok(())
 }
 
-fn build_mount_inputs(target: &TargetIdentity) -> MountRepairInputs {
-    let fstab_text = read_target_fstab(target).unwrap_or_default();
+fn build_mount_inputs(target: &TargetIdentity) -> Result<MountRepairInputs, String> {
+    let fstab_text = read_target_fstab(target)?;
+    let root_device = target.root_device.clone().ok_or_else(|| "selected target has no root device".to_string())?;
+    let root_fstype = target.root_fstype.clone().ok_or_else(|| "selected target has no root filesystem type".to_string())?;
     let catos_confirmation = if target.root_fstype.as_deref() == Some("btrfs") {
         CatosConfirmation::Confirmed
     } else {
         CatosConfirmation::NotConfirmed
     };
-    MountRepairInputs {
+    let subvol_facts = if root_fstype == "btrfs" {
+        collect_subvolume_facts(&target.root)?
+    } else {
+        SubvolFacts::default()
+    };
+    Ok(MountRepairInputs {
         fstab_text,
-        target: repair_identity_from(target),
+        target: RepairTargetIdentity {
+            root_device,
+            root_fstype,
+            root_subvol: target.root_subvol.clone(),
+            root_uuid: target.root_uuid.clone(),
+            esp_device: None,
+            esp_uuid: None,
+            boot_layout: None,
+        },
         catos_confirmation,
-        subvol_facts: SubvolFacts::default(),
+        subvol_facts,
         mount_point_observations: collect_mount_point_observations(target),
-    }
+    })
 }
 
-/// Construct the rich `mount::model::MountTargetIdentity` that
-/// [`crate::mount::diagnose::target::diagnose`] consumes from the minimal
-/// [`TargetIdentity`] Doctor carries. ESP and boot-layout signals are
-/// unknown on the `target::plan` path (Doctor does not mount or detect
-/// them); they are left `None`. Wiring real ESP/boot-layout discovery
-/// into this section is an open design point for a later phase.
-fn repair_identity_from(target: &TargetIdentity) -> RepairTargetIdentity {
-    RepairTargetIdentity {
-        root_device: target.root_device.clone().unwrap_or_default(),
-        root_fstype: target.root_fstype.clone().unwrap_or_default(),
-        root_subvol: target.root_subvol.clone(),
-        root_uuid: target.root_uuid.clone(),
-        esp_device: None,
-        esp_uuid: None,
-        boot_layout: None,
-    }
-}
-
-fn read_target_fstab(target: &TargetIdentity) -> Option<String> {
+fn read_target_fstab(target: &TargetIdentity) -> Result<String, String> {
     let root = target_root_path(target);
-    std::fs::read_to_string(root.join("etc/fstab")).ok()
+    let path = root.join("etc/fstab");
+    std::fs::read_to_string(&path).map_err(|error| format!("cannot read target fstab {}: {error}", path.display()))
+}
+
+fn collect_subvolume_facts(root: &Path) -> Result<SubvolFacts, String> {
+    let root = root.to_str().ok_or_else(|| "target root path is not UTF-8".to_string())?;
+    let output = catos_process::run_trusted_tool(
+        "btrfs",
+        &["subvolume", "list", "-a", root],
+        Duration::from_secs(10),
+        64 * 1024,
+    )?;
+    if !output.success() || output.stdout_truncated {
+        return Err(format!("cannot enumerate target Btrfs subvolumes: {}", String::from_utf8_lossy(&output.stderr).trim()));
+    }
+    let listed: Vec<String> = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| line.split_once(" path ").map(|(_, path)| format!("/{path}")))
+        .collect();
+    if listed.is_empty() {
+        return Err("target Btrfs subvolume enumeration returned no entries".to_string());
+    }
+    Ok(SubvolFacts {
+        observations: crate::mount::model::CATOS_STANDARD_SUBVOLS
+            .iter()
+            .map(|spec| SubvolObservation {
+                subvol: spec.subvol.to_string(),
+                exists_as_subvol: listed.iter().any(|path| path == spec.subvol),
+                exists_as_directory: false,
+                exists_as_other: false,
+                mount_point_entry_count: None,
+            })
+            .collect(),
+    })
 }
 
 fn collect_mount_point_observations(
