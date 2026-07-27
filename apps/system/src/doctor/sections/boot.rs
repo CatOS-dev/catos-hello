@@ -183,12 +183,27 @@ fn installed_packages(root: &Path) -> Result<Vec<String>, String> {
     let db = root.join("var/lib/pacman/local");
     let entries = std::fs::read_dir(&db)
         .map_err(|error| format!("cannot read target package database {}: {error}", db.display()))?;
-    let mut packages: Vec<String> = entries
-        .filter_map(Result::ok)
-        .filter_map(|entry| entry.file_name().to_str().map(str::to_string))
-        .collect();
+    let mut packages = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(|error| format!("cannot enumerate target package database {}: {error}", db.display()))?;
+        let desc = std::fs::read_to_string(entry.path().join("desc"))
+            .map_err(|error| format!("cannot read target package record {}: {error}", entry.path().display()))?;
+        let name = pacman_package_name(&desc)
+            .ok_or_else(|| format!("target package record {} has no %NAME% field", entry.path().display()))?;
+        packages.push(name);
+    }
     packages.sort();
     Ok(packages)
+}
+
+fn pacman_package_name(desc: &str) -> Option<String> {
+    let mut lines = desc.lines();
+    while let Some(line) = lines.next() {
+        if line == "%NAME%" {
+            return lines.next().map(str::to_string).filter(|value| !value.is_empty());
+        }
+    }
+    None
 }
 
 fn inspect_provider_assets(
@@ -409,7 +424,7 @@ fn secure_boot_enabled_from_efivar(body: &[u8]) -> Option<bool> {
 
 #[cfg(test)]
 mod tests {
-    use super::provider_firmware_asset_present;
+    use super::{pacman_package_name, provider_firmware_asset_present};
     use crate::boot::model::ProviderId;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -431,6 +446,14 @@ mod tests {
 
         assert!(!provider_firmware_asset_present(&root, ProviderId::Efistub, Some("method=efistub")));
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn package_name_comes_from_pacman_desc_not_directory_name() {
+        assert_eq!(
+            pacman_package_name("%NAME%\nlimine\n\n%VERSION%\n8.0-1\n"),
+            Some("limine".to_string())
+        );
     }
 
     fn scratch(name: &str) -> std::path::PathBuf {
