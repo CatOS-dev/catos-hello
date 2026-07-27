@@ -1,6 +1,6 @@
 //! `catos-chroot` CLI application orchestration.
 
-use std::io::Write;
+use std::io::{IsTerminal, Write};
 
 use crate::chroot::diagnose::block::list_block_devices;
 use crate::chroot::diagnose::btrfs::list_subvolumes;
@@ -232,6 +232,9 @@ fn parse_argv(argv: &[String]) -> Result<ChrootOptions, String> {
 }
 
 fn prompt_extra_mounts(devices: &[BlockDevice]) -> Vec<ExtraMountSelection> {
+    if !std::io::stdin().is_terminal() {
+        return Vec::new();
+    }
     let mut selections = Vec::new();
     while prompt_yes_no("Mount an additional partition?", false) {
         let Some(mount_point) = prompt_mount_point() else {

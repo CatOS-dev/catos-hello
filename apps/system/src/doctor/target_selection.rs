@@ -20,6 +20,7 @@ use crate::doctor::model::{DoctorTarget, DoctorTargetKind};
 use crate::target::model::TargetIdentity;
 use crate::selection_ui::{select_target, Selection};
 use crate::target::discovery::discover_targets;
+use crate::target::discovery::TargetSession;
 #[cfg(test)]
 use crate::target::plan::{TargetPlan, TargetPlanKind};
 
@@ -76,6 +77,23 @@ pub fn discover_target() -> TargetSelection {
         Selection::Declined => TargetSelection::None { reason: "operator declined the discovered target".into() },
         Selection::Unavailable(reason) => TargetSelection::None { reason },
     }
+}
+
+pub fn discover_target_session() -> Result<(TargetIdentity, TargetSession), String> {
+    let candidate = match select_target(&discover_targets(), "catos-doctor") {
+        Selection::Selected(candidate) => candidate,
+        Selection::Declined => return Err("operator declined the discovered target".into()),
+        Selection::Unavailable(reason) => return Err(reason),
+    };
+    let session = TargetSession::open(candidate).map_err(|error| format!("open selected readonly target: {error}"))?;
+    let target = TargetIdentity {
+        root: session.root().to_path_buf(),
+        root_device: Some(session.candidate().root_device.clone()),
+        root_fstype: Some(session.candidate().root_fstype.clone()),
+        root_subvol: session.candidate().root_subvolume.clone(),
+        root_uuid: session.candidate().root_uuid.clone(),
+    };
+    Ok((target, session))
 }
 
 /// Map a [`TargetPlan`] to a [`TargetSelection`] without any field

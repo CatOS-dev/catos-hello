@@ -33,6 +33,29 @@ pub struct TargetCandidate {
     pub evidence: Vec<Evidence>,
 }
 
+/// A selected candidate held open on a real readonly/no-replay mount.  The
+/// owner must call [`TargetSession::cleanup`] and preserve the returned
+/// result in its report.
+pub struct TargetSession {
+    candidate: TargetCandidate,
+    probe: ReadonlyProbe,
+}
+
+impl TargetSession {
+    pub fn open(candidate: TargetCandidate) -> Result<Self, String> {
+        let probe = ReadonlyProbe::mount(
+            &candidate.root_device,
+            &candidate.root_fstype,
+            candidate.root_subvolume.as_deref().map(|value| value.trim_start_matches('/')),
+        )?;
+        Ok(Self { candidate, probe })
+    }
+
+    pub fn root(&self) -> &Path { self.probe.path() }
+    pub fn candidate(&self) -> &TargetCandidate { &self.candidate }
+    pub fn cleanup(mut self) -> ProbeCleanup { self.probe.cleanup() }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DiscoveryRejection {
     pub source: String,
@@ -45,6 +68,15 @@ pub struct DiscoveryReport {
     pub candidates: Vec<TargetCandidate>,
     pub excluded: Vec<DiscoveryRejection>,
     pub rejected: Vec<DiscoveryRejection>,
+    pub cleanup: Vec<ProbeCleanup>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProbeCleanup {
+    pub mountpoint: PathBuf,
+    pub unmounted: bool,
+    pub removed: bool,
+    pub error: Option<String>,
 }
 
 /// Discover installed CatOS targets. Candidate contents are always read from
@@ -82,20 +114,15 @@ fn inspect_device(device: &BlockDevice, report: &mut DiscoveryReport) {
         inspect_btrfs_device(device, live_mount.map(|mount| mount.root.as_path()), report);
         return;
     }
-    let result = if let Some(mount) = device.mounts.first() {
-        inspect_at(device, &mount.mount_point, None, live_mount.map(|m| m.root.as_path()))
-    } else {
-        let mut probe = match ReadonlyProbe::mount(path, fstype, None) {
-            Ok(probe) => probe,
-            Err(reason) => { report.rejected.push(rejected(path, reason)); return; }
-        };
-        let candidate = inspect_at(device, probe.path(), None, None);
-        let cleanup = probe.cleanup();
-        match cleanup {
-            Ok(()) => candidate,
-            Err(reason) => { report.rejected.push(rejected(path, format!("readonly probe cleanup failed: {reason}"))); return; }
-        }
+    let mut probe = match ReadonlyProbe::mount(path, fstype, None) {
+        Ok(probe) => probe,
+        Err(reason) => { report.rejected.push(rejected(path, reason)); return; }
     };
+    let result = inspect_at(device, probe.path(), None, None, "readonly no-replay temporary mount");
+    let cleanup = probe.cleanup();
+    let clean = cleanup.error.is_none();
+    report.cleanup.push(cleanup);
+    if !clean { report.rejected.push(rejected(path, "readonly probe cleanup failed".into())); return; }
     match result {
         Some(candidate) if candidate.running_environment_member => report.excluded.push(excluded(path, "subvolume", "current Live root subvolume", candidate.root_subvolume.unwrap_or_else(|| "/".into()))),
         Some(candidate) => report.candidates.push(candidate),
@@ -105,13 +132,15 @@ fn inspect_device(device: &BlockDevice, report: &mut DiscoveryReport) {
 
 fn inspect_btrfs_device(device: &BlockDevice, live_subvolume: Option<&Path>, report: &mut DiscoveryReport) {
     let Some(path) = device.dev_path.as_ref() else { return };
-    let mut probe = match ReadonlyProbe::mount(path, "btrfs", None) {
+    let mut probe = match ReadonlyProbe::mount_with_options(path, "btrfs", "ro,norecovery,subvolid=5") {
         Ok(probe) => probe,
         Err(reason) => { report.rejected.push(rejected(path, reason)); return; }
     };
     let subvolumes = list_btrfs_subvolumes(probe.path());
     let cleanup = probe.cleanup();
-    if let Err(reason) = cleanup { report.rejected.push(rejected(path, format!("readonly probe cleanup failed: {reason}"))); return; }
+    let clean = cleanup.error.is_none();
+    report.cleanup.push(cleanup);
+    if !clean { report.rejected.push(rejected(path, "readonly probe cleanup failed".into())); return; }
     let subvolumes = match subvolumes { Ok(values) => values, Err(reason) => { report.rejected.push(rejected(path, reason)); return; } };
     for subvolume in subvolumes {
         let mut subprobe = match ReadonlyProbe::mount(path, "btrfs", Some(&subvolume)) {
@@ -119,9 +148,11 @@ fn inspect_btrfs_device(device: &BlockDevice, live_subvolume: Option<&Path>, rep
             Err(reason) => { report.rejected.push(rejected(path, format!("cannot probe subvolume /{subvolume}: {reason}"))); continue; }
         };
         let live = live_subvolume.map(|value| value.to_string_lossy().trim_start_matches('/').to_string());
-        let candidate = inspect_at(device, subprobe.path(), Some(format!("/{subvolume}")), live.as_deref().map(Path::new));
+        let candidate = inspect_at(device, subprobe.path(), Some(format!("/{subvolume}")), None, "readonly no-replay Btrfs subvolume mount");
         let cleanup = subprobe.cleanup();
-        if let Err(reason) = cleanup { report.rejected.push(rejected(path, format!("readonly subvolume probe cleanup failed: {reason}"))); continue; }
+        let clean = cleanup.error.is_none();
+        report.cleanup.push(cleanup);
+        if !clean { report.rejected.push(rejected(path, "readonly subvolume probe cleanup failed".into())); continue; }
         match candidate {
             Some(candidate) if candidate.root_subvolume.as_deref() == live.as_deref().map(|value| format!("/{value}")).as_deref() => report.excluded.push(excluded(path, "subvolume", "current Live root subvolume", candidate.root_subvolume.unwrap_or_else(|| "/".into()))),
             Some(candidate) => report.candidates.push(candidate),
@@ -132,14 +163,21 @@ fn inspect_btrfs_device(device: &BlockDevice, live_subvolume: Option<&Path>, rep
 
 fn list_btrfs_subvolumes(root: &Path) -> Result<Vec<String>, String> {
     let root = root.to_str().ok_or_else(|| "probe path is not UTF-8".to_string())?;
-    let output = run_trusted_tool("btrfs", &["subvolume", "list", "-o", root], Duration::from_secs(10), 64 * 1024)?;
+    let output = run_trusted_tool("btrfs", &["subvolume", "list", "-a", root], Duration::from_secs(10), 64 * 1024)?;
     if !output.success() { return Err(format!("Btrfs subvolume listing failed: {}", String::from_utf8_lossy(&output.stderr).trim())); }
-    let values = String::from_utf8_lossy(&output.stdout).lines().filter_map(|line| line.split_once(" path ").map(|(_, path)| path.trim().to_string())).filter(|path| !path.is_empty()).collect::<Vec<_>>();
+    let values = parse_btrfs_subvolume_list(&String::from_utf8_lossy(&output.stdout));
     if values.is_empty() { return Err("Btrfs filesystem has no discoverable subvolumes".into()) }
     Ok(values)
 }
 
-fn inspect_at(device: &BlockDevice, root: &Path, subvolume: Option<String>, live_root: Option<&Path>) -> Option<TargetCandidate> {
+fn parse_btrfs_subvolume_list(body: &str) -> Vec<String> {
+    body.lines()
+        .filter_map(|line| line.split_once(" path ").map(|(_, path)| path.trim().to_string()))
+        .filter(|path| !path.is_empty())
+        .collect()
+}
+
+fn inspect_at(device: &BlockDevice, root: &Path, subvolume: Option<String>, live_root: Option<&Path>, probe_kind: &str) -> Option<TargetCandidate> {
     let root_text = root.to_str()?;
     let system_root = SystemRoot::from_user_input(root_text).ok()?;
     let mut warnings = Vec::new();
@@ -150,7 +188,7 @@ fn inspect_at(device: &BlockDevice, root: &Path, subvolume: Option<String>, live
     let fstab_identity = std::fs::read_to_string(root.join("etc/fstab")).ok().map(|body| body.lines().find(|line| !line.trim_start().starts_with('#') && !line.trim().is_empty()).unwrap_or("").to_string());
     let mut evidence = device.evidence.clone();
     evidence.push(Evidence::new("CANDIDATE_OS_RELEASE", root.display().to_string(), "CatOS identity read from readonly candidate mount"));
-    evidence.push(Evidence::new("PROBE_MOUNT", root.display().to_string(), "probe used a readonly, no-replay mount session or an existing readonly mount"));
+    evidence.push(Evidence::new("PROBE_MOUNT", root.display().to_string(), probe_kind));
     evidence.extend(warnings.into_iter().map(|warning| Evidence::new("CANDIDATE_WARNING", "candidate", warning)));
     Some(TargetCandidate {
         root_device: device.dev_path.clone()?, root_fstype: device.filesystem.clone()?, root_uuid: device.uuid.clone(),
@@ -174,29 +212,35 @@ fn candidate_key(candidate: &TargetCandidate) -> (u8, String, String) {
 struct ReadonlyProbe { path: PathBuf, mounted: bool }
 impl ReadonlyProbe {
     fn mount(device: &Path, fstype: &str, subvolume: Option<&str>) -> Result<Self, String> {
+        let replay = match fstype { "ext2" | "ext3" | "ext4" => "ro,noload", "xfs" | "btrfs" => "ro,norecovery", _ => "ro" };
+        let options = match subvolume { Some(subvolume) => format!("{replay},subvol={subvolume}"), None => replay.into() };
+        Self::mount_with_options(device, fstype, &options)
+    }
+    fn mount_with_options(device: &Path, fstype: &str, options: &str) -> Result<Self, String> {
         let nonce = SystemTime::now().duration_since(UNIX_EPOCH).map_err(|e| e.to_string())?.as_nanos();
         let path = std::env::temp_dir().join(format!("catos-target-probe-{}-{nonce}", std::process::id()));
         std::fs::create_dir(&path).map_err(|e| format!("create probe mountpoint {}: {e}", path.display()))?;
-        let replay = match fstype { "ext2" | "ext3" | "ext4" => "ro,noload", "xfs" | "btrfs" => "ro,norecovery", _ => "ro" };
-        let options = match subvolume { Some(subvolume) => format!("{replay},subvol={subvolume}"), None => replay.into() };
         let device = device.to_str().ok_or_else(|| "device path is not UTF-8".to_string())?;
         let mountpoint = path.to_str().ok_or_else(|| "probe path is not UTF-8".to_string())?;
-        let output = run_trusted_tool("mount", &["-t", fstype, "-o", &options, device, mountpoint], Duration::from_secs(10), 16 * 1024)?;
-        if !output.success() { let _ = std::fs::remove_dir(&path); return Err(format!("readonly no-replay mount failed: {}", String::from_utf8_lossy(&output.stderr).trim())); }
+        let output = run_trusted_tool("mount", &["-t", fstype, "-o", options, device, mountpoint], Duration::from_secs(10), 16 * 1024)?;
+        if !output.success() { let cleanup = std::fs::remove_dir(&path).err().map(|e| format!("; failed removing probe directory: {e}")); return Err(format!("readonly no-replay mount failed: {}{}", String::from_utf8_lossy(&output.stderr).trim(), cleanup.unwrap_or_default())); }
         Ok(Self { path, mounted: true })
     }
     fn path(&self) -> &Path { &self.path }
-    fn cleanup(&mut self) -> Result<(), String> {
+    fn cleanup(&mut self) -> ProbeCleanup {
+        let mut cleanup = ProbeCleanup { mountpoint: self.path.clone(), unmounted: !self.mounted, removed: false, error: None };
         if self.mounted {
-            let mountpoint = self.path.to_str().ok_or_else(|| "probe path is not UTF-8".to_string())?;
-            let output = run_trusted_tool("umount", &[mountpoint], Duration::from_secs(10), 16 * 1024)?;
-            if !output.success() { return Err(String::from_utf8_lossy(&output.stderr).trim().to_string()) }
+            let Some(mountpoint) = self.path.to_str() else { cleanup.error = Some("probe path is not UTF-8".into()); return cleanup };
+            let output = match run_trusted_tool("umount", &[mountpoint], Duration::from_secs(10), 16 * 1024) { Ok(output) => output, Err(error) => { cleanup.error = Some(error); return cleanup } };
+            if !output.success() { cleanup.error = Some(String::from_utf8_lossy(&output.stderr).trim().to_string()); return cleanup }
             self.mounted = false;
+            cleanup.unmounted = true;
         }
-        std::fs::remove_dir(&self.path).map_err(|e| format!("remove probe mountpoint {}: {e}", self.path.display()))
+        match std::fs::remove_dir(&self.path) { Ok(()) => cleanup.removed = true, Err(error) => cleanup.error = Some(format!("remove probe mountpoint {}: {error}", self.path.display())) }
+        cleanup
     }
 }
-impl Drop for ReadonlyProbe { fn drop(&mut self) { if self.mounted { let _ = self.cleanup(); } } }
+impl Drop for ReadonlyProbe { fn drop(&mut self) { if self.mounted { eprintln!("catos-target: unreported probe cleanup failure: {:?}", self.cleanup()); } } }
 
 #[cfg(test)]
 mod tests {
@@ -205,5 +249,11 @@ mod tests {
     fn ordering_is_stable_and_prefers_high_confidence() {
         let base = |path: &str, confidence| TargetCandidate { root_device: PathBuf::from(path), root_fstype: "ext4".into(), root_uuid: None, root_subvolume: None, filesystem_id: None, label: None, os_release: OsRelease::default(), fstab_identity: None, currently_mounted: false, running_environment_member: false, confidence, evidence: Vec::new() };
         assert!(candidate_key(&base("/dev/sda2", RootCandidateConfidence::High)) < candidate_key(&base("/dev/sda1", RootCandidateConfidence::Medium)));
+    }
+
+    #[test]
+    fn btrfs_all_subvolume_parser_keeps_the_current_root_and_siblings() {
+        let listed = parse_btrfs_subvolume_list("ID 256 gen 1 top level 5 path @\nID 257 gen 1 top level 5 path @home\n");
+        assert_eq!(listed, vec!["@", "@home"]);
     }
 }

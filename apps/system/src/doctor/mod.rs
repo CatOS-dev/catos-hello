@@ -47,7 +47,30 @@ use target_selection::TargetSelection;
 
 pub fn run_doctor() -> DoctorReport {
     let runner = crate::fs::command::TrustedRunner::new();
-    run_doctor_with(&runner)
+    let environment = sections::capture_environment();
+    let (target, session) = match target_selection::discover_target_session() {
+        Ok(value) => value,
+        Err(reason) => {
+            let mut report = DoctorReport::default();
+            report.environment = environment;
+            report.sections = handle_no_target(reason, &mut report);
+            aggregate(&mut report);
+            report.cleanup = DoctorCleanup::clean();
+            return report;
+        }
+    };
+    let mut report = DoctorReport::default();
+    report.environment = environment.clone();
+    report.target = TargetSelection::Identified(target.clone()).to_target_summary();
+    report.sections = run_sections(&runner, &target, &environment, &mut report);
+    aggregate(&mut report);
+    let cleanup = session.cleanup();
+    report.cleanup = DoctorCleanup {
+        cleaned: if cleanup.unmounted && cleanup.removed { vec![cleanup.mountpoint.display().to_string()] } else { Vec::new() },
+        residual: cleanup.error.into_iter().map(|error| format!("{}: {error}", cleanup.mountpoint.display())).collect(),
+        all_clean: cleanup.unmounted && cleanup.removed,
+    };
+    report
 }
 
 pub fn run_doctor_with<R: FsCommandRunner + ?Sized>(runner: &R) -> DoctorReport {
