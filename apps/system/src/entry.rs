@@ -6,6 +6,8 @@ use std::fmt;
 
 use crate::shared::error::{exit_code, Error};
 
+mod chroot;
+
 /// The set of argv[0] names this binary recognises. Anything else falls
 /// back silently to the canonical `catos-system` name. The fallback is
 /// deliberate so the binary is still usable when renamed or copied; we do
@@ -738,7 +740,7 @@ fn run_update(argv: &[String]) -> i32 {
 /// any external command runs. This MUST NOT inherit any
 /// `catos-system` subcommand.
 fn run_chroot(argv: &[String]) -> i32 {
-    crate::chroot::run(argv)
+    chroot::run(argv)
 }
 
 fn print_recovery_command_help(command: &str) -> i32 {
@@ -800,7 +802,7 @@ fn print_help(invocation: Invocation) -> i32 {
             crate::update::print_help();
         }
         Invocation::CatosChroot => {
-            crate::chroot::print_help();
+            chroot::print_help();
         }
         Invocation::CatosRecovery => {
             print!(

@@ -1897,5 +1897,5 @@ mod tests {
 
 }
 
-pub use planner::{build_plan, build_probe_plan, PlanInputs};
+pub use planner::{build_plan, build_probe_plan, FstypePolicy, PlanInputs};
 pub use prober::{inspect_selected_root, probe_unmounted_candidates, ProbeCandidates, SelectedTargetProbe};

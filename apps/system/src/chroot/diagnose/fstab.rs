@@ -9,25 +9,40 @@
 //! tool and a half-broken fstab should not prevent entering the
 //! target.
 
-use std::fs;
-use std::path::Path;
+use crate::chroot::model::{BlockDevice, FsTabEntry, Subvolume};
+use crate::chroot::session::ReadOnlyMountProbe;
+use crate::shared::error::FsError;
+use crate::target::execute::confined::{read_rooted_file, rooted_regular_file_size};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FsTabEntry {
-    pub fs_spec: String,
-    pub mountpoint: String,
-    pub vfs_type: String,
-    pub mount_options: Vec<String>,
-}
+pub fn read_from_device(
+    device: &BlockDevice,
+    subvolume: Option<&Subvolume>,
+) -> Result<Vec<FsTabEntry>, String> {
+    let options = subvolume
+        .map(|subvolume| vec![format!("subvolid={}", subvolume.id)])
+        .unwrap_or_default();
+    let mut probe = ReadOnlyMountProbe::open(device, &options)?;
+    let entries_result = (|| match rooted_regular_file_size(probe.path(), "/etc/fstab") {
+        Ok(Some(_)) => {
+            let bytes = read_rooted_file(probe.path(), "/etc/fstab")
+                .map_err(|error| format!("cannot read target /etc/fstab: {error}"))?;
+            let contents = String::from_utf8(bytes)
+                .map_err(|error| format!("target /etc/fstab is not UTF-8: {error}"))?;
+            Ok(parse(&contents))
+        }
+        Ok(None) | Err(FsError::NotFound) => Ok(Vec::new()),
+        Err(error) => Err(format!("cannot inspect target /etc/fstab: {error}")),
+    })();
+    let cleanup_result = probe.cleanup();
 
-/// Parse a fstab file. Returns an empty vector if the file is missing
-/// or unreadable; callers decide whether that is a hard error in
-/// their context.
-pub fn read(path: &Path) -> Vec<FsTabEntry> {
-    let Ok(contents) = fs::read_to_string(path) else {
-        return Vec::new();
-    };
-    parse(&contents)
+    match (entries_result, cleanup_result) {
+        (Ok(entries), Ok(())) => Ok(entries),
+        (Err(error), Ok(())) => Err(error),
+        (Ok(_), Err(cleanup_error)) => Err(format!("probe cleanup failed: {cleanup_error}")),
+        (Err(error), Err(cleanup_error)) => {
+            Err(format!("{error}; cleanup failed: {cleanup_error}"))
+        }
+    }
 }
 
 /// Parse the textual contents of a fstab. Public so unit tests can
