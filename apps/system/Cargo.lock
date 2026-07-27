@@ -15,6 +15,32 @@ dependencies = [
 name = "catos-app"
 version = "0.1.0"
 dependencies = [
+ "catos-fs",
+ "catos-mount",
+ "catos-process",
+ "catos-target",
+ "getrandom",
+ "libc",
+ "serde",
+ "serde_json",
+ "sha2",
+]
+
+[[package]]
+name = "catos-fs"
+version = "0.1.0"
+dependencies = [
+ "catos-mount",
+ "catos-process",
+ "catos-target",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "catos-mount"
+version = "0.1.0"
+dependencies = [
  "catos-process",
  "catos-target",
  "getrandom",

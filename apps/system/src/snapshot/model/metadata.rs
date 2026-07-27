@@ -97,12 +97,4 @@ pub struct SubvolumeFacts {
     pub read_only: Option<bool>,
 }
 
-/// Result of mount cleanup during a transition or revert.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
-pub struct CleanupSummary {
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub unmounted: Vec<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub residual: Vec<String>,
-    pub all_clean: bool,
-}
+pub use crate::mount::model::CleanupSummary;

@@ -3,6 +3,8 @@ members = [
     ".",
     "crates/catos-process",
     "crates/catos-target",
+    "crates/catos-mount",
+    "crates/catos-fs",
 ]
 resolver = "2"
 
@@ -37,6 +39,8 @@ required-features = ["test-helpers"]
 [dependencies]
 catos-process = { path = "crates/catos-process" }
 catos-target = { path = "crates/catos-target" }
+catos-mount = { path = "crates/catos-mount" }
+catos-fs = { path = "crates/catos-fs" }
 # No async runtime, TLS, D-Bus, libalpm, or heavyweight CLI framework.
 # `sha2` binds the immutable effective plan; `getrandom` is the only
 # accepted nonce/id source and fails closed when the kernel RNG fails.

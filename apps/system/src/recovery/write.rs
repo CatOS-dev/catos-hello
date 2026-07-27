@@ -5,7 +5,6 @@
 
 use std::path::Path;
 
-use crate::mount::model::CleanupReport;
 use crate::mount::session::cleanup::MountSessionError;
 use crate::mount::session::BtrfsTopLevelRwSession;
 use crate::shared::cli::RecoveryArgs;
@@ -38,24 +37,6 @@ impl From<MountSessionError> for SnapshotError {
                 error.message, error.kind
             ),
         )
-    }
-}
-
-impl From<CleanupReport> for CleanupSummary {
-    fn from(report: CleanupReport) -> Self {
-        CleanupSummary {
-            unmounted: report
-                .unmounted
-                .iter()
-                .map(|resource| resource.target.display().to_string())
-                .collect(),
-            residual: report
-                .residual
-                .iter()
-                .map(|residual| residual.resource.target.display().to_string())
-                .collect(),
-            all_clean: report.all_clean,
-        }
     }
 }
 
