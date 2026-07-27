@@ -98,6 +98,13 @@ pub fn discover_targets() -> DiscoveryReport {
     report
 }
 
+/// The shared inventory used by consumers that need to resolve fstab entries
+/// after target selection. It is intentionally the same inventory pass as
+/// candidate discovery, not a second `lsblk` implementation.
+pub fn discover_inventory() -> Vec<BlockDevice> {
+    discover_devices(&RealFilesystem).0
+}
+
 fn inspect_device(device: &BlockDevice, report: &mut DiscoveryReport) {
     let Some(fstype) = device.filesystem.as_deref() else { return };
     if !matches!(fstype, "btrfs" | "ext2" | "ext3" | "ext4" | "xfs" | "f2fs") { return }

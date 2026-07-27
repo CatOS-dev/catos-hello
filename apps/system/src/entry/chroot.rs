@@ -2,7 +2,6 @@
 
 use std::io::{IsTerminal, Write};
 
-use crate::chroot::diagnose::block::list_block_devices;
 use crate::chroot::diagnose::btrfs::list_subvolumes;
 use crate::chroot::diagnose::fstab::read_from_device;
 use crate::chroot::execute::{
@@ -50,17 +49,11 @@ pub fn run(argv: &[String]) -> i32 {
         return exit_code::PROBE_FAILED;
     }
 
-    let mut devices = match list_block_devices() {
-        Ok(devices) if devices.is_empty() => {
+    let mut devices = target_inventory_for_chroot();
+    if devices.is_empty() {
             eprintln!("catos-chroot: no usable block devices found");
             return exit_code::PROBE_FAILED;
-        }
-        Ok(devices) => devices,
-        Err(message) => {
-            eprintln!("catos-chroot: {message}");
-            return exit_code::PROBE_FAILED;
-        }
-    };
+    }
 
     let selected_target = match crate::selection_ui::select_target(
         &crate::target::discovery::discover_targets(),
@@ -97,13 +90,7 @@ pub fn run(argv: &[String]) -> i32 {
             }
         };
         let mapper = opened.mapper_path().to_path_buf();
-        devices = match list_block_devices() {
-            Ok(devices) => devices,
-            Err(message) => {
-                eprintln!("catos-chroot: {message}");
-                return exit_code::PROBE_FAILED;
-            }
-        };
+        devices = target_inventory_for_chroot();
         root_device = match devices
             .iter()
             .find(|device| device.name == mapper.to_string_lossy())
@@ -204,6 +191,20 @@ pub fn run(argv: &[String]) -> i32 {
     } else {
         exit_code::PROBE_FAILED
     }
+}
+
+fn target_inventory_for_chroot() -> Vec<BlockDevice> {
+    crate::target::discovery::discover_inventory()
+        .into_iter()
+        .filter_map(|device| Some(BlockDevice {
+            name: device.dev_path?.display().to_string(),
+            fs_type: device.filesystem,
+            uuid: device.uuid,
+            partuuid: device.part_uuid,
+            label: device.label,
+            partlabel: device.part_label,
+        }))
+        .collect()
 }
 
 pub fn print_help() {
