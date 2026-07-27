@@ -8,7 +8,6 @@ use crate::doctor::model::{
 };
 use crate::fs::command::FsCommandRunner;
 use crate::fs::diagnose::{check_only_for, ReadonlyOutcome, ReadonlyResult};
-use crate::target::model::TargetIdentity;
 use crate::target::Evidence;
 
 use super::{is_device_mounted_rw, push_evidence, set_section};
@@ -172,7 +171,6 @@ pub(in crate::doctor) fn run_storage_section(
 pub(in crate::doctor) fn run_filesystem_section<R: FsCommandRunner + ?Sized>(
     runner: &R,
     sections: &mut [(DoctorSectionId, DoctorSection)],
-    target: &TargetIdentity,
     context: Option<&DoctorTargetContext>,
     report: &mut DoctorReport,
 ) -> Result<(), ()> {
@@ -186,6 +184,7 @@ pub(in crate::doctor) fn run_filesystem_section<R: FsCommandRunner + ?Sized>(
         ));
         return Ok(());
     }
+    let target = &context.expect("checked selected Doctor target context").target;
     let fstype = match target.root_fstype.as_deref() {
         Some(fstype) => fstype,
         None => {
