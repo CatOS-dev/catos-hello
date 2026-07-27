@@ -55,7 +55,7 @@ pub fn run_doctor() -> DoctorReport {
             report.environment = environment;
             report.sections = handle_no_target(reason, &mut report);
             aggregate(&mut report);
-            report.cleanup = DoctorCleanup::clean();
+            report.cleanup = DoctorCleanup::not_required();
             return report;
         }
     };
@@ -94,7 +94,7 @@ pub fn run_doctor_with<R: FsCommandRunner + ?Sized>(runner: &R) -> DoctorReport 
 
     report.sections = sections;
     aggregate(&mut report);
-    report.cleanup = DoctorCleanup::clean();
+    report.cleanup = DoctorCleanup::not_required();
     report
 }
 

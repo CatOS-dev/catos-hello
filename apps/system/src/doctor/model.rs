@@ -404,6 +404,15 @@ impl DoctorCleanup {
             all_clean: true,
         }
     }
+
+    /// No Doctor-owned mount was created, so there is nothing to clean.
+    pub fn not_required() -> Self {
+        Self {
+            cleaned: Vec::new(),
+            residual: Vec::new(),
+            all_clean: true,
+        }
+    }
 }
 
 /// Identity of the selected diagnosis target. Mirrors the relevant
