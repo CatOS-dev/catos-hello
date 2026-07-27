@@ -94,7 +94,7 @@ fn run_recovery_for_target(
             }
         };
         engine.reconcile_status();
-        inspect_single_record(sections, report, id, record, &mut section_status);
+        inspect_single_record(sections, report, id, engine.record(), &mut section_status);
     }
     set_section(sections, id, section_status);
     Ok(())

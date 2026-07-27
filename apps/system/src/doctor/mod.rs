@@ -55,6 +55,7 @@ pub(crate) struct DoctorTargetContext {
     pub devices: Vec<crate::target::model::BlockDevice>,
     pub esp: Result<Option<DoctorEsp>, String>,
     pub boot_layout: Result<crate::mount::model::BootMountLayout, String>,
+    pub boot: Result<Option<ReadonlySession>, String>,
     top_level: Result<Option<ReadonlySession>, String>,
     pub recovery_options: Result<Option<crate::snapshot::execute::engine::EngineOptions>, String>,
     session: TargetSession,
@@ -91,6 +92,10 @@ impl DoctorTargetContext {
             (_, Err(error), _) => Err(format!("cannot derive target boot layout without ESP facts: {error}")),
             (_, _, None) => Err("cannot derive target boot layout without root device".to_string()),
         };
+        let boot = match &boot_layout {
+            Ok(layout) => open_target_boot(layout, &candidate, &devices),
+            Err(error) => Err(format!("cannot open selected target /boot without boot layout: {error}")),
+        };
         let top_level = if candidate.root_fstype == "btrfs" {
             ReadonlySession::open_with_options(&candidate.root_device, "btrfs", "ro,norecovery,subvolid=5").map(Some)
         } else {
@@ -107,12 +112,13 @@ impl DoctorTargetContext {
             Ok(None) => Ok(None),
             Err(error) => Err(format!("cannot open selected Btrfs top-level: {error}")),
         };
-        Self { target, candidate, fstab, devices, esp, boot_layout, top_level, recovery_options, session }
+        Self { target, candidate, fstab, devices, esp, boot_layout, boot, top_level, recovery_options, session }
     }
 
     fn cleanup(self) -> Vec<crate::target::discovery::ProbeCleanup> {
         let mut cleanup = Vec::new();
         if let Ok(Some(session)) = self.top_level { cleanup.push(session.cleanup()); }
+        if let Ok(Some(session)) = self.boot { cleanup.push(session.cleanup()); }
         if let Ok(Some(esp)) = self.esp { cleanup.push(esp.root.cleanup()); }
         cleanup.push(self.session.cleanup());
         cleanup
@@ -132,6 +138,37 @@ impl DoctorTargetContext {
             esp_device: esp.map(|value| value.device.display().to_string()),
             boot_layout: esp.map(|value| format!("esp:{}", value.mount_point)),
         }
+    }
+}
+
+fn open_target_boot(
+    layout: &crate::mount::model::BootMountLayout,
+    candidate: &TargetCandidate,
+    devices: &[crate::target::model::BlockDevice],
+) -> Result<Option<ReadonlySession>, String> {
+    use crate::mount::model::BootMountLayout;
+
+    match layout {
+        BootMountLayout::SeparateBootAndEsp { boot_device, .. } => {
+            let device = devices
+                .iter()
+                .find(|device| device.dev_path.as_deref() == Some(boot_device.as_path()))
+                .ok_or_else(|| format!("selected target /boot device {} is absent from shared inventory", boot_device.display()))?;
+            let fstype = device.filesystem.as_deref().ok_or_else(|| format!("selected target /boot device {} has no filesystem type", boot_device.display()))?;
+            ReadonlySession::open(boot_device, fstype).map(Some)
+                .map_err(|error| format!("cannot open selected target /boot {} read-only: {error}", boot_device.display()))
+        }
+        BootMountLayout::BootBtrfsSubvolume { subvolume, .. } => ReadonlySession::open_with_options(
+            &candidate.root_device,
+            "btrfs",
+            &format!("ro,norecovery,subvol={}", subvolume.trim_start_matches('/')),
+        )
+        .map(Some)
+        .map_err(|error| format!("cannot open selected target /boot subvolume {subvolume} read-only: {error}")),
+        BootMountLayout::BootInsideRoot
+        | BootMountLayout::EspAtBootEfi { .. }
+        | BootMountLayout::EspAtEfi { .. }
+        | BootMountLayout::EspAtBoot { .. } => Ok(None),
     }
 }
 
