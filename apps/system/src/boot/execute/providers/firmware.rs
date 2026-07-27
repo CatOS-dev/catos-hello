@@ -8,11 +8,12 @@
 //! (`uki` and `efistub`) differ only in the `method = ...` field of
 //! the configuration file; the same tool drives both.
 
-use crate::shared::model::boot_repair::{BootAction, FirmwareMethod};
-use crate::repair::boot_repair::providers::base::{
-    record_config_write, record_target_command, BootProvider, ProviderCtx, ProviderRecipeResult,
+use crate::boot::execute::providers::base::{
+    record_config_write, record_target_command, BootProviderExecutor, BootProviderVerifier,
+    ProviderCtx, ProviderExecutionResult, ProviderVerificationResult,
 };
-use crate::repair::boot_repair::target_exec::TargetRunner;
+use crate::boot::execute::target::TargetRunner;
+use crate::boot::model::{BootAction, FirmwareMethod};
 
 pub struct FirmwareProvider {
     pub method: FirmwareMethod,
@@ -23,9 +24,9 @@ pub struct FirmwareProvider {
     pub efi_device: Option<(String, u32)>,
 }
 
-impl BootProvider for FirmwareProvider {
-    fn execute(&self, ctx: &ProviderCtx<'_>, runner: &dyn TargetRunner) -> ProviderRecipeResult {
-        let mut result = ProviderRecipeResult::default();
+impl BootProviderExecutor for FirmwareProvider {
+    fn execute(&self, ctx: &ProviderCtx<'_>, runner: &dyn TargetRunner) -> ProviderExecutionResult {
+        let mut result = ProviderExecutionResult::default();
         record_config_write(
             &mut result.actions,
             "/etc/kernel/cmdline",
@@ -52,10 +53,16 @@ impl BootProvider for FirmwareProvider {
         }
         result
     }
+}
 
-    fn verify(&self, _ctx: &ProviderCtx<'_>, runner: &dyn TargetRunner) -> ProviderRecipeResult {
-        let mut result = ProviderRecipeResult::default();
-        let (cmd_result, _) = crate::repair::boot_repair::providers::base::run_target(
+impl BootProviderVerifier for FirmwareProvider {
+    fn verify(
+        &self,
+        _ctx: &ProviderCtx<'_>,
+        runner: &dyn TargetRunner,
+    ) -> ProviderVerificationResult {
+        let mut result = ProviderVerificationResult::default();
+        let (cmd_result, _) = crate::boot::execute::providers::base::run_target(
             runner,
             "catos-firmware-boot-update",
             vec!["--force".into(), "--verify".into()],
@@ -64,7 +71,7 @@ impl BootProvider for FirmwareProvider {
         let success =
             cmd_result.exit_code == 0 && !cmd_result.binary_missing && !cmd_result.timed_out;
         result.verification.passed = success;
-        result.verified = success;
+        result.passed = success;
         result
             .verification
             .checks
@@ -120,10 +127,10 @@ pub fn build_firmware_boot_conf(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::shared::model::boot_repair::{Architecture, ProviderId};
+    use crate::boot::execute::providers::base::ProviderCtx;
+    use crate::boot::execute::target::RecordedTargetRunner;
+    use crate::boot::model::{Architecture, ProviderId};
     use crate::mount::model::MountTargetIdentity;
-    use crate::repair::boot_repair::providers::base::ProviderCtx;
-    use crate::repair::boot_repair::target_exec::RecordedTargetRunner;
     use std::path::PathBuf;
 
     fn ctx() -> ProviderCtx<'static> {
@@ -193,7 +200,7 @@ mod tests {
             efi_device: None,
         };
         let result = provider.verify(&ctx(), &runner);
-        assert!(result.verified);
+        assert!(result.passed);
         let inv = runner.invocations()[0].clone();
         assert_eq!(
             inv.argv,

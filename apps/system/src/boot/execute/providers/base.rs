@@ -1,6 +1,6 @@
 //! Provider trait and shared helpers. Port of `providers/base.py`.
 //!
-//! Each provider implementation owns:
+//! Each provider implementation owns two deliberately separate surfaces:
 //!
 //! * `execute` — write target-local config files + invoke the fixed
 //!   allow-list of target commands.
@@ -9,18 +9,15 @@
 //!   is-installed`, `limine-list`, `catos-firmware-boot-update
 //!   --verify`). Verification must reflect real tool output, not
 //!   just file presence.
-//! * `setup_snapshots` (provider-specific) — only when the target
-//!   root is Btrfs and the registry declares snapshot support for
-//!   this provider.
 //!
 //! The trait is intentionally NOT generic over filesystem access.
-//! Providers receive a [`crate::repair::boot_repair::ProviderCtx`]
+//! Providers receive a [`crate::boot::execute::providers::base::ProviderCtx`]
 //! handle that exposes the confined target root, the target command
 //! runner, and the kernel cmdline.
 
-use crate::shared::model::boot_repair::{BootAction, BootVerification, ProviderId, TargetCommandResult};
+use crate::boot::execute::target::{TargetRequest, TargetRunner};
+use crate::boot::model::{BootAction, BootVerification, ProviderId, TargetCommandResult};
 use crate::mount::model::MountTargetIdentity;
-use crate::repair::boot_repair::target_exec::{TargetRequest, TargetRunner};
 
 /// Shared read-only context every provider receives. Built by the
 /// orchestrator after detection and cmdline generation.
@@ -39,7 +36,7 @@ pub struct ProviderCtx<'a> {
     /// Required by BIOS GRUB.
     pub bios_install_path: Option<String>,
     /// Detected architecture.
-    pub architecture: crate::shared::model::boot_repair::Architecture,
+    pub architecture: crate::boot::model::Architecture,
     /// Branding name (bootloader label). Mirrors bootloadu
     /// `branding_name`; defaults to "CatOS".
     pub branding_name: String,
@@ -47,53 +44,45 @@ pub struct ProviderCtx<'a> {
     pub root_is_btrfs: bool,
 }
 
-/// Result of running one provider recipe. Built by each provider's
-/// `execute` / `verify` methods and folded into the final
-/// [`crate::shared::model::boot_repair::BootRepairReport`] by the
-/// orchestrator.
+/// Result of the authorised effect stage for one provider.
 #[derive(Debug, Clone, Default)]
-pub struct ProviderRecipeResult {
+pub struct ProviderExecutionResult {
     pub actions: Vec<BootAction>,
-    pub verification: BootVerification,
-    /// `true` when the recipe's verify step passed.
-    pub verified: bool,
-    /// Failure message, when execute or verify failed partway.
+    /// Failure message when execution stopped partway.
     pub failure: Option<String>,
-    /// Recorded commands the orchestrator should add to the audit
-    /// trail alongside file-write actions. Kept separate so the
-    /// orchestrator can interleave them with config-write actions
-    /// in chronological order.
     pub command_results: Vec<TargetCommandResult>,
 }
 
-impl ProviderRecipeResult {
+impl ProviderExecutionResult {
     pub fn failed(message: impl Into<String>) -> Self {
         Self {
             failure: Some(message.into()),
-            verified: false,
             ..Self::default()
         }
     }
 }
 
-/// The provider trait. Each variant implements `execute` and
-/// `verify`. The orchestrator decides when each runs.
-///
-/// Methods take `&dyn TargetRunner` rather than `<R: TargetRunner>`
-/// so the trait stays object-safe and the orchestrator can drive
-/// every provider through one `Box<dyn BootProvider>` code path.
-pub trait BootProvider {
-    fn execute(&self, ctx: &ProviderCtx<'_>, runner: &dyn TargetRunner) -> ProviderRecipeResult;
-    fn verify(&self, ctx: &ProviderCtx<'_>, runner: &dyn TargetRunner) -> ProviderRecipeResult;
-    /// Snapshot setup. Default implementation refuses; providers
-    /// that support bootable snapshots override.
-    fn setup_snapshots(
+/// Result of the read-only provider verification stage.
+#[derive(Debug, Clone, Default)]
+pub struct ProviderVerificationResult {
+    pub actions: Vec<BootAction>,
+    pub verification: BootVerification,
+    pub passed: bool,
+    pub command_results: Vec<TargetCommandResult>,
+}
+
+/// Authorised provider effects only.
+pub trait BootProviderExecutor {
+    fn execute(&self, ctx: &ProviderCtx<'_>, runner: &dyn TargetRunner) -> ProviderExecutionResult;
+}
+
+/// Read-only provider postcondition checks only.
+pub trait BootProviderVerifier {
+    fn verify(
         &self,
-        _ctx: &ProviderCtx<'_>,
-        _runner: &dyn TargetRunner,
-    ) -> ProviderRecipeResult {
-        ProviderRecipeResult::failed("provider does not support bootable snapshots")
-    }
+        ctx: &ProviderCtx<'_>,
+        runner: &dyn TargetRunner,
+    ) -> ProviderVerificationResult;
 }
 
 /// Run a target command through the runner and wrap the result so

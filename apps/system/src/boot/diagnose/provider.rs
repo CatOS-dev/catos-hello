@@ -21,7 +21,7 @@
 //!   returns [`DetectionVerdict::Ambiguous`] regardless of how many
 //!   corroborating signals exist.
 
-use crate::shared::model::boot_repair::{FirmwareMethod, ProviderEvidence, ProviderId};
+use crate::boot::model::{FirmwareMethod, ProviderEvidence, ProviderId};
 use crate::mount::model::MountTargetIdentity;
 
 /// Inputs supplied by the orchestrator. All fields are observed
@@ -252,7 +252,7 @@ fn corroborating(
 fn add_package_evidence(evidence: &mut Vec<ProviderEvidence>, installed: &[String]) {
     let distinct: Vec<ProviderId> = ProviderId::all().to_vec();
     for provider in distinct {
-        let packages = crate::repair::boot_repair::registry::profile(provider).runtime_packages;
+        let packages = crate::boot::plan::registry::profile(provider).runtime_packages;
         let present: Vec<&str> = packages
             .iter()
             .copied()

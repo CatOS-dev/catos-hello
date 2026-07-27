@@ -6,20 +6,21 @@
 //! <VERSION> <IMAGE>` for each discovered kernel. Verification calls
 //! `bootctl --esp-path=<ESP> is-installed`.
 
-use crate::shared::model::boot_repair::BootAction;
-use crate::repair::boot_repair::mkinitcpio::Kernel;
-use crate::repair::boot_repair::providers::base::{
-    record_config_write, record_target_command, BootProvider, ProviderCtx, ProviderRecipeResult,
+use crate::boot::execute::providers::base::{
+    record_config_write, record_target_command, BootProviderExecutor, BootProviderVerifier,
+    ProviderCtx, ProviderExecutionResult, ProviderVerificationResult,
 };
-use crate::repair::boot_repair::target_exec::TargetRunner;
+use crate::boot::execute::target::TargetRunner;
+use crate::boot::model::BootAction;
+use crate::boot::plan::initramfs::Kernel;
 
 pub struct SystemdBootProvider<'a> {
     pub kernels: &'a [Kernel],
 }
 
-impl<'a> BootProvider for SystemdBootProvider<'a> {
-    fn execute(&self, ctx: &ProviderCtx<'_>, runner: &dyn TargetRunner) -> ProviderRecipeResult {
-        let mut result = ProviderRecipeResult::default();
+impl<'a> BootProviderExecutor for SystemdBootProvider<'a> {
+    fn execute(&self, ctx: &ProviderCtx<'_>, runner: &dyn TargetRunner) -> ProviderExecutionResult {
+        let mut result = ProviderExecutionResult::default();
         record_config_write(
             &mut result.actions,
             "/etc/kernel/cmdline",
@@ -65,14 +66,20 @@ impl<'a> BootProvider for SystemdBootProvider<'a> {
         }
         result
     }
+}
 
-    fn verify(&self, ctx: &ProviderCtx<'_>, runner: &dyn TargetRunner) -> ProviderRecipeResult {
+impl<'a> BootProviderVerifier for SystemdBootProvider<'a> {
+    fn verify(
+        &self,
+        ctx: &ProviderCtx<'_>,
+        runner: &dyn TargetRunner,
+    ) -> ProviderVerificationResult {
         let esp = ctx
             .esp_mount_point
             .clone()
             .unwrap_or_else(|| "/boot/efi".to_string());
-        let mut result = ProviderRecipeResult::default();
-        let (cmd_result, _) = crate::repair::boot_repair::providers::base::run_target(
+        let mut result = ProviderVerificationResult::default();
+        let (cmd_result, _) = crate::boot::execute::providers::base::run_target(
             runner,
             "bootctl",
             vec![format!("--esp-path={esp}"), "is-installed".into()],
@@ -81,7 +88,7 @@ impl<'a> BootProvider for SystemdBootProvider<'a> {
         let success =
             cmd_result.exit_code == 0 && !cmd_result.binary_missing && !cmd_result.timed_out;
         result.verification.passed = success;
-        result.verified = success;
+        result.passed = success;
         result
             .verification
             .checks
@@ -113,10 +120,10 @@ pub fn build_install_conf(ctx: &ProviderCtx<'_>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::shared::model::boot_repair::{Architecture, ProviderId};
+    use crate::boot::execute::providers::base::ProviderCtx;
+    use crate::boot::execute::target::RecordedTargetRunner;
+    use crate::boot::model::{Architecture, ProviderId};
     use crate::mount::model::MountTargetIdentity;
-    use crate::repair::boot_repair::providers::base::ProviderCtx;
-    use crate::repair::boot_repair::target_exec::RecordedTargetRunner;
     use std::path::PathBuf;
 
     fn ctx() -> ProviderCtx<'static> {
@@ -179,11 +186,10 @@ mod tests {
         let result = provider.execute(&ctx(), &runner);
         assert!(result.failure.is_none());
         let invocations = runner.invocations();
-        let kernel_install_calls: Vec<&crate::repair::boot_repair::target_exec::TargetRequest> =
-            invocations
-                .iter()
-                .filter(|inv| inv.binary == "kernel-install")
-                .collect();
+        let kernel_install_calls: Vec<&crate::boot::execute::target::TargetRequest> = invocations
+            .iter()
+            .filter(|inv| inv.binary == "kernel-install")
+            .collect();
         assert_eq!(kernel_install_calls.len(), 2);
         assert_eq!(kernel_install_calls[0].argv[0], "add");
         assert_eq!(
@@ -218,7 +224,7 @@ mod tests {
         let runner = RecordedTargetRunner::new().queue_raw(0, b"yes".to_vec(), b"".to_vec());
         let provider = SystemdBootProvider { kernels: &[] };
         let result = provider.verify(&ctx(), &runner);
-        assert!(result.verified);
+        assert!(result.passed);
         let invocations = runner.invocations();
         let bootctl = invocations
             .iter()

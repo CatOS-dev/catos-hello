@@ -15,6 +15,7 @@ pub use state::*;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::boot::model::BootLayout;
     use std::path::PathBuf;
 
     #[test]
@@ -193,7 +194,7 @@ mod tests {
                 pretty_name: None,
             }),
             boot_layout: BootLayout::default(),
-            boot_consistency: crate::snapshot::diagnose::boot::evaluate_readonly_consistency(
+            boot_consistency: crate::boot::diagnose::layout::evaluate_readonly_consistency(
                 &BootLayout::default(),
             ),
             backup_root_path: "/.catos-recovery/backups/tx/root-before".into(),

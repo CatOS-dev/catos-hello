@@ -6,12 +6,13 @@
 //! `grub.cfg` for a real Linux menuentry with kernel + initrd
 //! lines — not just file presence.
 
-use crate::shared::model::boot_repair::{Architecture, FirmwareClass};
-use crate::repair::boot_repair::mkinitcpio;
-use crate::repair::boot_repair::providers::base::{
-    record_config_write, record_target_command, BootProvider, ProviderCtx, ProviderRecipeResult,
+use crate::boot::execute::providers::base::{
+    record_config_write, record_target_command, BootProviderExecutor, BootProviderVerifier,
+    ProviderCtx, ProviderExecutionResult, ProviderVerificationResult,
 };
-use crate::repair::boot_repair::target_exec::TargetRunner;
+use crate::boot::execute::target::TargetRunner;
+use crate::boot::model::{Architecture, FirmwareClass};
+use crate::boot::plan::initramfs as mkinitcpio;
 
 pub struct GrubProvider<'a> {
     pub firmware: FirmwareClass,
@@ -19,9 +20,9 @@ pub struct GrubProvider<'a> {
     pub mkinitcpio_inputs: mkinitcpio::MkinitcpioInputs<'a>,
 }
 
-impl<'a> BootProvider for GrubProvider<'a> {
-    fn execute(&self, ctx: &ProviderCtx<'_>, runner: &dyn TargetRunner) -> ProviderRecipeResult {
-        let mut result = ProviderRecipeResult::default();
+impl<'a> BootProviderExecutor for GrubProvider<'a> {
+    fn execute(&self, ctx: &ProviderCtx<'_>, runner: &dyn TargetRunner) -> ProviderExecutionResult {
+        let mut result = ProviderExecutionResult::default();
 
         // 1. Write /etc/default/grub.d/00-catos.cfg
         let defaults = build_grub_defaults(ctx);
@@ -113,20 +114,26 @@ impl<'a> BootProvider for GrubProvider<'a> {
 
         result
     }
+}
 
-    fn verify(&self, _ctx: &ProviderCtx<'_>, _runner: &dyn TargetRunner) -> ProviderRecipeResult {
+impl<'a> BootProviderVerifier for GrubProvider<'a> {
+    fn verify(
+        &self,
+        _ctx: &ProviderCtx<'_>,
+        _runner: &dyn TargetRunner,
+    ) -> ProviderVerificationResult {
         // Real verification reads /boot/grub/grub.cfg from the target
         // and inspects it for a real Linux menuentry. That requires
         // filesystem access; the orchestrator passes the content via
         // the verify path. For the contract-test layer we record a
         // pending check and let the orchestrator fill in the result.
-        ProviderRecipeResult {
-            verification: crate::shared::model::boot_repair::BootVerification {
+        ProviderVerificationResult {
+            verification: crate::boot::model::BootVerification {
                 passed: false,
                 checks: vec!["GRUB_CFG_LINUX_MENUENTRY".into()],
                 failure_message: None,
             },
-            ..ProviderRecipeResult::default()
+            ..ProviderVerificationResult::default()
         }
     }
 }
@@ -166,10 +173,10 @@ pub fn shell_quote(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::shared::model::boot_repair::ProviderId;
+    use crate::boot::execute::providers::base::ProviderCtx;
+    use crate::boot::execute::target::RecordedTargetRunner;
+    use crate::boot::model::ProviderId;
     use crate::mount::model::MountTargetIdentity;
-    use crate::repair::boot_repair::providers::base::ProviderCtx;
-    use crate::repair::boot_repair::target_exec::RecordedTargetRunner;
     use std::path::PathBuf;
 
     fn ctx(arch: Architecture, esp: Option<&str>) -> ProviderCtx<'static> {

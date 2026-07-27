@@ -36,11 +36,11 @@
 //!   mount after a successful repair, in a private namespace, and it
 //!   is unmounted before we return.
 
-pub mod boot_repair;
+pub mod boot;
+pub mod boot_output;
 pub mod mount;
 pub mod orchestrator;
 
-pub use boot_repair::run_boot_repair;
 pub use mount::{
     build_plan, diagnose, run_mount_repair_diagnosis, run_mount_repair_via_cli, MountRepairInputs,
 };

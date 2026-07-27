@@ -4,9 +4,10 @@
 //! planning primitives, durable record storage, and execution live under
 //! `snapshot`, while Recovery remains an application orchestrator.
 
+use catos_system::boot::model::BootLayout;
 use catos_system::snapshot::model::{
-    BootLayout, BtrfsFilesystemIdentity, BtrfsSubvolumeIdentity, FstabRootDefinition,
-    SnapshotErrorKind, TransactionState,
+    BtrfsFilesystemIdentity, BtrfsSubvolumeIdentity, FstabRootDefinition, SnapshotErrorKind,
+    TransactionState,
 };
 use catos_system::snapshot::plan::{build_plan, PlanInputs};
 use catos_system::snapshot::transaction::{AdvanceAction, Intent};

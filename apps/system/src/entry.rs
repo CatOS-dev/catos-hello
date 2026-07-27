@@ -65,10 +65,10 @@ pub fn build_report(
     invocation: Invocation,
     target_root: &crate::target::diagnose::system_root::SystemRoot,
 ) -> Result<crate::target::model::InspectionReport, Error> {
-    use crate::target::model::Warning;
+    use crate::target::diagnose::candidate::inspect_target;
     use crate::target::diagnose::filesystem::RealFilesystem;
     use crate::target::diagnose::runtime::{detect_capabilities, detect_runtime};
-    use crate::target::diagnose::candidate::inspect_target;
+    use crate::target::model::Warning;
     use crate::SCHEMA_VERSION;
 
     let fs = RealFilesystem;
@@ -203,7 +203,8 @@ fn run_via_full_parser(invocation: Invocation, argv: &[String]) -> i32 {
     use std::io::Write;
     // Validate the default target root. In phase 1 the default is `/`;
     // if `/` is somehow inaccessible we cannot proceed.
-    let default_root = match crate::target::diagnose::system_root::SystemRoot::from_user_input("/") {
+    let default_root = match crate::target::diagnose::system_root::SystemRoot::from_user_input("/")
+    {
         Ok(r) => r,
         Err(e) => {
             eprintln!("{invocation}: {e}");
@@ -340,11 +341,14 @@ fn run_repair_fs(argv: &[String]) -> i32 {
     let exit = outcome_exit_code(report.final_outcome);
 
     let render_result = if json {
-        crate::shared::output::render_repair_json(&report, "catos-repair", std::path::Path::new("/"))
-            .and_then(|s| {
-                write_json_stdout(&s)
-                    .map_err(|e| Error::SerializeFailed(format!("stdout write: {e}")))
-            })
+        crate::shared::output::render_repair_json(
+            &report,
+            "catos-repair",
+            std::path::Path::new("/"),
+        )
+        .and_then(|s| {
+            write_json_stdout(&s).map_err(|e| Error::SerializeFailed(format!("stdout write: {e}")))
+        })
     } else {
         let mut out = std::io::stdout();
         crate::shared::output::render_repair_human(&report, &mut out)
@@ -507,11 +511,14 @@ fn run_repair_mount(argv: &[String]) -> i32 {
     let exit = mount_outcome_exit_code(report.final_outcome);
 
     let render_result = if json {
-        crate::shared::output::render_mount_repair_json(&report, "catos-repair", std::path::Path::new("/"))
-            .and_then(|s| {
-                write_json_stdout(&s)
-                    .map_err(|e| Error::SerializeFailed(format!("stdout write: {e}")))
-            })
+        crate::shared::output::render_mount_repair_json(
+            &report,
+            "catos-repair",
+            std::path::Path::new("/"),
+        )
+        .and_then(|s| {
+            write_json_stdout(&s).map_err(|e| Error::SerializeFailed(format!("stdout write: {e}")))
+        })
     } else {
         let mut out = std::io::stdout();
         crate::shared::output::render_mount_repair_human(&report, &mut out)
@@ -647,7 +654,7 @@ fn run_repair_boot(argv: &[String]) -> i32 {
         }
     }
 
-    let report = crate::repair::boot_repair::run_boot_repair_via_cli(
+    let report = crate::repair::boot::run_boot_repair_via_cli(
         root_device.as_deref(),
         root_subvolume.as_deref(),
         esp_device.as_deref(),
@@ -656,14 +663,17 @@ fn run_repair_boot(argv: &[String]) -> i32 {
     let exit = boot_outcome_exit_code(report.final_outcome);
 
     let render_result = if json {
-        crate::shared::output::render_boot_repair_json(&report, "catos-repair", std::path::Path::new("/"))
-            .and_then(|s| {
-                write_json_stdout(&s)
-                    .map_err(|e| Error::SerializeFailed(format!("stdout write: {e}")))
-            })
+        crate::repair::boot_output::render_boot_repair_json(
+            &report,
+            "catos-repair",
+            std::path::Path::new("/"),
+        )
+        .and_then(|s| {
+            write_json_stdout(&s).map_err(|e| Error::SerializeFailed(format!("stdout write: {e}")))
+        })
     } else {
         let mut out = std::io::stdout();
-        crate::shared::output::render_boot_repair_human(&report, &mut out)
+        crate::repair::boot_output::render_boot_repair_human(&report, &mut out)
             .and_then(|_| out.flush())
             .map_err(|e| Error::SerializeFailed(format!("stdout write: {e}")))
     };
@@ -676,8 +686,8 @@ fn run_repair_boot(argv: &[String]) -> i32 {
     }
 }
 
-fn boot_outcome_exit_code(outcome: crate::shared::model::boot_repair::BootRepairOutcome) -> i32 {
-    use crate::shared::model::boot_repair::BootRepairOutcome as O;
+fn boot_outcome_exit_code(outcome: crate::boot::model::BootRepairOutcome) -> i32 {
+    use crate::boot::model::BootRepairOutcome as O;
     match outcome {
         O::Clean | O::Repaired => exit_code::SUCCESS,
         O::AmbiguousTarget | O::AmbiguousProvider | O::Unsupported => exit_code::ARG_ERROR,
@@ -851,7 +861,9 @@ fn run_phase2(invocation: Invocation, args: crate::shared::cli::CliArgs) -> i32 
 
     let outcome_result = match args.command {
         crate::shared::cli::Command::StorageScan => crate::system::run_storage_scan(&args.root),
-        crate::shared::cli::Command::TargetPlan => crate::system::run_target_plan(&args.root, &args.target),
+        crate::shared::cli::Command::TargetPlan => {
+            crate::system::run_target_plan(&args.root, &args.target)
+        }
         crate::shared::cli::Command::TargetMount => {
             crate::system::run_target_mount(&args.root, &args.target)
         }
@@ -924,11 +936,14 @@ fn run_phase3(invocation: Invocation, args: crate::shared::cli::CliArgs) -> i32 
     };
     let outcome = crate::recovery::run_recovery(recovery_args);
     let result = if args.json {
-        crate::recovery::output::render_phase3_json(&outcome, invocation.as_str(), args.root.as_path())
-            .and_then(|s| {
-                write_json_stdout(&s)
-                    .map_err(|e| Error::SerializeFailed(format!("stdout write: {e}")))
-            })
+        crate::recovery::output::render_phase3_json(
+            &outcome,
+            invocation.as_str(),
+            args.root.as_path(),
+        )
+        .and_then(|s| {
+            write_json_stdout(&s).map_err(|e| Error::SerializeFailed(format!("stdout write: {e}")))
+        })
     } else {
         let mut out = std::io::stdout();
         crate::recovery::output::render_phase3_human(&outcome, &mut out)
@@ -970,7 +985,7 @@ fn write_json_stdout(json: &str) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::shared::model::boot_repair::BootRepairOutcome;
+    use crate::boot::model::BootRepairOutcome;
 
     #[test]
     fn partially_repaired_boot_is_not_a_success_exit() {

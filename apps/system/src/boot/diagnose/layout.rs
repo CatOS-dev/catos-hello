@@ -20,10 +20,8 @@
 
 use std::path::Path;
 
+use crate::boot::model::{BootConsistencyReport, BootConsistencyStatus, BootLayout};
 use crate::mount::diagnose::fstab::{FstabEntry, FstabSource};
-use crate::snapshot::model::{
-    BootConsistencyReport, BootConsistencyStatus, BootLayout, SnapshotError, SnapshotErrorKind,
-};
 
 /// Detect the boot layout of a mounted snapshot / root candidate.
 ///
@@ -138,41 +136,6 @@ pub fn evaluate_readonly_consistency(layout: &BootLayout) -> BootConsistencyRepo
         external_boot,
         external_esp,
         reasons,
-    }
-}
-
-/// Refuse the first persistent recovery write unless the read-only
-/// report proves that the root exchange covers all boot resources.
-pub fn require_boot_consistency(report: &BootConsistencyReport) -> Result<(), SnapshotError> {
-    match report.status {
-        BootConsistencyStatus::Consistent
-            if report.checked_read_only && report.root_switch_covers_all_boot_resources =>
-        {
-            Ok(())
-        }
-        BootConsistencyStatus::Inconsistent => Err(SnapshotError::new(
-            SnapshotErrorKind::BootConsistencyInconsistent,
-            format!(
-                "boot resources are inconsistent: {}",
-                report.reasons.join("; ")
-            ),
-        )),
-        BootConsistencyStatus::Unsupported => Err(SnapshotError::new(
-            SnapshotErrorKind::UnsupportedExternalBootLayout,
-            format!(
-                "external boot resources are not supported by root-only recovery: {}",
-                report.reasons.join("; ")
-            ),
-        )),
-        BootConsistencyStatus::Unknown | BootConsistencyStatus::Consistent => {
-            Err(SnapshotError::new(
-                SnapshotErrorKind::BootConsistencyUnknown,
-                format!(
-                    "boot consistency was not established safely: {}",
-                    report.reasons.join("; ")
-                ),
-            ))
-        }
     }
 }
 
@@ -376,13 +339,9 @@ mod tests {
             has_initramfs: true,
             ..BootLayout::default()
         });
-        assert_eq!(
-            report.status,
-            crate::snapshot::model::BootConsistencyStatus::Consistent
-        );
+        assert_eq!(report.status, BootConsistencyStatus::Consistent);
         assert!(report.checked_read_only);
         assert!(report.root_switch_covers_all_boot_resources);
-        require_boot_consistency(&report).unwrap();
     }
 
     #[test]
@@ -404,29 +363,13 @@ mod tests {
             },
         ] {
             let report = evaluate_readonly_consistency(&layout);
-            assert_eq!(
-                report.status,
-                crate::snapshot::model::BootConsistencyStatus::Unsupported
-            );
-            let error = require_boot_consistency(&report).unwrap_err();
-            assert_eq!(
-                error.kind,
-                crate::snapshot::model::SnapshotErrorKind::UnsupportedExternalBootLayout
-            );
+            assert_eq!(report.status, BootConsistencyStatus::Unsupported);
         }
     }
 
     #[test]
     fn readonly_consistency_fails_closed_when_boot_topology_is_unknown() {
         let report = evaluate_readonly_consistency(&BootLayout::default());
-        assert_eq!(
-            report.status,
-            crate::snapshot::model::BootConsistencyStatus::Unknown
-        );
-        let error = require_boot_consistency(&report).unwrap_err();
-        assert_eq!(
-            error.kind,
-            crate::snapshot::model::SnapshotErrorKind::BootConsistencyUnknown
-        );
+        assert_eq!(report.status, BootConsistencyStatus::Unknown);
     }
 }

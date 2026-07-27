@@ -7,28 +7,28 @@ pub mod grub;
 pub mod limine;
 pub mod systemd_boot;
 
-use crate::shared::model::boot_repair::{FirmwareMethod, ProviderId};
+use crate::boot::execute::providers::base::{
+    BootProviderExecutor, BootProviderVerifier, ProviderCtx,
+};
+use crate::boot::model::{FirmwareMethod, ProviderId};
+use crate::boot::plan::initramfs::{self as mkinitcpio, Kernel};
 use crate::mount::model::MountTargetIdentity;
-use crate::repair::boot_repair::mkinitcpio::{self, Kernel};
-use crate::repair::boot_repair::providers::base::{BootProvider, ProviderCtx};
 
-/// Inputs the orchestrator passes when constructing the provider.
+/// Inputs used to construct one provider stage implementation.
 #[derive(Debug, Clone, Default)]
 pub struct ProviderInputs<'a> {
-    pub firmware: crate::shared::model::boot_repair::FirmwareClass,
+    pub firmware: crate::boot::model::FirmwareClass,
     pub mkinitcpio_text: &'a str,
     pub mkinitcpio_inputs: mkinitcpio::MkinitcpioInputs<'a>,
     pub kernels: &'a [Kernel],
     pub efi_device: Option<(String, u32)>,
 }
 
-/// Build the provider implementation for `provider`. Returns a boxed
-/// trait object so the orchestrator can drive every provider through
-/// one code path.
-pub fn build_provider<'a>(
+/// Build the authorised effect surface for `provider`.
+pub fn build_executor<'a>(
     provider: ProviderId,
     inputs: ProviderInputs<'a>,
-) -> Box<dyn BootProvider + 'a> {
+) -> Box<dyn BootProviderExecutor + 'a> {
     match provider {
         ProviderId::Grub => Box::new(grub::GrubProvider {
             firmware: inputs.firmware,
@@ -50,8 +50,33 @@ pub fn build_provider<'a>(
     }
 }
 
-/// Convenience: build the [`ProviderCtx`] the orchestrator hands to
-/// the provider trait methods.
+/// Build the read-only postcondition surface for `provider`.
+pub fn build_verifier<'a>(
+    provider: ProviderId,
+    inputs: ProviderInputs<'a>,
+) -> Box<dyn BootProviderVerifier + 'a> {
+    match provider {
+        ProviderId::Grub => Box::new(grub::GrubProvider {
+            firmware: inputs.firmware,
+            mkinitcpio_text: inputs.mkinitcpio_text,
+            mkinitcpio_inputs: inputs.mkinitcpio_inputs,
+        }),
+        ProviderId::Limine => Box::new(limine::LimineProvider),
+        ProviderId::SystemdBoot => Box::new(systemd_boot::SystemdBootProvider {
+            kernels: inputs.kernels,
+        }),
+        ProviderId::Uki => Box::new(firmware::FirmwareProvider {
+            method: FirmwareMethod::Uki,
+            efi_device: inputs.efi_device,
+        }),
+        ProviderId::Efistub => Box::new(firmware::FirmwareProvider {
+            method: FirmwareMethod::Efistub,
+            efi_device: inputs.efi_device,
+        }),
+    }
+}
+
+/// Build the shared immutable provider context.
 #[allow(clippy::too_many_arguments)]
 pub fn build_ctx<'a>(
     target: &'a MountTargetIdentity,
@@ -59,7 +84,7 @@ pub fn build_ctx<'a>(
     cmdline: String,
     esp_mount_point: Option<String>,
     bios_install_path: Option<String>,
-    architecture: crate::shared::model::boot_repair::Architecture,
+    architecture: crate::boot::model::Architecture,
     branding_name: String,
     root_is_btrfs: bool,
 ) -> ProviderCtx<'a> {
@@ -75,5 +100,5 @@ pub fn build_ctx<'a>(
     }
 }
 
-/// Re-export the runner trait so the orchestrator imports one name.
-pub use crate::repair::boot_repair::target_exec::TargetRunner as Runner;
+/// Re-export the runner trait so capability callers import one name.
+pub use crate::boot::execute::target::TargetRunner as Runner;

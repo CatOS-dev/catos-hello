@@ -1,11 +1,48 @@
 //! Read-only validation of sealed snapshot plans and confirmation tokens.
 
+use crate::boot::model::{BootConsistencyReport, BootConsistencyStatus};
 use crate::snapshot::diagnose::identity::{
     ensure_supported_snapshot_layout, validate_recovery_id, SubvolumePath,
 };
 use crate::snapshot::model::{
     RecoveryPlan, SnapshotError, SnapshotErrorKind, RECOVERY_PLAN_SCHEMA_VERSION,
 };
+
+/// Map the Boot capability's read-only topology assessment into Snapshot
+/// recovery policy. Boot describes the target; Snapshot decides whether a
+/// root-only exchange is safe to perform.
+pub fn require_boot_consistency(report: &BootConsistencyReport) -> Result<(), SnapshotError> {
+    match report.status {
+        BootConsistencyStatus::Consistent
+            if report.checked_read_only && report.root_switch_covers_all_boot_resources =>
+        {
+            Ok(())
+        }
+        BootConsistencyStatus::Inconsistent => Err(SnapshotError::new(
+            SnapshotErrorKind::BootConsistencyInconsistent,
+            format!(
+                "boot resources are inconsistent: {}",
+                report.reasons.join("; ")
+            ),
+        )),
+        BootConsistencyStatus::Unsupported => Err(SnapshotError::new(
+            SnapshotErrorKind::UnsupportedExternalBootLayout,
+            format!(
+                "external boot resources are not supported by root-only recovery: {}",
+                report.reasons.join("; ")
+            ),
+        )),
+        BootConsistencyStatus::Unknown | BootConsistencyStatus::Consistent => {
+            Err(SnapshotError::new(
+                SnapshotErrorKind::BootConsistencyUnknown,
+                format!(
+                    "boot consistency was not established safely: {}",
+                    report.reasons.join("; ")
+                ),
+            ))
+        }
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Confirmation token
@@ -102,7 +139,7 @@ pub fn validate_plan_shape(plan: &RecoveryPlan) -> Result<(), SnapshotError> {
         ));
     }
     let expected_boot_consistency =
-        crate::snapshot::diagnose::boot::evaluate_readonly_consistency(&plan.boot_layout);
+        crate::boot::diagnose::layout::evaluate_readonly_consistency(&plan.boot_layout);
     if plan.boot_consistency != expected_boot_consistency {
         return Err(SnapshotError::new(
             SnapshotErrorKind::BootConsistencyInconsistent,
@@ -148,4 +185,42 @@ pub fn validate_plan_shape(plan: &RecoveryPlan) -> Result<(), SnapshotError> {
         ));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::boot::diagnose::layout::evaluate_readonly_consistency;
+    use crate::boot::model::BootLayout;
+
+    #[test]
+    fn root_contained_boot_resources_authorize_snapshot_recovery() {
+        let report = evaluate_readonly_consistency(&BootLayout {
+            boot_inside_root: true,
+            kernel_versions: vec!["6.12.1-catos".into()],
+            has_initramfs: true,
+            ..BootLayout::default()
+        });
+
+        require_boot_consistency(&report).unwrap();
+    }
+
+    #[test]
+    fn external_boot_resources_map_to_snapshot_policy_error() {
+        let report = evaluate_readonly_consistency(&BootLayout {
+            boot_separate_filesystem: true,
+            ..BootLayout::default()
+        });
+
+        let error = require_boot_consistency(&report).unwrap_err();
+        assert_eq!(error.kind, SnapshotErrorKind::UnsupportedExternalBootLayout);
+    }
+
+    #[test]
+    fn unknown_boot_topology_fails_closed_for_snapshot_recovery() {
+        let report = evaluate_readonly_consistency(&BootLayout::default());
+
+        let error = require_boot_consistency(&report).unwrap_err();
+        assert_eq!(error.kind, SnapshotErrorKind::BootConsistencyUnknown);
+    }
 }

@@ -300,9 +300,10 @@ pub fn load_plan(path: &Path) -> Result<crate::snapshot::model::RecoveryPlan, Sn
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::boot::model::BootLayout;
     use crate::shared::error::FsError;
     use crate::snapshot::model::{
-        BootLayout, BtrfsFilesystemIdentity, BtrfsSubvolumeIdentity, CompletedStep, DiskFacts,
+        BtrfsFilesystemIdentity, BtrfsSubvolumeIdentity, CompletedStep, DiskFacts,
         FstabRootDefinition, RecoveryPlan, TransactionPaths, TransactionState,
     };
     use crate::snapshot::plan::{build_confirmation_token, effective_plan_digest};
@@ -356,7 +357,7 @@ mod tests {
             },
             target_catos_identity: None,
             boot_layout: BootLayout::default(),
-            boot_consistency: crate::snapshot::diagnose::boot::evaluate_readonly_consistency(
+            boot_consistency: crate::boot::diagnose::layout::evaluate_readonly_consistency(
                 &BootLayout::default(),
             ),
             backup_root_path: format!("/.catos-recovery/backups/{id}/root-before"),

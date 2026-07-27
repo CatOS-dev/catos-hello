@@ -10,11 +10,11 @@
 
 #![allow(clippy::field_reassign_with_default)]
 
+use catos_system::boot::diagnose::provider::{detect, DetectionInputs, DetectionVerdict};
+use catos_system::boot::model::ProviderId;
 use catos_system::mount::diagnose::subvolume::CatosConfirmation;
 use catos_system::mount::model::{MountProblem, MountTargetIdentity};
-use catos_system::repair::boot_repair::detect::{detect, DetectionInputs, DetectionVerdict};
 use catos_system::repair::mount::{diagnose as mount_diagnose, MountRepairInputs};
-use catos_system::shared::model::boot_repair::ProviderId;
 use std::path::PathBuf;
 
 fn btrfs_target() -> MountTargetIdentity {

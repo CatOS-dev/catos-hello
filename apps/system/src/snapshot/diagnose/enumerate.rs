@@ -31,6 +31,7 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use crate::boot::model::{BootConsistencyReport, BootLayout};
 use crate::mount::diagnose::fstab::{self, FstabEntry, FstabEntryKind, FstabSource};
 use crate::mount::execute::secure_dir::SESSION_ROOT_PARENT;
 use crate::mount::plan::session::build_probe_plan;
@@ -41,8 +42,8 @@ use crate::snapshot::diagnose::identity::{
     canonical_block_identity, validate_mounted_filesystem, SubvolumePath,
 };
 use crate::snapshot::model::{
-    BootConsistencyReport, BootLayout, BtrfsFilesystemIdentity, BtrfsSubvolumeIdentity,
-    CatosIdentity, FstabRootDefinition, SnapshotError, SnapshotErrorKind, SubvolumeFacts,
+    BtrfsFilesystemIdentity, BtrfsSubvolumeIdentity, CatosIdentity, FstabRootDefinition,
+    SnapshotError, SnapshotErrorKind, SubvolumeFacts,
 };
 use crate::target::execute::confined;
 
@@ -690,9 +691,9 @@ pub fn probe_target_readonly(
                 )
             })?;
         let boot_layout =
-            crate::snapshot::diagnose::boot::detect_layout(&snapshot_root, &snapshot_fstab);
+            crate::boot::diagnose::layout::detect_layout(&snapshot_root, &snapshot_fstab);
         let boot_consistency =
-            crate::snapshot::diagnose::boot::evaluate_readonly_consistency(&boot_layout);
+            crate::boot::diagnose::layout::evaluate_readonly_consistency(&boot_layout);
         let catos_identity = read_catos_identity(top_level, snapshot_btrfs_path);
 
         Ok(TargetProbe {

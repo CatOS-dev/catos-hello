@@ -18,7 +18,7 @@
 //! * Btrfs subvolume flags are added only when the target root is
 //!   Btrfs and a subvolume path is known.
 
-use crate::shared::model::boot_repair::CmdlineConflict;
+use crate::boot::model::CmdlineConflict;
 use crate::mount::model::MountTargetIdentity;
 
 /// Inputs to [`build_kernel_cmdline`].

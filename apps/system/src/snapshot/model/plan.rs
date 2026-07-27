@@ -1,7 +1,8 @@
 //! Immutable snapshot recovery plan model.
 
 use super::identity::{BtrfsFilesystemIdentity, BtrfsSubvolumeIdentity};
-use super::metadata::{BootConsistencyReport, BootLayout, CatosIdentity, FstabRootDefinition};
+use super::metadata::{CatosIdentity, FstabRootDefinition};
+use crate::boot::model::{BootConsistencyReport, BootLayout};
 use crate::shared::model::evidence::Evidence;
 use serde::{Deserialize, Serialize};
 

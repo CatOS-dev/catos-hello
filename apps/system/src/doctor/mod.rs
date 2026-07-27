@@ -6,7 +6,7 @@
 //!   phase2 storage scan)
 //! * filesystem: stage 2 (`fs::diagnose::check_only_for`)
 //! * mount layout / fstab: stage 3 (`repair::mount_repair::diagnose`)
-//! * boot provider: stage 4 (`repair::boot_repair::detect::detect`)
+//! * boot provider: stage 4 (`boot::diagnose::provider::detect`)
 //! * recovery: stage 4 (`recovery::engine::Engine::load` +
 //!   `reconcile_status`, both read-only)
 //!
@@ -18,7 +18,7 @@
 //! * Target selection does not route through `repair`; Doctor resolves
 //!   the target via `target::plan` only. Section-level diagnosis still
 //!   consumes repair flows (`check_only_for`, `mount_repair::diagnose`,
-//!   `boot_repair::detect`) in read-only mode pending later phases that
+//!   `boot::diagnose::provider`) in read-only mode pending later phases that
 //!   will move those surfaces under the `target` capability.
 //! * Doctor NEVER invokes the boot provider's `execute` or `verify`
 //!   methods; it only consults the pure `detect()` function and
@@ -33,13 +33,13 @@
 
 mod sections;
 
+use crate::fs::command::FsCommandRunner;
 use crate::shared::model::doctor::{
     issue_code, recommendation_code, DoctorCleanup, DoctorEnvironment, DoctorIssue,
     DoctorLimitation, DoctorOverallStatus, DoctorRecommendation, DoctorReport, DoctorSection,
     DoctorSectionId, DoctorSectionStatus, DoctorSeverity,
 };
 use crate::shared::model::evidence::Evidence;
-use crate::fs::command::FsCommandRunner;
 
 pub mod target_selection;
 use target_selection::TargetSelection;
@@ -269,12 +269,18 @@ pub mod tests {
         let mut fs_section =
             DoctorSection::new(DoctorSectionId::Filesystem, DoctorSectionStatus::Unhealthy);
         fs_section.issues.push(DoctorIssue::new(
-            "AAA", DoctorSeverity::Error, DoctorSectionId::Filesystem, "fs error",
+            "AAA",
+            DoctorSeverity::Error,
+            DoctorSectionId::Filesystem,
+            "fs error",
         ));
         let mut boot_section =
             DoctorSection::new(DoctorSectionId::Boot, DoctorSectionStatus::Unhealthy);
         boot_section.issues.push(DoctorIssue::new(
-            "BBB", DoctorSeverity::Critical, DoctorSectionId::Boot, "boot critical",
+            "BBB",
+            DoctorSeverity::Critical,
+            DoctorSectionId::Boot,
+            "boot critical",
         ));
         report.sections = vec![fs_section, boot_section];
         aggregate(&mut report);
@@ -315,7 +321,9 @@ pub mod tests {
 
     #[test]
     fn target_summary_for_no_target_uses_none_kind() {
-        let sel = TargetSelection::None { reason: "test".into() };
+        let sel = TargetSelection::None {
+            reason: "test".into(),
+        };
         let summary = sel.to_target_summary();
         assert_eq!(summary.kind, DoctorTargetKind::None);
     }

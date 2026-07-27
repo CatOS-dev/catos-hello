@@ -3,9 +3,10 @@
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
+use crate::boot::model::{BootConsistencyReport, BootLayout};
 use crate::snapshot::model::{
-    BootConsistencyReport, BootLayout, BtrfsFilesystemIdentity, BtrfsSubvolumeIdentity,
-    CatosIdentity, FstabRootDefinition, RecoveryPlan, SnapshotError,
+    BtrfsFilesystemIdentity, BtrfsSubvolumeIdentity, CatosIdentity, FstabRootDefinition,
+    RecoveryPlan, SnapshotError,
 };
 
 #[derive(Serialize)]

@@ -19,22 +19,22 @@
 //! The QEMU crash-resume test in scripts/recovery-qemu-smoke.sh
 //! exercises the same invariants under real SIGKILL.
 
-use catos_system::snapshot::model::TransactionState as S;
-use catos_system::snapshot::model::{
-    BootLayout, BtrfsFilesystemIdentity, BtrfsSubvolumeIdentity, CatosIdentity, CompletedStep,
-    DiskFacts, FstabRootDefinition, SnapshotErrorKind, RecoveryPlan, SubvolumeFacts,
-    TransactionPaths, TransactionRecord, TransactionState, RECOVERY_PLAN_SCHEMA_VERSION,
-    TX_RECORD_SCHEMA_VERSION,
-};
+use catos_system::boot::model::BootLayout;
 use catos_system::snapshot::diagnose::consistency::drift_between;
 use catos_system::snapshot::diagnose::identity::{
     is_protected_recovery_path, safe_join, target_is_running_root, RunningRoot, SubvolumePath,
 };
-use catos_system::snapshot::verify::{validate_plan_shape, verify_confirmation_token};
-use catos_system::snapshot::plan::{build_confirmation_token, effective_plan_digest, PlanInputs};
+use catos_system::snapshot::model::TransactionState as S;
+use catos_system::snapshot::model::{
+    BtrfsFilesystemIdentity, BtrfsSubvolumeIdentity, CatosIdentity, CompletedStep, DiskFacts,
+    FstabRootDefinition, RecoveryPlan, SnapshotErrorKind, SubvolumeFacts, TransactionPaths,
+    TransactionRecord, TransactionState, RECOVERY_PLAN_SCHEMA_VERSION, TX_RECORD_SCHEMA_VERSION,
+};
 use catos_system::snapshot::plan::reconcile::reconcile_with_disk_facts;
-use catos_system::snapshot::transaction::{AdvanceAction, Intent};
+use catos_system::snapshot::plan::{build_confirmation_token, effective_plan_digest, PlanInputs};
 use catos_system::snapshot::store;
+use catos_system::snapshot::transaction::{AdvanceAction, Intent};
+use catos_system::snapshot::verify::{validate_plan_shape, verify_confirmation_token};
 use catos_system::target::execute::confined;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -70,7 +70,7 @@ fn sample_plan() -> RecoveryPlan {
         },
         target_catos_identity: Some(CatosIdentity::default()),
         boot_layout: BootLayout::default(),
-        boot_consistency: catos_system::snapshot::diagnose::boot::evaluate_readonly_consistency(
+        boot_consistency: catos_system::boot::diagnose::layout::evaluate_readonly_consistency(
             &BootLayout::default(),
         ),
         backup_root_path:

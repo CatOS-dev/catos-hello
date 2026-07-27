@@ -9,7 +9,6 @@ use crate::mount::model::CleanupReport;
 use crate::mount::session::cleanup::MountSessionError;
 use crate::mount::session::BtrfsTopLevelRwSession;
 use crate::shared::cli::RecoveryArgs;
-use crate::snapshot::diagnose::boot;
 use crate::snapshot::diagnose::identity::{
     ensure_supported_snapshot_layout, ensure_target_is_not_running_root,
     validate_mounted_filesystem,
@@ -20,6 +19,7 @@ use crate::snapshot::model::{
     TransactionState,
 };
 use crate::snapshot::store;
+use crate::snapshot::verify::require_boot_consistency;
 
 use super::read::probe_existing_transaction_readonly;
 use super::{ensure_cli_root_matches_plan, require_root, require_transaction_id};
@@ -137,7 +137,7 @@ pub(super) fn run_apply(
             "boot consistency report changed after the plan was generated",
         ));
     }
-    boot::require_boot_consistency(&fresh.boot_consistency)?;
+    require_boot_consistency(&fresh.boot_consistency)?;
     ensure_target_is_not_running_root(&fresh.filesystem, &fresh.current_root)?;
     let device = fresh.canonical_device;
 

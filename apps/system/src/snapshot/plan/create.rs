@@ -8,9 +8,10 @@
 
 use crate::snapshot::plan::recover::{build_confirmation_token, effective_plan_digest, hex_encode};
 
+use crate::boot::model::{BootConsistencyStatus, BootLayout};
 use crate::snapshot::model::{
-    BootConsistencyStatus, BootLayout, BtrfsFilesystemIdentity, BtrfsSubvolumeIdentity,
-    CatosIdentity, FstabRootDefinition, RecoveryPlan, SnapshotError, RECOVERY_PLAN_SCHEMA_VERSION,
+    BtrfsFilesystemIdentity, BtrfsSubvolumeIdentity, CatosIdentity, FstabRootDefinition,
+    RecoveryPlan, SnapshotError, RECOVERY_PLAN_SCHEMA_VERSION,
 };
 
 /// Inputs to [`build_plan`]. Everything the builder needs to produce a
@@ -91,7 +92,7 @@ pub fn build_plan(inputs: PlanInputs) -> Result<RecoveryPlan, SnapshotError> {
     );
 
     let boot_consistency =
-        crate::snapshot::diagnose::boot::evaluate_readonly_consistency(&inputs.boot_layout);
+        crate::boot::diagnose::layout::evaluate_readonly_consistency(&inputs.boot_layout);
     let mut refusal_conditions = vec![
         "plan id, filesystem FSID, or subvolume identity has changed".into(),
         "the source snapshot's readonly flag has been cleared between plan and apply".into(),

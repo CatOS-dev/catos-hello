@@ -1,8 +1,9 @@
 //! Recovery application reports and recommendations.
 
+use crate::boot::model::{BootConsistencyReport, BootLayout};
 use crate::snapshot::model::{
-    BootConsistencyReport, BootLayout, BtrfsFilesystemIdentity, BtrfsSubvolumeIdentity,
-    CatosIdentity, CleanupSummary, DiskFacts, TransactionRecord, TransactionState,
+    BtrfsFilesystemIdentity, BtrfsSubvolumeIdentity, CatosIdentity, CleanupSummary, DiskFacts,
+    TransactionRecord, TransactionState,
 };
 use crate::target::model::Warning;
 use serde::{Deserialize, Serialize};

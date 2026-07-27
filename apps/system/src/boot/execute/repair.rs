@@ -5,17 +5,17 @@
 //!
 //! ## What this module owns
 //!
-//! * `boot_repair::registry` — static port of `bootloaders.yaml`.
-//! * `boot_repair::cmdline` — kernel cmdline builder + conflict
+//! * `boot::plan::registry` — static port of `bootloaders.yaml`.
+//! * `boot::plan::cmdline` — kernel cmdline builder + conflict
 //!   detection.
-//! * `boot_repair::mkinitcpio` — mkinitcpio.conf array management +
+//! * `boot::plan::initramfs` — mkinitcpio.conf array management +
 //!   kernel discovery.
-//! * `boot_repair::detect` — evidence-based provider detection.
-//! * `boot_repair::target_exec` — fixed allow-list, argv-only
+//! * `boot::diagnose::provider` — evidence-based provider detection.
+//! * `boot::execute::target` — fixed allow-list, argv-only
 //!   target command executor (replaces `target_env_call`).
-//! * `boot_repair::secureboot` — target-policy-preserving Secure
+//! * `boot::execute::secureboot` — target-policy-preserving Secure
 //!   Boot finalisation.
-//! * `boot_repair::providers` — per-provider recipe implementations
+//! * `boot::execute::providers` — per-provider recipe implementations
 //!   (GRUB, Limine, systemd-boot, UEFI Firmware family for
 //!   UKI/EFI Stub).
 //!
@@ -42,39 +42,28 @@
 //!   never the trigger.
 //! * Partial success from non-atomic operations (EFI NVRAM writes,
 //!   bootloader installs, signing) MUST surface as
-//!   [`crate::shared::model::boot_repair::BootRepairOutcome::PartiallyRepaired`]
+//!   [`crate::boot::model::BootRepairOutcome::PartiallyRepaired`]
 //!   or
-//!   [`crate::shared::model::boot_repair::BootRepairOutcome::ManualInterventionRequired`].
-
-pub mod cmdline;
-pub mod config_tx;
-pub mod detect;
-pub mod inspect;
-pub mod mkinitcpio;
-pub mod providers;
-pub mod registry;
-pub mod secureboot;
-pub mod snapshot_repair;
-pub mod target_exec;
+//!   [`crate::boot::model::BootRepairOutcome::ManualInterventionRequired`].
 
 use std::path::Path;
 
-use crate::shared::model::boot_repair::{
-    BootRepairOutcome, BootRepairReport, BootVerification, FirmwareClass, PlatformFacts,
-    SecureBootReport,
+use crate::boot::diagnose::provider::{detect, DetectionInputs, DetectionVerdict};
+use crate::boot::execute::providers::{build_ctx, build_executor, build_verifier};
+use crate::boot::execute::secureboot::{finalize_secure_boot, SecureBootInputs};
+use crate::boot::execute::target::{TargetRequest, TargetRunner, TrustedTargetRunner};
+use crate::boot::io::read_target_file;
+use crate::boot::model::{
+    BootRepairOutcome, BootRepairReport, BootVerification, PlatformFacts, SecureBootReport,
 };
-use crate::shared::model::evidence::Evidence;
+use crate::boot::plan::cmdline::{build_kernel_cmdline, CmdlineInputs};
+use crate::boot::plan::registry as boot_registry;
 use crate::mount::model::{MountRepairCleanup, MountTargetIdentity};
-use crate::repair::boot_repair::cmdline::{build_kernel_cmdline, CmdlineInputs};
-use crate::repair::boot_repair::detect::{detect, DetectionInputs, DetectionVerdict};
-use crate::repair::boot_repair::providers::{build_ctx, build_provider};
-use crate::repair::boot_repair::registry as boot_registry;
-use crate::repair::boot_repair::secureboot::{finalize_secure_boot, SecureBootInputs};
-use crate::repair::boot_repair::target_exec::{TargetRequest, TargetRunner, TrustedTargetRunner};
+use crate::shared::model::evidence::Evidence;
 
-pub use mkinitcpio::Kernel;
-pub use providers::ProviderInputs;
-pub use registry::ProviderProfile;
+pub use crate::boot::execute::providers::ProviderInputs;
+pub use crate::boot::plan::initramfs::Kernel;
+pub use crate::boot::plan::registry::ProviderProfile;
 
 /// Run the boot-repair flow against an already-mounted target. The
 /// caller (the CLI entry point) is responsible for target discovery,
@@ -163,9 +152,9 @@ pub fn run_boot_repair(
                     platform.firmware.as_registry_str(),
                     platform.architecture.as_str(),
                     match platform.partition_table {
-                        crate::shared::model::boot_repair::PartitionTable::Gpt => "gpt",
-                        crate::shared::model::boot_repair::PartitionTable::Msdos => "msdos",
-                        crate::shared::model::boot_repair::PartitionTable::Unknown => "unknown",
+                        crate::boot::model::PartitionTable::Gpt => "gpt",
+                        crate::boot::model::PartitionTable::Msdos => "msdos",
+                        crate::boot::model::PartitionTable::Unknown => "unknown",
                     }
                 ),
             )],
@@ -233,7 +222,7 @@ pub fn run_boot_repair(
     );
     let mkinitcpio_text = read_target_file(target_root, "etc/mkinitcpio.conf").unwrap_or_default();
     let kernels = collect_target_kernels(target_root);
-    let mkinitcpio_inputs = crate::repair::boot_repair::mkinitcpio::MkinitcpioInputs {
+    let mkinitcpio_inputs = crate::boot::plan::initramfs::MkinitcpioInputs {
         existing_config: &mkinitcpio_text,
         root_filesystem: target.root_fstype.clone(),
         has_plymouth: installed_packages
@@ -325,7 +314,7 @@ pub fn run_boot_repair(
                 "rebuild initramfs with the snapshot overlay hook",
             ));
             let success = !result.binary_missing && !result.timed_out && result.exit_code == 0;
-            pre_provider_actions.push(crate::shared::model::boot_repair::BootAction::TargetCommand {
+            pre_provider_actions.push(crate::boot::model::BootAction::TargetCommand {
                 result: result.clone(),
             });
             (!success).then(|| {
@@ -337,34 +326,33 @@ pub fn run_boot_repair(
         } else {
             None
         };
-    let provider_impl = build_provider(
-        provider,
-        ProviderInputs {
-            firmware: platform.firmware,
-            mkinitcpio_text: &mkinitcpio_text,
-            mkinitcpio_inputs,
-            kernels: &kernels,
-            efi_device,
-        },
-    );
+    let provider_inputs = ProviderInputs {
+        firmware: platform.firmware,
+        mkinitcpio_text: &mkinitcpio_text,
+        mkinitcpio_inputs,
+        kernels: &kernels,
+        efi_device,
+    };
+    let provider_executor = build_executor(provider, provider_inputs.clone());
+    let provider_verifier = build_verifier(provider, provider_inputs);
     let exec_result = if let Some(failure) = pre_provider_failure {
-        let mut result =
-            crate::repair::boot_repair::providers::base::ProviderRecipeResult::default();
-        result.failure = Some(failure);
-        result
+        crate::boot::execute::providers::base::ProviderExecutionResult {
+            failure: Some(failure),
+            ..Default::default()
+        }
     } else {
-        provider_impl.execute(&ctx, &runner)
+        provider_executor.execute(&ctx, &runner)
     };
     let mut actions = config_actions;
     actions.extend(pre_provider_actions);
     actions.extend(exec_result.actions.into_iter().filter(|action| {
         !matches!(
             action,
-            crate::shared::model::boot_repair::BootAction::ConfigWritten { .. }
-                | crate::shared::model::boot_repair::BootAction::ConfigUnchanged { .. }
+            crate::boot::model::BootAction::ConfigWritten { .. }
+                | crate::boot::model::BootAction::ConfigUnchanged { .. }
         )
     }));
-    let mut verification = exec_result.verification;
+    let mut verification = BootVerification::default();
     let mut secureboot_report: Option<SecureBootReport> = None;
 
     let mut warnings = Vec::new();
@@ -385,24 +373,24 @@ pub fn run_boot_repair(
         BootRepairOutcome::PartiallyRepaired
     } else {
         // 6. Verify.
-        let mut verify_result = if provider == crate::shared::model::boot_repair::ProviderId::Grub {
+        let mut verify_result = if provider == crate::boot::model::ProviderId::Grub {
             verify_grub_target(target_root, &kernels)
         } else {
-            provider_impl.verify(&ctx, &runner)
+            provider_verifier.verify(&ctx, &runner)
         };
         if matches!(
             provider,
-            crate::shared::model::boot_repair::ProviderId::Limine
-                | crate::shared::model::boot_repair::ProviderId::SystemdBoot
-                | crate::shared::model::boot_repair::ProviderId::Uki
-                | crate::shared::model::boot_repair::ProviderId::Efistub
+            crate::boot::model::ProviderId::Limine
+                | crate::boot::model::ProviderId::SystemdBoot
+                | crate::boot::model::ProviderId::Uki
+                | crate::boot::model::ProviderId::Efistub
         ) && !target_provider_assets_present(
             provider,
             target_root,
             ctx.esp_mount_point.as_deref(),
             &kernels,
         ) {
-            verify_result.verified = false;
+            verify_result.passed = false;
             verify_result.verification.passed = false;
             verify_result
                 .verification
@@ -415,7 +403,7 @@ pub fn run_boot_repair(
         }
         actions.extend(verify_result.actions);
         verification = merge_verification(verification, verify_result.verification);
-        if !verify_result.verified {
+        if !verify_result.passed {
             if let Err(error) = config_transaction.rollback() {
                 warnings.push(crate::target::model::Warning::new(
                     "CONFIG_ROLLBACK_FAILED",
@@ -438,7 +426,7 @@ pub fn run_boot_repair(
             let (report, outcome_override, secureboot_action) =
                 finalize_secure_boot(&runner, &secureboot_inputs);
             if let Some(result) = secureboot_action {
-                actions.push(crate::shared::model::boot_repair::BootAction::TargetCommand { result });
+                actions.push(crate::boot::model::BootAction::TargetCommand { result });
             }
             secureboot_report = Some(report);
             outcome_override.unwrap_or(BootRepairOutcome::Repaired)
@@ -501,180 +489,30 @@ fn merge_verification(
     }
     existing
 }
-
-/// Production CLI entry point for `catos-repair boot`. Mirrors the
-/// shape of [`crate::repair::mount_repair::run_mount_repair_via_cli`]:
-/// the caller supplies the same `--root-device` /
-/// `--root-subvolume` / `--esp-device` triples that mount repair
-/// accepts, and this function performs target discovery, mounts the
-/// target inside a private namespace, observes the target's boot
-/// evidence, and hands the result to [`run_boot_repair`].
-///
-/// When `authorised` is `false`, the function still performs
-/// discovery and detection but refuses to invoke any provider
-/// recipe (used by future Doctor integration).
-pub fn run_boot_repair_via_cli(
-    root_device: Option<&str>,
-    root_subvolume: Option<&str>,
-    esp_device: Option<&str>,
-    authorised: bool,
-) -> BootRepairReport {
-    if !authorised {
-        return BootRepairReport::refused(
-            BootRepairOutcome::ManualInterventionRequired,
-            "boot repair requires explicit CLI authorisation",
-        );
-    }
-
-    // Reuse the same mount-repair target discovery and read-write
-    // session machinery so device-lock, fstab-aware ESP detection,
-    // and private-namespace mount discipline are the same surfaces
-    // the stage 1–3 path already verified. We delegate the heavy
-    // lifting to a thin wrapper that runs the boot-specific
-    // detection against the mounted target.
-    let mut report = run_boot_repair_mounted(root_device, root_subvolume, esp_device);
-    if report.final_outcome == BootRepairOutcome::Unknown {
-        report.final_outcome = BootRepairOutcome::ManualInterventionRequired;
-        report.requires_human_action = true;
-    }
-    report
-}
-
-/// Internal: discover + mount the target using the mount-repair
-/// discovery, then run boot detection + provider recipe against the
-/// mounted target.
-fn run_boot_repair_mounted(
-    root_device: Option<&str>,
-    root_subvolume: Option<&str>,
-    esp_device: Option<&str>,
-) -> BootRepairReport {
-    let mut session = match crate::repair::mount::open_boot_repair_target_session(
-        root_device,
-        root_subvolume,
-        esp_device,
-    ) {
-        Ok(session) => session,
-        Err(reason) => {
-            return BootRepairReport::refused(BootRepairOutcome::AmbiguousTarget, &reason);
-        }
-    };
-    let target = session.target().clone();
-    let target_root = session.target_root();
-
-    // Build platform facts from the discovered target. The live
-    // host's uname is used for architecture (repair always runs on
-    // the same architecture as the target — there is no
-    // cross-arch repair use case). Firmware and partition table are
-    // derived from the ESP/boot layout the mount-repair discovery
-    // already established.
-    let architecture = match detect_target_architecture(&target_root) {
-        Some(architecture) => architecture,
-        None => {
-            let cleanup = session.cleanup();
-            let all_clean = cleanup.all_clean;
-            return BootRepairReport {
-                target: Some(target),
-                cleanup: MountRepairCleanup {
-                    unmounted: cleanup.unmounted,
-                    residual: cleanup.residual,
-                    all_clean: cleanup.all_clean,
-                },
-                final_outcome: if all_clean {
-                    BootRepairOutcome::AmbiguousTarget
-                } else {
-                    BootRepairOutcome::CleanupIncomplete
-                },
-                requires_human_action: true,
-                fully_complete: false,
-                evidence: vec![Evidence::new(
-                    "TARGET_ARCHITECTURE_UNKNOWN",
-                    "repair::boot",
-                    "target architecture could not be established from target ELF evidence",
-                )],
-                ..BootRepairReport::default()
-            };
-        }
-    };
-    let firmware = if target.esp_device.is_some() {
-        FirmwareClass::Efi
-    } else {
-        FirmwareClass::Bios
-    };
-    let partition_table = detect_partition_table(&target, session.devices());
-    let platform = PlatformFacts {
-        firmware,
-        architecture,
-        partition_table,
-    };
-
-    let detection = collect_detection_inputs_from_target_root(&target_root);
-    let installed_packages = collect_installed_packages_from_target_root(&target_root);
-
-    let bios_install_path = derive_bios_install_disk(&target, session.devices());
-
-    let mut report = run_boot_repair(
-        &target,
-        platform,
-        &target_root,
-        target
-            .boot_layout
-            .as_ref()
-            .and_then(|layout| layout.esp_mount_point())
-            .map(|mount_point| target_root.join(mount_point.trim_start_matches('/')))
-            .as_deref(),
-        &detection,
-        bios_install_path.as_deref(),
-        &installed_packages,
-        session.devices(),
-    );
-    let cleanup = session.cleanup();
-    report.cleanup = MountRepairCleanup {
-        unmounted: cleanup.unmounted,
-        residual: cleanup.residual,
-        all_clean: cleanup.all_clean,
-    };
-    if !report.cleanup.all_clean {
-        report.final_outcome = BootRepairOutcome::CleanupIncomplete;
-        report.requires_human_action = true;
-        report.fully_complete = false;
-    }
-    report
-}
-
-use inspect::{
-    collect_detection_inputs_from_target_root, collect_installed_packages_from_target_root,
-    collect_target_kernels, detect_partition_table, detect_target_architecture,
-    derive_bios_install_disk, derive_efi_device, target_provider_assets_present,
-    target_secureboot_marker_present, target_signed_catos_efi_present, verify_grub_target,
+#[cfg(test)]
+use crate::boot::diagnose::target::{
+    collect_detection_inputs_from_target_root, derive_bios_install_disk,
+    detect_target_architecture, target_regular_file_present,
+};
+use crate::boot::diagnose::target::{
+    collect_target_kernels, derive_efi_device, target_secureboot_marker_present,
+    target_signed_catos_efi_present,
 };
 #[cfg(test)]
-use inspect::{
-    target_efistub_deployed, target_regular_file_in_any, target_regular_file_present,
-    target_uki_deployed,
-};
+use crate::boot::model::FirmwareClass;
+use crate::boot::verify::{target_provider_assets_present, verify_grub_target};
 
-fn read_target_file(root: &Path, relative: &str) -> Option<String> {
-    crate::target::execute::confined::read_rooted_file(root, &format!("/{relative}"))
-        .ok()
-        .and_then(|contents| String::from_utf8(contents).ok())
-}
-
-
-fn has_target_path(root: &Path, relative: &str) -> bool {
-    crate::target::execute::confined::list_rooted_directory_names(root, &format!("/{relative}")).is_ok()
-}
-
-use config_tx::{ConfigTransaction, write_provider_configs};
-use snapshot_repair::{
-    requires_pre_provider_snapshot_initramfs_rebuild, run_snapshot_repair,
-    snapshot_repair_state, write_restored_snapper_config, SnapshotExecution,
+use crate::boot::execute::config::{write_provider_configs, ConfigTransaction};
+use crate::boot::execute::snapshot::{
+    requires_pre_provider_snapshot_initramfs_rebuild, run_snapshot_repair, snapshot_repair_state,
+    write_restored_snapper_config, SnapshotExecution,
 };
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::shared::model::boot_repair::{Architecture, PartitionTable, ProviderId};
-    use crate::repair::boot_repair::target_exec::RecordedTargetRunner;
+    use crate::boot::execute::target::RecordedTargetRunner;
+    use crate::boot::model::{Architecture, PartitionTable, ProviderId};
     use std::fs;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -1038,7 +876,7 @@ mod tests {
             image: "/usr/lib/modules/6.18.0-catos/vmlinuz".into(),
             initramfs: "/boot/initramfs-linux.img".into(),
         }];
-        assert!(!verify_grub_target(&target_root.path, &kernels).verified);
+        assert!(!verify_grub_target(&target_root.path, &kernels).passed);
         fs::write(
             target_root.path.join("boot/initramfs-linux.img"),
             b"\xff\x00initramfs",
@@ -1047,7 +885,7 @@ mod tests {
 
         let verification = verify_grub_target(&target_root.path, &kernels);
 
-        assert!(verification.verified);
+        assert!(verification.passed);
         assert!(verification.verification.passed);
     }
 
@@ -1085,7 +923,7 @@ mod tests {
             initramfs: "/boot/initramfs-linux.img".into(),
         }];
 
-        assert!(verify_grub_target(&target_root.path, &kernels).verified);
+        assert!(verify_grub_target(&target_root.path, &kernels).passed);
     }
 
     #[test]
@@ -1269,7 +1107,7 @@ mod tests {
         let target_root = TempTargetRoot::new();
         fs::create_dir_all(target_root.path.join("etc")).unwrap();
         let target = btrfs_target();
-        let ctx = crate::repair::boot_repair::providers::base::ProviderCtx {
+        let ctx = crate::boot::execute::providers::base::ProviderCtx {
             target: &target,
             provider: ProviderId::Limine,
             cmdline: "root=UUID=root-uuid rw rootflags=subvol=/@".into(),
@@ -1282,7 +1120,7 @@ mod tests {
         let existing =
             "MODULES=()\nBINARIES=()\nFILES=()\nHOOKS=(base systemd block filesystems)\n";
         fs::write(target_root.path.join("etc/mkinitcpio.conf"), existing).unwrap();
-        let inputs = crate::repair::boot_repair::mkinitcpio::MkinitcpioInputs {
+        let inputs = crate::boot::plan::initramfs::MkinitcpioInputs {
             existing_config: existing,
             root_filesystem: "btrfs".into(),
             provider: ProviderId::Limine,

@@ -6,9 +6,9 @@
 //! 1. **Pure model + helper layer** (lib-only, no I/O):
 //!    provider registry, platform matrix, cmdline builder,
 //!    mkinitcpio config, target command allow-list.
-//! 2. **Detection layer** (`repair::boot_repair::detect`): fed
+//! 2. **Detection layer** (`boot::diagnose::provider`): fed
 //!    synthetic evidence, produces a verdict we assert against.
-//! 3. **Provider recipe layer** (`repair::boot_repair::providers`):
+//! 3. **Provider recipe layer** (`boot::execute::providers`):
 //!    fed a `RecordedTargetRunner`, records exact argv, verifies
 //!    exit-code interpretation.
 //! 4. **Binary subprocess (CLI contract)**: spawns the real binary
@@ -23,28 +23,30 @@
 
 use std::process::Command;
 
-use catos_system::shared::model::boot_repair::{
-    Architecture, BootRepairOutcome, FirmwareClass, FirmwareMethod, PartitionTable, ProviderId,
+use catos_system::boot::diagnose::provider::{detect, DetectionInputs, DetectionVerdict};
+use catos_system::boot::execute::providers::base::{
+    BootProviderExecutor, BootProviderVerifier, ProviderCtx,
 };
-use catos_system::mount::model::MountTargetIdentity;
-use catos_system::repair::boot_repair::cmdline::{build_kernel_cmdline, CmdlineInputs};
-use catos_system::repair::boot_repair::detect::{detect, DetectionInputs, DetectionVerdict};
-use catos_system::repair::boot_repair::mkinitcpio;
-use catos_system::repair::boot_repair::providers::base::{BootProvider, ProviderCtx};
-use catos_system::repair::boot_repair::providers::firmware::FirmwareProvider;
-use catos_system::repair::boot_repair::providers::grub::{build_grub_defaults, GrubProvider};
-use catos_system::repair::boot_repair::providers::limine::LimineProvider;
-use catos_system::repair::boot_repair::providers::systemd_boot::{
+use catos_system::boot::execute::providers::firmware::FirmwareProvider;
+use catos_system::boot::execute::providers::grub::{build_grub_defaults, GrubProvider};
+use catos_system::boot::execute::providers::limine::LimineProvider;
+use catos_system::boot::execute::providers::systemd_boot::{
     build_install_conf, SystemdBootProvider,
 };
-use catos_system::repair::boot_repair::registry::{
+use catos_system::boot::execute::secureboot::{should_finalize, FinalizeDecision};
+use catos_system::boot::execute::target::{
+    RecordedTargetRunner, TargetRunner, TrustedTargetRunner,
+};
+use catos_system::boot::model::{
+    Architecture, BootRepairOutcome, FirmwareClass, FirmwareMethod, PartitionTable, ProviderId,
+};
+use catos_system::boot::plan::cmdline::{build_kernel_cmdline, CmdlineInputs};
+use catos_system::boot::plan::initramfs as mkinitcpio;
+use catos_system::boot::plan::registry::{
     partition_table_supported, platform_supported, secure_boot_supported, snapshot_profile,
     target_platform_supported, SnapshotManager,
 };
-use catos_system::repair::boot_repair::secureboot::{should_finalize, FinalizeDecision};
-use catos_system::repair::boot_repair::target_exec::{
-    RecordedTargetRunner, TargetRunner, TrustedTargetRunner,
-};
+use catos_system::mount::model::MountTargetIdentity;
 
 fn bin_path() -> std::path::PathBuf {
     std::path::PathBuf::from(env!("CARGO_BIN_EXE_catos-system"))
@@ -219,8 +221,8 @@ fn secureboot_decision_preserves_target_policy_only() {
 fn secureboot_inputs(
     provider: ProviderId,
     target_policy: bool,
-) -> catos_system::repair::boot_repair::secureboot::SecureBootInputs {
-    catos_system::repair::boot_repair::secureboot::SecureBootInputs {
+) -> catos_system::boot::execute::secureboot::SecureBootInputs {
+    catos_system::boot::execute::secureboot::SecureBootInputs {
         provider,
         target_marker_present: target_policy,
         ..Default::default()
@@ -390,7 +392,7 @@ fn firmware_provider_uses_plain_branding_label() {
         branding_name: "CatOS".into(),
         root_is_btrfs: true,
     };
-    let conf = catos_system::repair::boot_repair::providers::firmware::build_firmware_boot_conf(
+    let conf = catos_system::boot::execute::providers::firmware::build_firmware_boot_conf(
         FirmwareMethod::Uki,
         &ctx,
         Some(&("/dev/nvme0n1".to_string(), 1)),
@@ -427,7 +429,7 @@ fn limine_verify_records_limine_list() {
     };
     let runner = RecordedTargetRunner::new().queue_raw(0, b"CatOS\n".to_vec(), b"".to_vec());
     let result = LimineProvider.verify(&ctx, &runner);
-    assert!(result.verified);
+    assert!(result.passed);
     assert!(result.verification.passed);
 }
 
@@ -455,7 +457,7 @@ fn limine_verify_fails_when_limine_list_exits_nonzero() {
     };
     let runner = RecordedTargetRunner::new().queue_raw(1, b"".to_vec(), b"missing".to_vec());
     let result = LimineProvider.verify(&ctx, &runner);
-    assert!(!result.verified);
+    assert!(!result.passed);
     assert!(result.verification.failure_message.is_some());
 }
 
@@ -586,7 +588,7 @@ fn firmware_verify_uses_force_and_verify_flags() {
         efi_device: None,
     };
     let result = provider.verify(&grub_ctx_provider(ProviderId::Efistub), &runner);
-    assert!(result.verified);
+    assert!(result.passed);
     assert_eq!(
         runner.invocations()[0].argv,
         vec!["--force".to_string(), "--verify".to_string()]
@@ -752,7 +754,7 @@ fn cmdline_conflicting_root_value_surfaces_conflict() {
         luks_root: None,
     });
     assert!(conflicts.iter().any(|c| matches!(c,
-        catos_system::shared::model::boot_repair::CmdlineConflict::ConflictingValue { key, .. } if key == "root"
+        catos_system::boot::model::CmdlineConflict::ConflictingValue { key, .. } if key == "root"
     )));
 }
 
@@ -763,7 +765,7 @@ fn cmdline_conflicting_root_value_surfaces_conflict() {
 #[test]
 fn target_executor_refuses_non_allowlisted_binary() {
     let runner = TrustedTargetRunner::new();
-    let request = catos_system::repair::boot_repair::target_exec::TargetRequest::new(
+    let request = catos_system::boot::execute::target::TargetRequest::new(
         "rm",
         vec!["-rf".into(), "/".into()],
         "hostile",
@@ -775,7 +777,7 @@ fn target_executor_refuses_non_allowlisted_binary() {
 
 #[test]
 fn target_executor_allow_list_covers_only_documented_tools() {
-    use catos_system::repair::boot_repair::target_exec::ALLOWED_BINARIES;
+    use catos_system::boot::execute::target::ALLOWED_BINARIES;
     for tool in [
         "mkinitcpio",
         "grub-install",
@@ -805,7 +807,7 @@ trait AllowedBinariesLookup {
 
 impl AllowedBinariesLookup for () {
     fn contains(name: &str) -> bool {
-        catos_system::repair::boot_repair::target_exec::ALLOWED_BINARIES.contains(&name)
+        catos_system::boot::execute::target::ALLOWED_BINARIES.contains(&name)
     }
 }
 

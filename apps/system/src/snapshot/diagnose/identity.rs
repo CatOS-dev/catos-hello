@@ -407,9 +407,10 @@ pub fn target_is_running_root(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::boot::model::BootLayout;
     use crate::snapshot::diagnose::consistency::*;
     use crate::snapshot::model::{
-        BootLayout, CatosIdentity, FstabRootDefinition, RECOVERY_PLAN_SCHEMA_VERSION,
+        CatosIdentity, FstabRootDefinition, RECOVERY_PLAN_SCHEMA_VERSION,
     };
     use crate::snapshot::plan::{build_confirmation_token, effective_plan_digest};
     use crate::snapshot::verify::*;
@@ -448,7 +449,7 @@ mod tests {
             },
             target_catos_identity: Some(CatosIdentity::default()),
             boot_layout: BootLayout::default(),
-            boot_consistency: crate::snapshot::diagnose::boot::evaluate_readonly_consistency(
+            boot_consistency: crate::boot::diagnose::layout::evaluate_readonly_consistency(
                 &BootLayout::default(),
             ),
             backup_root_path: format!("/.catos-recovery/backups/{PLAN_ID}/root-before"),
@@ -619,7 +620,7 @@ mod tests {
     #[test]
     fn validate_plan_shape_rejects_forged_boot_consistency() {
         let mut plan = sample_plan();
-        plan.boot_consistency.status = crate::snapshot::model::BootConsistencyStatus::Consistent;
+        plan.boot_consistency.status = crate::boot::model::BootConsistencyStatus::Consistent;
         plan.boot_consistency.root_switch_covers_all_boot_resources = true;
         let err = validate_plan_shape(&plan).unwrap_err();
         assert_eq!(err.kind, SnapshotErrorKind::BootConsistencyInconsistent);

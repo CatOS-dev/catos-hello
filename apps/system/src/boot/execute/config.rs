@@ -5,7 +5,7 @@
 
 use std::path::Path;
 
-use crate::shared::model::boot_repair::{BootAction, FirmwareMethod, ProviderId};
+use crate::boot::model::{BootAction, FirmwareMethod, ProviderId};
 
 pub(super) struct ConfigTransaction {
     root: std::path::PathBuf,
@@ -37,8 +37,7 @@ impl ConfigTransaction {
         crate::target::execute::confined::create_rooted_directory(&self.root, parent)
             .map_err(|error| format!("cannot create target config parent {parent}: {error}"))?;
         let existing =
-            crate::target::execute::confined::read_rooted_file(&self.root, target_path)
-                .ok();
+            crate::target::execute::confined::read_rooted_file(&self.root, target_path).ok();
         if existing.as_deref() == Some(contents.as_bytes()) {
             return Ok(BootAction::ConfigUnchanged {
                 target_path: target_path.to_string(),
@@ -104,12 +103,13 @@ impl ConfigTransaction {
 pub(super) fn write_provider_configs(
     transaction: &mut ConfigTransaction,
     provider: ProviderId,
-    ctx: &crate::repair::boot_repair::providers::base::ProviderCtx<'_>,
+    ctx: &crate::boot::execute::providers::base::ProviderCtx<'_>,
     efi_device: Option<&(String, u32)>,
     mkinitcpio_text: &str,
-    mkinitcpio_inputs: &crate::repair::boot_repair::mkinitcpio::MkinitcpioInputs<'_>,
+    mkinitcpio_inputs: &crate::boot::plan::initramfs::MkinitcpioInputs<'_>,
 ) -> Result<Vec<BootAction>, String> {
-    use crate::repair::boot_repair::{mkinitcpio, providers};
+    use crate::boot::execute::providers;
+    use crate::boot::plan::initramfs as mkinitcpio;
 
     // bootloadu configures mkinitcpio before every provider. Limine and
     // systemd-boot snapshot overlays therefore need the same target config,
@@ -199,8 +199,7 @@ mod tests {
             Some("new\n")
         );
         assert_eq!(
-            read(&root, "etc/default/grub.d/00-catos.cfg.catos-repair.backup")
-                .as_deref(),
+            read(&root, "etc/default/grub.d/00-catos.cfg.catos-repair.backup").as_deref(),
             Some("old\n")
         );
         assert!(matches!(action, BootAction::ConfigWritten { .. }));
@@ -214,7 +213,9 @@ mod tests {
         fs::write(root.join("etc/catos/existing.conf"), "before\n").unwrap();
         let mut transaction = ConfigTransaction::new(&root);
 
-        transaction.write("/etc/catos/existing.conf", "after\n").unwrap();
+        transaction
+            .write("/etc/catos/existing.conf", "after\n")
+            .unwrap();
         transaction.write("/etc/catos/new.conf", "new\n").unwrap();
         transaction.rollback().unwrap();
 

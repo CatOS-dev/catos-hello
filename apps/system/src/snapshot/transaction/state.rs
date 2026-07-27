@@ -261,8 +261,8 @@ mod tests {
             },
             target_catos_identity: None,
             boot_layout: Default::default(),
-            boot_consistency: crate::snapshot::diagnose::boot::evaluate_readonly_consistency(
-                &crate::snapshot::model::BootLayout::default(),
+            boot_consistency: crate::boot::diagnose::layout::evaluate_readonly_consistency(
+                &crate::boot::model::BootLayout::default(),
             ),
             backup_root_path: "/.catos-recovery/backups/p-test/root-before".into(),
             staging_root_path: "/.catos-recovery/staging/p-test/new-root".into(),

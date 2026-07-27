@@ -2,14 +2,14 @@
 
 use std::path::Path;
 
+use crate::boot::diagnose::provider::{detect, DetectionInputs, DetectionVerdict};
+use crate::mount::model::MountTargetIdentity as RepairTargetIdentity;
 use crate::shared::model::doctor::{
     issue_code, recommendation_code, DoctorIssue, DoctorLimitation, DoctorRecommendation,
     DoctorReport, DoctorSection, DoctorSectionId, DoctorSectionStatus, DoctorSeverity,
 };
 use crate::shared::model::evidence::Evidence;
-use crate::mount::model::MountTargetIdentity as RepairTargetIdentity;
 use crate::target::model::TargetIdentity;
-use crate::repair::boot_repair::detect::{detect, DetectionInputs, DetectionVerdict};
 
 use super::{has_target_path, push_evidence, read_target_file, set_section, target_root_path};
 
@@ -24,7 +24,11 @@ pub(in crate::doctor) fn run_boot_section(
     let repair_target = repair_identity_from(target);
     let verdict = detect(&inputs, &repair_target);
     match verdict {
-        DetectionVerdict::Detected { provider, method, evidence } => {
+        DetectionVerdict::Detected {
+            provider,
+            method,
+            evidence,
+        } => {
             for ev in evidence {
                 push_evidence(sections, id, provider_evidence_to_evidence(ev));
             }
@@ -33,7 +37,7 @@ pub(in crate::doctor) fn run_boot_section(
                 id,
                 Evidence::new(
                     "PROVIDER_DETECTED",
-                    "repair::boot_repair::detect",
+                    "boot::diagnose::provider",
                     format!("provider={} method={:?}", provider.as_str(), method),
                 ),
             );
@@ -56,7 +60,10 @@ pub(in crate::doctor) fn run_boot_section(
                 );
             }
         }
-        DetectionVerdict::Conflict { providers, evidence } => {
+        DetectionVerdict::Conflict {
+            providers,
+            evidence,
+        } => {
             for ev in evidence {
                 push_evidence(sections, id, provider_evidence_to_evidence(ev));
             }
@@ -128,27 +135,24 @@ fn collect_detection_inputs(target: &TargetIdentity) -> DetectionInputs {
 
 fn inspect_provider_assets(
     target: &TargetIdentity,
-    provider: crate::shared::model::boot_repair::ProviderId,
+    provider: crate::boot::model::ProviderId,
 ) -> bool {
     let root = target_root_path(target);
     match provider {
-        crate::shared::model::boot_repair::ProviderId::Grub => has_target_path(&root, "boot/grub"),
-        crate::shared::model::boot_repair::ProviderId::Limine => {
+        crate::boot::model::ProviderId::Grub => has_target_path(&root, "boot/grub"),
+        crate::boot::model::ProviderId::Limine => {
             read_target_file(&root, "etc/default/limine").is_some()
         }
-        crate::shared::model::boot_repair::ProviderId::SystemdBoot => {
+        crate::boot::model::ProviderId::SystemdBoot => {
             read_target_file(&root, "etc/kernel/install.conf.d/20-catos-bootloadu.conf").is_some()
         }
-        crate::shared::model::boot_repair::ProviderId::Uki
-        | crate::shared::model::boot_repair::ProviderId::Efistub => {
+        crate::boot::model::ProviderId::Uki | crate::boot::model::ProviderId::Efistub => {
             read_target_file(&root, "etc/catos/firmware-boot.conf").is_some()
         }
     }
 }
 
-fn provider_evidence_to_evidence(
-    ev: crate::shared::model::boot_repair::ProviderEvidence,
-) -> Evidence {
+fn provider_evidence_to_evidence(ev: crate::boot::model::ProviderEvidence) -> Evidence {
     Evidence::new(ev.code, ev.source, ev.message).with_value(format!(
         "provider={} authoritative={}",
         ev.provider.as_str(),
@@ -173,7 +177,7 @@ fn push_boot_evidence(
         id,
         Evidence::new(
             "DETECTION_INPUTS",
-            "repair::boot_repair::detect",
+            "boot::diagnose::provider",
             format!("{count} authoritative provider signal(s) present"),
         ),
     );

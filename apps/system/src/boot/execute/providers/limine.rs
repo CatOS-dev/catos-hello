@@ -5,16 +5,17 @@
 //! carries `limine.conf` plus deployed kernel/initramfs assets for
 //! every discovered kernel.
 
-use crate::repair::boot_repair::providers::base::{
-    record_config_write, record_target_command, BootProvider, ProviderCtx, ProviderRecipeResult,
+use crate::boot::execute::providers::base::{
+    record_config_write, record_target_command, BootProviderExecutor, BootProviderVerifier,
+    ProviderCtx, ProviderExecutionResult, ProviderVerificationResult,
 };
-use crate::repair::boot_repair::target_exec::TargetRunner;
+use crate::boot::execute::target::TargetRunner;
 
 pub struct LimineProvider;
 
-impl BootProvider for LimineProvider {
-    fn execute(&self, ctx: &ProviderCtx<'_>, runner: &dyn TargetRunner) -> ProviderRecipeResult {
-        let mut result = ProviderRecipeResult::default();
+impl BootProviderExecutor for LimineProvider {
+    fn execute(&self, ctx: &ProviderCtx<'_>, runner: &dyn TargetRunner) -> ProviderExecutionResult {
+        let mut result = ProviderExecutionResult::default();
         record_config_write(
             &mut result.actions,
             "/etc/kernel/cmdline",
@@ -53,10 +54,16 @@ impl BootProvider for LimineProvider {
         }
         result
     }
+}
 
-    fn verify(&self, _ctx: &ProviderCtx<'_>, runner: &dyn TargetRunner) -> ProviderRecipeResult {
-        let mut result = ProviderRecipeResult::default();
-        let (cmd_result, _) = crate::repair::boot_repair::providers::base::run_target(
+impl BootProviderVerifier for LimineProvider {
+    fn verify(
+        &self,
+        _ctx: &ProviderCtx<'_>,
+        runner: &dyn TargetRunner,
+    ) -> ProviderVerificationResult {
+        let mut result = ProviderVerificationResult::default();
+        let (cmd_result, _) = crate::boot::execute::providers::base::run_target(
             runner,
             "limine-list",
             Vec::new(),
@@ -67,7 +74,7 @@ impl BootProvider for LimineProvider {
         let success =
             cmd_result.exit_code == 0 && !cmd_result.binary_missing && !cmd_result.timed_out;
         result.verification.passed = success;
-        result.verified = success;
+        result.passed = success;
         if !success {
             result.verification.failure_message = Some(format!(
                 "limine-list reported failure (exit={})",
@@ -76,7 +83,7 @@ impl BootProvider for LimineProvider {
         }
         result
             .actions
-            .push(crate::shared::model::boot_repair::BootAction::TargetCommand { result: cmd_result });
+            .push(crate::boot::model::BootAction::TargetCommand { result: cmd_result });
         result
     }
 }
@@ -101,10 +108,10 @@ pub fn build_limine_defaults(ctx: &ProviderCtx<'_>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::shared::model::boot_repair::{Architecture, ProviderId};
+    use crate::boot::execute::providers::base::ProviderCtx;
+    use crate::boot::execute::target::RecordedTargetRunner;
+    use crate::boot::model::{Architecture, ProviderId};
     use crate::mount::model::MountTargetIdentity;
-    use crate::repair::boot_repair::providers::base::ProviderCtx;
-    use crate::repair::boot_repair::target_exec::RecordedTargetRunner;
     use std::path::PathBuf;
 
     fn ctx() -> ProviderCtx<'static> {
@@ -157,7 +164,7 @@ mod tests {
     fn limine_verify_records_limine_list() {
         let runner = RecordedTargetRunner::new().queue_raw(0, b"CatOS\n".to_vec(), b"".to_vec());
         let result = LimineProvider.verify(&ctx(), &runner);
-        assert!(result.verified);
+        assert!(result.passed);
         assert!(result.verification.passed);
         assert!(runner.invoked_binary("limine-list"));
     }
@@ -166,7 +173,7 @@ mod tests {
     fn limine_verify_fails_when_limine_list_exits_nonzero() {
         let runner = RecordedTargetRunner::new().queue_raw(1, b"".to_vec(), b"missing".to_vec());
         let result = LimineProvider.verify(&ctx(), &runner);
-        assert!(!result.verified);
+        assert!(!result.passed);
         assert!(result.verification.failure_message.is_some());
     }
 }

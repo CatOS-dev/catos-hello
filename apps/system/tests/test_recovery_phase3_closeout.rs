@@ -346,7 +346,7 @@ fn sample_record_with_cleanup(summary: Option<CleanupSummary>) -> TransactionRec
         },
         target_catos_identity: None,
         boot_layout: Default::default(),
-        boot_consistency: catos_system::snapshot::diagnose::boot::evaluate_readonly_consistency(
+        boot_consistency: catos_system::boot::diagnose::layout::evaluate_readonly_consistency(
             &Default::default(),
         ),
         backup_root_path: "/.catos-recovery/backups/tx-1/root-before".into(),
@@ -555,10 +555,10 @@ fn exit_code_for_completed_apply_with_clean_cleanup_is_success() {
 /// versa).
 #[test]
 fn attach_cleanup_does_not_clear_last_error() {
+    use catos_system::snapshot::execute::engine::{Engine, EngineOptions};
     use catos_system::snapshot::model::{
         BtrfsFilesystemIdentity, CompletedStep, RecoveryPlan, RECOVERY_PLAN_SCHEMA_VERSION,
     };
-    use catos_system::snapshot::execute::engine::{Engine, EngineOptions};
     use std::path::PathBuf;
 
     let top = std::env::temp_dir().join(format!(
@@ -601,7 +601,7 @@ fn attach_cleanup_does_not_clear_last_error() {
         },
         target_catos_identity: None,
         boot_layout: Default::default(),
-        boot_consistency: catos_system::snapshot::diagnose::boot::evaluate_readonly_consistency(
+        boot_consistency: catos_system::boot::diagnose::layout::evaluate_readonly_consistency(
             &Default::default(),
         ),
         backup_root_path:
@@ -808,11 +808,11 @@ fn secure_dir_remove_session_dir_refuses_symlink() {
 
 #[test]
 fn record_mut_last_cleanup_is_inmemory_only_and_attach_cleanup_persists() {
+    use catos_system::snapshot::execute::engine::{Engine, EngineOptions};
     use catos_system::snapshot::model::{
         BtrfsFilesystemIdentity, BtrfsSubvolumeIdentity, FstabRootDefinition, RecoveryPlan,
         RECOVERY_PLAN_SCHEMA_VERSION,
     };
-    use catos_system::snapshot::execute::engine::{Engine, EngineOptions};
     use catos_system::snapshot::store;
     use std::path::PathBuf;
 
@@ -856,7 +856,7 @@ fn record_mut_last_cleanup_is_inmemory_only_and_attach_cleanup_persists() {
         },
         target_catos_identity: None,
         boot_layout: Default::default(),
-        boot_consistency: catos_system::snapshot::diagnose::boot::evaluate_readonly_consistency(
+        boot_consistency: catos_system::boot::diagnose::layout::evaluate_readonly_consistency(
             &Default::default(),
         ),
         backup_root_path:

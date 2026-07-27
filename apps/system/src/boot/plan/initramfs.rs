@@ -27,8 +27,8 @@
 //!   precondition holds, mirroring bootloadu's
 //!   `has_unencrypted_separate_boot` check.
 
-use crate::shared::model::boot_repair::ProviderId;
-use crate::repair::boot_repair::registry;
+use crate::boot::model::ProviderId;
+use crate::boot::plan::registry;
 
 /// One row of the mkinitcpio arrays the configurator manages.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]

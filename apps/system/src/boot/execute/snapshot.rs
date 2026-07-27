@@ -4,12 +4,12 @@
 
 use std::path::Path;
 
-use crate::repair::boot_repair::config_tx::ConfigTransaction;
-use crate::repair::boot_repair::registry as boot_registry;
-use crate::repair::boot_repair::target_exec::{TargetRequest, TargetRunner};
-use crate::shared::model::boot_repair::{BootAction, ProviderId};
+use crate::boot::execute::config::ConfigTransaction;
+use crate::boot::execute::target::{TargetRequest, TargetRunner};
+use crate::boot::model::{BootAction, ProviderId};
+use crate::boot::plan::registry as boot_registry;
 
-use super::read_target_file;
+use crate::boot::io::read_target_file;
 
 #[derive(Debug, Clone, Default)]
 pub(super) struct SnapshotRepairState {
@@ -36,11 +36,8 @@ pub(super) fn snapshot_repair_state(
         return SnapshotRepairState::default();
     }
 
-    if crate::target::execute::confined::read_rooted_file(
-        target_root,
-        "/etc/snapper/configs/root",
-    )
-    .is_ok()
+    if crate::target::execute::confined::read_rooted_file(target_root, "/etc/snapper/configs/root")
+        .is_ok()
     {
         return SnapshotRepairState {
             enabled: true,
@@ -54,7 +51,7 @@ pub(super) fn snapshot_repair_state(
     )
     .ok()
     .and_then(|bytes| String::from_utf8(bytes).ok());
-    if super::has_target_path(target_root, ".snapshots") && template.is_some() {
+    if crate::boot::io::has_target_path(target_root, ".snapshots") && template.is_some() {
         return SnapshotRepairState {
             enabled: true,
             restore_root_config: template,
@@ -96,9 +93,9 @@ fn register_snapper_root(existing: Option<&str>) -> Result<String, String> {
         let mut configs = values.split_whitespace().collect::<Vec<_>>();
         if configs.iter().any(|name| {
             name.is_empty()
-                || !name
-                    .chars()
-                    .all(|character| character.is_ascii_alphanumeric() || matches!(character, '_' | '.' | '-'))
+                || !name.chars().all(|character| {
+                    character.is_ascii_alphanumeric() || matches!(character, '_' | '.' | '-')
+                })
         }) {
             return Err("cannot safely update invalid SNAPPER_CONFIGS value".into());
         }
@@ -119,11 +116,7 @@ pub(super) fn requires_pre_provider_snapshot_initramfs_rebuild(
     provider: ProviderId,
     snapshots_enabled: bool,
 ) -> bool {
-    snapshots_enabled
-        && matches!(
-            provider,
-            ProviderId::Limine | ProviderId::SystemdBoot
-        )
+    snapshots_enabled && matches!(provider, ProviderId::Limine | ProviderId::SystemdBoot)
 }
 
 pub(super) fn run_snapshot_repair(
@@ -142,12 +135,10 @@ pub(super) fn run_snapshot_repair(
         let zero_deployment = require_deployment
             && target_has_snapshots
             && snapshot_generate_reports_zero_deployment(&result);
-        execution
-            .actions
-            .push(BootAction::SnapshotStep {
-                description: description.into(),
-                result: Some(result),
-            });
+        execution.actions.push(BootAction::SnapshotStep {
+            description: description.into(),
+            result: Some(result),
+        });
         if !success {
             execution.failure = Some(format!("{description} failed"));
         } else if zero_deployment {
@@ -159,7 +150,12 @@ pub(super) fn run_snapshot_repair(
 
     run(
         "snapper",
-        vec!["--no-dbus".into(), "-c".into(), "root".into(), "get-config".into()],
+        vec![
+            "--no-dbus".into(),
+            "-c".into(),
+            "root".into(),
+            "get-config".into(),
+        ],
         "validate Snapper root configuration",
         false,
     );
@@ -188,8 +184,18 @@ pub(super) fn run_snapshot_repair(
             );
         }
         ProviderId::Limine => {
-            run("limine-btrfs", vec!["generate".into()], "generate Limine snapshot entries", true);
-            run("limine-btrfs", vec!["verify".into()], "verify Limine snapshot entries", false);
+            run(
+                "limine-btrfs",
+                vec!["generate".into()],
+                "generate Limine snapshot entries",
+                true,
+            );
+            run(
+                "limine-btrfs",
+                vec!["verify".into()],
+                "verify Limine snapshot entries",
+                false,
+            );
             if snapshot_unit_present(target_root, "limine-btrfs.service") {
                 run(
                     "systemctl",
@@ -200,8 +206,18 @@ pub(super) fn run_snapshot_repair(
             }
         }
         ProviderId::SystemdBoot => {
-            run("sdboot-btrfs", vec!["generate".into()], "generate systemd-boot snapshot entries", true);
-            run("sdboot-btrfs", vec!["verify".into()], "verify systemd-boot snapshot entries", false);
+            run(
+                "sdboot-btrfs",
+                vec!["generate".into()],
+                "generate systemd-boot snapshot entries",
+                true,
+            );
+            run(
+                "sdboot-btrfs",
+                vec!["verify".into()],
+                "verify systemd-boot snapshot entries",
+                false,
+            );
             if snapshot_unit_present(target_root, "sdboot-btrfs.service") {
                 run(
                     "systemctl",
@@ -239,7 +255,7 @@ fn target_snapshot_catalog_has_entries(target_root: &Path) -> bool {
 }
 
 fn snapshot_generate_reports_zero_deployment(
-    result: &crate::shared::model::boot_repair::TargetCommandResult,
+    result: &crate::boot::model::TargetCommandResult,
 ) -> bool {
     let output = result
         .stdout

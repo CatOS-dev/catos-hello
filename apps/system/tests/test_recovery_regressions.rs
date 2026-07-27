@@ -1,16 +1,17 @@
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use catos_system::snapshot::model::{
-    BootLayout, BtrfsFilesystemIdentity, BtrfsSubvolumeIdentity, CompletedStep, DiskFacts,
-    FstabRootDefinition, SnapshotError, SnapshotErrorKind, RecoveryPlan, SubvolumeFacts,
-    TransactionRecord, TransactionState, RECOVERY_PLAN_SCHEMA_VERSION, TX_RECORD_SCHEMA_VERSION,
-};
+use catos_system::boot::model::BootLayout;
 use catos_system::recovery::{exit_code_for, Phase3Outcome};
 use catos_system::snapshot::execute::engine::{Engine, EngineOptions};
-use catos_system::snapshot::transaction::{lock_file_path, TransactionLock};
+use catos_system::snapshot::model::{
+    BtrfsFilesystemIdentity, BtrfsSubvolumeIdentity, CompletedStep, DiskFacts, FstabRootDefinition,
+    RecoveryPlan, SnapshotError, SnapshotErrorKind, SubvolumeFacts, TransactionRecord,
+    TransactionState, RECOVERY_PLAN_SCHEMA_VERSION, TX_RECORD_SCHEMA_VERSION,
+};
 use catos_system::snapshot::plan::reconcile::reconcile_with_disk_facts;
 use catos_system::snapshot::transaction::resume_checkpoint;
+use catos_system::snapshot::transaction::{lock_file_path, TransactionLock};
 
 const ID: &str = "tx-00000000000000000000000000000001";
 const FSID: &str = "11111111-2222-3333-4444-555555555555";
@@ -68,7 +69,9 @@ fn plan() -> RecoveryPlan {
             evidence: vec![],
         },
         target_catos_identity: None,
-        boot_consistency: catos_system::snapshot::diagnose::boot::evaluate_readonly_consistency(&boot_layout),
+        boot_consistency: catos_system::boot::diagnose::layout::evaluate_readonly_consistency(
+            &boot_layout,
+        ),
         boot_layout,
         backup_root_path: format!("/.catos-recovery/backups/{ID}/root-before"),
         staging_root_path: format!("/.catos-recovery/staging/{ID}/new-root"),

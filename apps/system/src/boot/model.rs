@@ -29,9 +29,61 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+use crate::mount::model::{MountRepairCleanup, MountTargetIdentity};
 use crate::shared::model::evidence::Evidence;
 use crate::target::model::Warning;
-use crate::mount::model::{MountRepairCleanup, MountTargetIdentity};
+
+// ---------------------------------------------------------------------------
+// Boot resource topology
+// ---------------------------------------------------------------------------
+
+/// Layout of boot resources for a mounted target or snapshot.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct BootLayout {
+    /// `/boot` is a directory inside the root subvolume.
+    pub boot_inside_root: bool,
+    /// `/boot` is mounted from a separate filesystem.
+    pub boot_separate_filesystem: bool,
+    /// `/boot` is a separate Btrfs subvolume.
+    pub boot_separate_subvolume: bool,
+    /// ESP location, if known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub esp_mount_point: Option<String>,
+    /// Block device path of the ESP, if separately identified.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub esp_device: Option<String>,
+    /// UKI files observed in the target.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub uki_paths: Vec<String>,
+    /// Kernel versions visible under `/usr/lib/modules`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub kernel_versions: Vec<String>,
+    /// Whether the target appears to contain an initramfs.
+    pub has_initramfs: bool,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum BootConsistencyStatus {
+    Consistent,
+    Inconsistent,
+    #[default]
+    Unknown,
+    Unsupported,
+}
+
+/// Read-only assessment of whether a root-only operation preserves all
+/// observed boot resources.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct BootConsistencyReport {
+    pub status: BootConsistencyStatus,
+    pub checked_read_only: bool,
+    pub root_switch_covers_all_boot_resources: bool,
+    pub external_boot: bool,
+    pub external_esp: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reasons: Vec<String>,
+}
 
 // ---------------------------------------------------------------------------
 // Provider identity
@@ -39,7 +91,7 @@ use crate::mount::model::{MountRepairCleanup, MountTargetIdentity};
 
 /// The five user-visible bootloader providers `catos-repair boot`
 /// recognises. Internally `uki` and `efistub` share a single
-/// [`crate::repair::boot_repair::providers::firmware`] implementation
+/// [`crate::boot::execute::providers::firmware`] implementation
 /// parameterised by [`FirmwareMethod`].
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash, Default)]
 #[serde(rename_all = "kebab-case")]

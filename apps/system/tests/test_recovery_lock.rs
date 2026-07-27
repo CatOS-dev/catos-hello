@@ -28,17 +28,17 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use catos_system::snapshot::model::{
-    BootLayout, BtrfsFilesystemIdentity, BtrfsSubvolumeIdentity, CompletedStep, DiskFacts,
-    FstabRootDefinition, SnapshotError, SnapshotErrorKind, RecoveryPlan, SubvolumeFacts,
-    TransactionPaths, TransactionRecord, TransactionState, RECOVERY_PLAN_SCHEMA_VERSION,
-    TX_RECORD_SCHEMA_VERSION,
-};
+use catos_system::boot::model::BootLayout;
 use catos_system::snapshot::execute::engine::{Engine, EngineOptions};
-use catos_system::snapshot::transaction::{lock_file_path, TransactionLock};
-use catos_system::snapshot::plan::{build_confirmation_token, effective_plan_digest};
+use catos_system::snapshot::model::{
+    BtrfsFilesystemIdentity, BtrfsSubvolumeIdentity, CompletedStep, DiskFacts, FstabRootDefinition,
+    RecoveryPlan, SnapshotError, SnapshotErrorKind, SubvolumeFacts, TransactionPaths,
+    TransactionRecord, TransactionState, RECOVERY_PLAN_SCHEMA_VERSION, TX_RECORD_SCHEMA_VERSION,
+};
 use catos_system::snapshot::plan::reconcile::reconcile_with_disk_facts;
+use catos_system::snapshot::plan::{build_confirmation_token, effective_plan_digest};
 use catos_system::snapshot::store;
+use catos_system::snapshot::transaction::{lock_file_path, TransactionLock};
 use std::hash::{Hash, Hasher};
 
 // ---------------------------------------------------------------------------
@@ -105,7 +105,7 @@ fn sample_plan_with_fsid(fsid: &str, plan_label: &str) -> RecoveryPlan {
         },
         target_catos_identity: None,
         boot_layout: BootLayout::default(),
-        boot_consistency: catos_system::snapshot::diagnose::boot::evaluate_readonly_consistency(
+        boot_consistency: catos_system::boot::diagnose::layout::evaluate_readonly_consistency(
             &BootLayout::default(),
         ),
         backup_root_path: format!("/.catos-recovery/backups/{plan_id}/root-before"),

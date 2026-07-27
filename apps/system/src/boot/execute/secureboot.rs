@@ -13,9 +13,9 @@
 //!   `catos-secureboot enable --generate-enrollment-password --json`.
 //! * EFI variable writes, MOK enrollment, and signing operations are
 //!   NOT atomic. Partial success MUST surface as
-//!   [`crate::shared::model::boot_repair::BootRepairOutcome::PartiallyRepaired`]
+//!   [`crate::boot::model::BootRepairOutcome::PartiallyRepaired`]
 //!   or
-//!   [`crate::shared::model::boot_repair::BootRepairOutcome::ManualInterventionRequired`],
+//!   [`crate::boot::model::BootRepairOutcome::ManualInterventionRequired`],
 //!   never as `Repaired`.
 //! * Secure Boot finalisation runs AFTER the regular boot files are
 //!   written and cleanup is in a safe state, mirroring bootloadu's
@@ -24,11 +24,9 @@
 //!   `supportedProviders` list omits it. We refuse before invoking
 //!   `catos-secureboot`.
 
-use crate::shared::model::boot_repair::{
-    BootRepairOutcome, ProviderId, SecureBootReport, TargetCommandResult,
-};
-use crate::repair::boot_repair::registry;
-use crate::repair::boot_repair::target_exec::{TargetRequest, TargetRunner};
+use crate::boot::execute::target::{TargetRequest, TargetRunner};
+use crate::boot::model::{BootRepairOutcome, ProviderId, SecureBootReport, TargetCommandResult};
+use crate::boot::plan::registry;
 
 /// Inputs the orchestrator supplies. All filesystem facts are
 /// observed through the confined target reader; this module does no
@@ -236,7 +234,7 @@ fn sanitise_payload(payload: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::repair::boot_repair::target_exec::RecordedTargetRunner;
+    use crate::boot::execute::target::RecordedTargetRunner;
 
     fn inputs(provider: ProviderId) -> SecureBootInputs {
         SecureBootInputs {

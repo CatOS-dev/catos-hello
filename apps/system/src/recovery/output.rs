@@ -270,7 +270,7 @@ fn render_plan<W: Write>(out: &mut W, plan: &RecoveryPlan) -> std::io::Result<()
 
 fn render_boot_consistency<W: Write>(
     out: &mut W,
-    report: &crate::snapshot::model::BootConsistencyReport,
+    report: &crate::boot::model::BootConsistencyReport,
 ) -> std::io::Result<()> {
     writeln!(out, "  boot consistency : {:?}", report.status)?;
     writeln!(
@@ -402,11 +402,12 @@ fn json_envelope(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::boot::model::BootLayout;
     use crate::recovery::model::{RecoveryRecommendation, RecoveryStatusReport};
     use crate::snapshot::model::{
-        BootLayout, BtrfsFilesystemIdentity, BtrfsSubvolumeIdentity, CatosIdentity, CompletedStep,
-        DiskFacts, FstabRootDefinition, SubvolumeFacts, TransactionState,
-        RECOVERY_PLAN_SCHEMA_VERSION, TX_RECORD_SCHEMA_VERSION,
+        BtrfsFilesystemIdentity, BtrfsSubvolumeIdentity, CatosIdentity, CompletedStep, DiskFacts,
+        FstabRootDefinition, SubvolumeFacts, TransactionState, RECOVERY_PLAN_SCHEMA_VERSION,
+        TX_RECORD_SCHEMA_VERSION,
     };
     use std::path::PathBuf;
 
@@ -441,7 +442,7 @@ mod tests {
             },
             target_catos_identity: Some(CatosIdentity::default()),
             boot_layout: BootLayout::default(),
-            boot_consistency: crate::snapshot::diagnose::boot::evaluate_readonly_consistency(
+            boot_consistency: crate::boot::diagnose::layout::evaluate_readonly_consistency(
                 &BootLayout::default(),
             ),
             backup_root_path: "/.catos-recovery/backups/tx-1/root-before".into(),
