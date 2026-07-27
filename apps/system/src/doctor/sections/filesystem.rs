@@ -12,6 +12,7 @@ use crate::target::model::TargetIdentity;
 use crate::target::Evidence;
 
 use super::{is_device_mounted_rw, push_evidence, set_section};
+use crate::doctor::DoctorTargetContext;
 
 pub(in crate::doctor) fn capture_environment() -> DoctorEnvironment {
     use crate::target::model::DetectionStatus;
@@ -74,10 +75,20 @@ pub(in crate::doctor) fn run_environment_section(
 
 pub(in crate::doctor) fn run_storage_section(
     sections: &mut [(DoctorSectionId, DoctorSection)],
-    target: &TargetIdentity,
+    context: Option<&DoctorTargetContext>,
     report: &mut DoctorReport,
 ) -> Result<(), ()> {
     let id = DoctorSectionId::Storage;
+    let Some(context) = context else {
+        set_section(sections, id, DoctorSectionStatus::Unknown);
+        report.limitations.push(DoctorLimitation::new(
+            id,
+            "TARGET_CONTEXT_UNAVAILABLE",
+            "Storage requires the selected readonly Doctor target context",
+        ));
+        return Ok(());
+    };
+    let target = &context.target;
     let complete = target.root_device.is_some()
         && target.root_fstype.is_some()
         && target.root_uuid.is_some()
@@ -110,17 +121,48 @@ pub(in crate::doctor) fn run_storage_section(
         "doctor::storage",
         format!("root subvolume: {}", target.root_subvol.as_deref().unwrap_or("<unknown>")),
     ));
-    if !complete {
+    section.evidence.push(Evidence::new(
+        "BTRFS_FSID",
+        "doctor::storage",
+        format!(
+            "Btrfs filesystem ID: {}",
+            context.candidate.filesystem_id.as_deref().unwrap_or("<unknown>")
+        ),
+    ));
+    match &context.esp {
+        Ok(Some(esp)) => {
+            section.evidence.push(Evidence::new(
+                "ESP_DEVICE",
+                "doctor::storage",
+                format!("ESP device: {}", esp.device.display()),
+            ));
+            section.evidence.push(Evidence::new(
+                "ESP_UUID",
+                "doctor::storage",
+                format!("ESP UUID: {}", esp.uuid.as_deref().unwrap_or("<unknown>")),
+            ));
+            section.evidence.push(Evidence::new(
+                "ESP_MOUNT_POINT",
+                "doctor::storage",
+                format!("ESP mount point: {}", esp.mount_point),
+            ));
+        }
+        Ok(None) => {
+            report.limitations.push(DoctorLimitation::new(
+                id,
+                "ESP_NOT_DISCOVERED",
+                "selected target fstab does not identify an ESP; this is not interpreted as a BIOS conclusion",
+            ));
+        }
+        Err(error) => {
+            report.limitations.push(DoctorLimitation::new(id, "ESP_FACTS_INCOMPLETE", error.clone()));
+        }
+    }
+    if !complete || !matches!(context.esp, Ok(Some(_))) {
         report.limitations.push(DoctorLimitation::new(
             id,
             "STORAGE_FACTS_INCOMPLETE",
-            "selected target lacks required root identity fields; ESP and boot-device facts were not inferred",
-        ));
-    } else {
-        report.limitations.push(DoctorLimitation::new(
-            id,
-            "ESP_FACTS_INCOMPLETE",
-            "selected readonly root session does not include a separately mounted ESP; ESP device and UUID remain unknown",
+            "selected target lacks required root or ESP identity facts",
         ));
         set_section(sections, id, DoctorSectionStatus::Unknown);
     }
@@ -131,9 +173,19 @@ pub(in crate::doctor) fn run_filesystem_section<R: FsCommandRunner + ?Sized>(
     runner: &R,
     sections: &mut [(DoctorSectionId, DoctorSection)],
     target: &TargetIdentity,
+    context: Option<&DoctorTargetContext>,
     report: &mut DoctorReport,
 ) -> Result<(), ()> {
     let id = DoctorSectionId::Filesystem;
+    if context.is_none() {
+        set_section(sections, id, DoctorSectionStatus::Unknown);
+        report.limitations.push(DoctorLimitation::new(
+            id,
+            "TARGET_CONTEXT_UNAVAILABLE",
+            "Filesystem requires the selected readonly Doctor target context",
+        ));
+        return Ok(());
+    }
     let fstype = match target.root_fstype.as_deref() {
         Some(fstype) => fstype,
         None => {

@@ -207,7 +207,7 @@ pub fn run_doctor() -> DoctorReport {
             error.clone(),
         ));
     }
-    report.sections = run_sections(&runner, &context.target, context.recovery_options.as_ref().ok().and_then(Option::as_ref), &environment, &mut report);
+    report.sections = run_sections(&runner, &context.target, Some(&context), context.recovery_options.as_ref().ok().and_then(Option::as_ref), &environment, &mut report);
     aggregate(&mut report);
     let cleanup = context.cleanup();
     report.cleanup = DoctorCleanup {
@@ -233,7 +233,7 @@ pub fn run_doctor_with<R: FsCommandRunner + ?Sized>(runner: &R) -> DoctorReport 
             handle_ambiguous_target(candidates, &mut report)
         }
         TargetSelection::Identified(target) => {
-            run_sections(runner, &target, None, &environment, &mut report)
+            run_sections(runner, &target, None, None, &environment, &mut report)
         }
     };
 
@@ -246,6 +246,7 @@ pub fn run_doctor_with<R: FsCommandRunner + ?Sized>(runner: &R) -> DoctorReport 
 fn run_sections<R: FsCommandRunner + ?Sized>(
     runner: &R,
     target: &crate::target::model::TargetIdentity,
+    context: Option<&DoctorTargetContext>,
     recovery_options: Option<&crate::snapshot::execute::engine::EngineOptions>,
     env: &DoctorEnvironment,
     report: &mut DoctorReport,
@@ -256,8 +257,8 @@ fn run_sections<R: FsCommandRunner + ?Sized>(
         .collect();
 
     let _ = sections::run_environment_section(&mut sections, env);
-    let _ = sections::run_storage_section(&mut sections, target, report);
-    let _ = sections::run_filesystem_section(runner, &mut sections, target, report);
+    let _ = sections::run_storage_section(&mut sections, context, report);
+    let _ = sections::run_filesystem_section(runner, &mut sections, target, context, report);
     let _ = sections::run_mount_section(&mut sections, target, report);
     let _ = sections::run_boot_section(&mut sections, target, report);
     let _ = sections::run_secure_boot_section(&mut sections, target, report);
