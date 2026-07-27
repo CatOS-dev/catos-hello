@@ -11,7 +11,7 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use crate::shared::model::evidence::Evidence;
+use crate::evidence::Evidence;
 
 // ===========================================================================
 // Target identity
@@ -47,7 +47,7 @@ pub struct TargetIdentity {
 //
 // Re-exported here verbatim (no behaviour change) so the legacy flat
 // import path `crate::shared::model::<Type>` can be replaced mechanically
-// by `crate::target::model::<Type>`.
+// by `crate::model::<Type>`.
 
 /// Coarse device class.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -616,7 +616,10 @@ mod tests {
 
     #[test]
     fn root_confidence_default_is_unknown() {
-        assert_eq!(RootCandidateConfidence::default(), RootCandidateConfidence::Unknown);
+        assert_eq!(
+            RootCandidateConfidence::default(),
+            RootCandidateConfidence::Unknown
+        );
     }
 
     #[test]

@@ -13,7 +13,7 @@
 
 use std::process::Command;
 
-use crate::shared::process::trusted_tool_path;
+use catos_process::trusted_tool_path;
 
 /// Open `device_name` as `luks-<uuid>`. The caller is expected to surface
 /// the error verbatim; cryptsetup's stderr already explains the failure
@@ -21,9 +21,9 @@ use crate::shared::process::trusted_tool_path;
 pub fn open(device_name: &str, uuid: Option<&str>) -> Result<(), String> {
     let cryptsetup = trusted_tool_path("cryptsetup")
         .ok_or_else(|| "cryptsetup not found in trusted system directories".to_string())?;
-    let mapper = mapper_name(uuid.ok_or_else(|| {
-        format!("LUKS device {device_name} has no UUID; refusing to open")
-    })?)?;
+    let mapper = mapper_name(
+        uuid.ok_or_else(|| format!("LUKS device {device_name} has no UUID; refusing to open"))?,
+    )?;
     let status = Command::new(&cryptsetup)
         .arg("luksOpen")
         .arg(device_name)

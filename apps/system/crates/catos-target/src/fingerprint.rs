@@ -1,6 +1,6 @@
 //! Target status fingerprint + pre/post identity verification.
 
-use crate::target::model::TargetIdentity;
+use crate::model::TargetIdentity;
 
 /// A digest-style fingerprint computed from a target's stable identifying
 /// fields. Used to detect "the target changed between plan and apply".

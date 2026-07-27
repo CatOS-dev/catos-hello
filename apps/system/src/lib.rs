@@ -25,10 +25,11 @@ pub mod repair;
 pub mod shared;
 pub mod snapshot;
 pub mod system;
-pub mod target;
+pub use catos_target as target;
 pub mod update;
 
-pub use shared::error::{exit_code, Error, FsError};
+pub use catos_target::FsError;
+pub use shared::error::{exit_code, Error};
 
 /// Program version string, single source of truth.
 pub const PROGRAM_VERSION: &str = env!("CARGO_PKG_VERSION");

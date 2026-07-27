@@ -1,0 +1,13 @@
+[package]
+name = "catos-target"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.74"
+license = "GPL-3.0-or-later"
+publish = false
+
+[dependencies]
+catos-process = { path = "../catos-process" }
+serde = { version = "1", default-features = false, features = ["std", "derive"] }
+serde_json = { version = "1", default-features = false, features = ["std"] }
+libc = { version = "0.2", default-features = false }

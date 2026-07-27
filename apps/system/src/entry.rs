@@ -208,9 +208,10 @@ fn run_via_full_parser(invocation: Invocation, argv: &[String]) -> i32 {
     let default_root = match crate::target::diagnose::system_root::SystemRoot::from_user_input("/")
     {
         Ok(r) => r,
-        Err(e) => {
-            eprintln!("{invocation}: {e}");
-            return e.exit_code();
+        Err(error) => {
+            let error: crate::shared::error::Error = error.into();
+            eprintln!("{invocation}: {error}");
+            return error.exit_code();
         }
     };
 

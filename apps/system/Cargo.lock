@@ -12,14 +12,30 @@ dependencies = [
 ]
 
 [[package]]
-name = "catos-system"
+name = "catos-app"
 version = "0.1.0"
 dependencies = [
+ "catos-process",
+ "catos-target",
  "getrandom",
  "libc",
  "serde",
  "serde_json",
  "sha2",
+]
+
+[[package]]
+name = "catos-process"
+version = "0.1.0"
+
+[[package]]
+name = "catos-target"
+version = "0.1.0"
+dependencies = [
+ "catos-process",
+ "libc",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

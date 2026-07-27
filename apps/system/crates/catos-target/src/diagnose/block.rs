@@ -8,11 +8,11 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
-use crate::shared::model::evidence::Evidence;
-use crate::mount::diagnose::mountinfo;
-use crate::shared::process::run_trusted_tool;
-use crate::target::diagnose::filesystem::FilesystemProbe;
-use crate::target::model::{BlockDevice, DeviceClass, DiskKind, MountObservation, PartitionRole, Warning};
+use crate::diagnose::filesystem::FilesystemProbe;
+use crate::evidence::Evidence;
+use crate::model::{BlockDevice, DeviceClass, DiskKind, MountObservation, PartitionRole, Warning};
+use crate::mountinfo;
+use catos_process::run_trusted_tool;
 
 const BLOCK_ROOT: &str = "/sys/class/block";
 const MOUNTINFO: &str = "/proc/self/mountinfo";
@@ -169,7 +169,10 @@ pub fn supplement_with_blkid(
             64 * 1024,
         )?;
         if output.timed_out {
-            return Err(format!("{} timed out probing {path}", output.path.display()));
+            return Err(format!(
+                "{} timed out probing {path}",
+                output.path.display()
+            ));
         }
         if output.stdout_truncated || output.stderr_truncated {
             return Err(format!(
@@ -213,7 +216,7 @@ fn supplement_from_udev_database(
                     ));
                 }
             }
-            Err(crate::shared::error::FsError::NotFound) => {}
+            Err(crate::error::FsError::NotFound) => {}
             Err(error) => warnings.push(Warning::new(
                 "UDEV_DATABASE_UNREADABLE",
                 format!("cannot read {}: {error}", path.display()),
@@ -254,7 +257,7 @@ fn discover_sysfs(fs: &dyn FilesystemProbe) -> (Vec<BlockDevice>, Vec<Warning>) 
 fn discover_without_mountinfo(
     fs: &dyn FilesystemProbe,
     names: Vec<String>,
-    error: crate::shared::error::FsError,
+    error: crate::error::FsError,
 ) -> (Vec<BlockDevice>, Vec<Warning>) {
     let mut devices: Vec<BlockDevice> = names
         .iter()
@@ -331,7 +334,12 @@ fn device_from_sysfs(
     }
     let size_sectors = read_number(fs, &base.join("size"), "SYSFS_SIZE", &mut evidence);
     let read_only = read_bool(fs, &base.join("ro"), "SYSFS_READ_ONLY", &mut evidence);
-    let removable = read_bool(fs, &base.join("removable"), "SYSFS_REMOVABLE", &mut evidence);
+    let removable = read_bool(
+        fs,
+        &base.join("removable"),
+        "SYSFS_REMOVABLE",
+        &mut evidence,
+    );
     if let Some(entry) = mount {
         evidence.push(
             Evidence::new(
@@ -544,8 +552,12 @@ fn read_number(
 ) -> Option<u64> {
     let value: u64 = fs.read_to_string(path).ok()?.trim().parse().ok()?;
     evidence.push(
-        Evidence::new(code, path.display().to_string(), "read sysfs numeric attribute")
-            .with_value(value.to_string()),
+        Evidence::new(
+            code,
+            path.display().to_string(),
+            "read sysfs numeric attribute",
+        )
+        .with_value(value.to_string()),
     );
     Some(value)
 }
@@ -561,8 +573,12 @@ fn read_bool(
     };
     let parsed = matches!(value.trim(), "1" | "true");
     evidence.push(
-        Evidence::new(code, path.display().to_string(), "read sysfs boolean attribute")
-            .with_value(value.trim()),
+        Evidence::new(
+            code,
+            path.display().to_string(),
+            "read sysfs boolean attribute",
+        )
+        .with_value(value.trim()),
     );
     parsed
 }

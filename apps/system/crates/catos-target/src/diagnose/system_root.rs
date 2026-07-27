@@ -6,8 +6,6 @@
 use std::fmt;
 use std::path::{Path, PathBuf};
 
-use crate::shared::error::Error;
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SystemRoot {
     raw: String,
@@ -45,33 +43,21 @@ impl fmt::Display for RootError {
 impl std::error::Error for RootError {}
 
 impl SystemRoot {
-    pub fn from_user_input(input: &str) -> Result<Self, Error> {
+    pub fn from_user_input(input: &str) -> Result<Self, RootError> {
         let path = Path::new(input);
         if !path.is_absolute() {
-            return Err(Error::InvalidRoot {
-                path: PathBuf::from(input),
-                reason: "path must be absolute".to_string(),
-            });
+            return Err(RootError::Relative(input.to_string()));
         }
         match std::fs::canonicalize(path) {
             Ok(canonical) if canonical.is_dir() => Ok(SystemRoot {
                 raw: input.to_string(),
                 canonical,
             }),
-            Ok(_) => Err(Error::InvalidRoot {
-                path: PathBuf::from(input),
-                reason: "path is not a directory".to_string(),
-            }),
-            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
-                Err(Error::PermissionDenied {
-                    path: PathBuf::from(input),
-                    detail: "cannot stat target root".to_string(),
-                })
+            Ok(_) => Err(RootError::NotADirectory(input.to_string())),
+            Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
+                Err(RootError::PermissionDenied(input.to_string()))
             }
-            Err(_) => Err(Error::InvalidRoot {
-                path: PathBuf::from(input),
-                reason: "target root does not exist or is unreachable".to_string(),
-            }),
+            Err(_) => Err(RootError::DoesNotExist(input.to_string())),
         }
     }
 

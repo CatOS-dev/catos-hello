@@ -2,16 +2,14 @@
 
 use std::path::Path;
 
-use crate::shared::error::FsError;
-use crate::target::diagnose::filesystem::FilesystemProbe;
-use crate::target::diagnose::system_root::SystemRoot;
-use crate::target::model::{
-    Capability, CapabilityKind, CapabilityStatus, Detection, DetectionStatus, RuntimeFacts,
-};
-use crate::shared::model::evidence::Evidence;
+use crate::diagnose::filesystem::FilesystemProbe;
+use crate::diagnose::system_root::SystemRoot;
+use crate::error::FsError;
+use crate::evidence::Evidence;
+use crate::model::{Capability, CapabilityKind, Detection, RuntimeFacts};
 
 /// Re-export so callers can keep using the same flat name.
-pub use crate::target::model::PrimaryRuntimeMode;
+pub use crate::model::PrimaryRuntimeMode;
 
 pub fn detect_runtime(fs: &dyn FilesystemProbe) -> RuntimeFacts {
     RuntimeFacts {
@@ -448,12 +446,18 @@ impl ProcCaps {
     pub fn from_current_process() -> Self {
         let euid = unsafe { libc_geteuid() };
         let cap_sys_admin = read_cap_sys_admin();
-        ProcCaps { euid, cap_sys_admin }
+        ProcCaps {
+            euid,
+            cap_sys_admin,
+        }
     }
 
     #[cfg(test)]
     pub fn for_test(euid: u32, cap_sys_admin: Option<bool>) -> Self {
-        ProcCaps { euid, cap_sys_admin }
+        ProcCaps {
+            euid,
+            cap_sys_admin,
+        }
     }
 }
 
@@ -500,7 +504,7 @@ pub fn detect_capabilities(fs: &dyn FilesystemProbe, root: &SystemRoot) -> Vec<C
 
 fn read_target_root(fs: &dyn FilesystemProbe, root: &SystemRoot) -> Capability {
     let probe_path = root.join("etc/os-release");
-    match crate::target::diagnose::candidate::target_read_to_string(fs, root, "etc/os-release") {
+    match crate::diagnose::candidate::target_read_to_string(fs, root, "etc/os-release") {
         Ok(_) => Capability::available(
             CapabilityKind::ReadTargetRoot,
             vec![Evidence::new(
@@ -608,7 +612,11 @@ fn read_sysfs(fs: &dyn FilesystemProbe) -> Capability {
     }
     Capability::available(
         CapabilityKind::ReadSysfs,
-        vec![Evidence::new("SYSFS_PRESENT", "/sys", "/sys directory exists and is readable")],
+        vec![Evidence::new(
+            "SYSFS_PRESENT",
+            "/sys",
+            "/sys directory exists and is readable",
+        )],
     )
 }
 
@@ -639,12 +647,20 @@ fn access_dev(fs: &dyn FilesystemProbe) -> Capability {
     if !fs.is_dir(p) {
         return Capability::unknown(
             CapabilityKind::AccessDev,
-            vec![Evidence::new("DEV_NOT_PRESENT", "/dev", "/dev is not a readable directory")],
+            vec![Evidence::new(
+                "DEV_NOT_PRESENT",
+                "/dev",
+                "/dev is not a readable directory",
+            )],
         );
     }
     Capability::available(
         CapabilityKind::AccessDev,
-        vec![Evidence::new("DEV_PRESENT", "/dev", "/dev directory exists and is readable")],
+        vec![Evidence::new(
+            "DEV_PRESENT",
+            "/dev",
+            "/dev directory exists and is readable",
+        )],
     )
 }
 
@@ -699,7 +715,7 @@ fn shell_available(fs: &dyn FilesystemProbe) -> Capability {
 fn mount_operations_possible(fs: &dyn FilesystemProbe, caps: &ProcCaps) -> Capability {
     let mut evidence = Vec::new();
 
-    let mount_tool = crate::target::diagnose::candidate::host_tool_exists(fs, "mount");
+    let mount_tool = crate::diagnose::candidate::host_tool_exists(fs, "mount");
     match &mount_tool {
         Some(p) => evidence.push(Evidence::new(
             "MOUNT_TOOL_RESOLVED",
@@ -750,7 +766,7 @@ fn mount_operations_possible(fs: &dyn FilesystemProbe, caps: &ProcCaps) -> Capab
 }
 
 fn write_efivars_possible(fs: &dyn FilesystemProbe, caps: &ProcCaps) -> Capability {
-    let p = crate::target::diagnose::candidate::host_efivars_path();
+    let p = crate::diagnose::candidate::host_efivars_path();
     let meta = match fs.metadata(p) {
         Ok(m) => m,
         Err(FsError::NotFound) => {
@@ -798,7 +814,11 @@ fn write_efivars_possible(fs: &dyn FilesystemProbe, caps: &ProcCaps) -> Capabili
         Some(false) => Capability::unavailable(
             CapabilityKind::WriteEfivarsPossible,
             vec![
-                Evidence::new("EFIVARS_MOUNTED", p.display().to_string(), "efivarfs appears mounted"),
+                Evidence::new(
+                    "EFIVARS_MOUNTED",
+                    p.display().to_string(),
+                    "efivarfs appears mounted",
+                ),
                 Evidence::new(
                     "CAP_SYS_ADMIN_ABSENT",
                     "/proc/self/status CapEff",
@@ -809,7 +829,11 @@ fn write_efivars_possible(fs: &dyn FilesystemProbe, caps: &ProcCaps) -> Capabili
         Some(true) => Capability::unknown(
             CapabilityKind::WriteEfivarsPossible,
             vec![
-                Evidence::new("EFIVARS_MOUNTED", p.display().to_string(), "efivarfs appears mounted"),
+                Evidence::new(
+                    "EFIVARS_MOUNTED",
+                    p.display().to_string(),
+                    "efivarfs appears mounted",
+                ),
                 Evidence::new(
                     "CAP_SYS_ADMIN_PRESENT",
                     "/proc/self/status CapEff",
@@ -820,7 +844,11 @@ fn write_efivars_possible(fs: &dyn FilesystemProbe, caps: &ProcCaps) -> Capabili
         None => Capability::unknown(
             CapabilityKind::WriteEfivarsPossible,
             vec![
-                Evidence::new("EFIVARS_MOUNTED", p.display().to_string(), "efivarfs appears mounted"),
+                Evidence::new(
+                    "EFIVARS_MOUNTED",
+                    p.display().to_string(),
+                    "efivarfs appears mounted",
+                ),
                 Evidence::new(
                     "CAP_SYS_ADMIN_UNKNOWN",
                     "/proc/self/status",
@@ -854,7 +882,13 @@ fn systemd_available(fs: &dyn FilesystemProbe) -> Capability {
 }
 
 fn pacman_present_in_target(fs: &dyn FilesystemProbe, root: &SystemRoot) -> Capability {
-    target_tool_capability(fs, root, CapabilityKind::PacmanPresentInTarget, "pacman", "usr/bin/pacman")
+    target_tool_capability(
+        fs,
+        root,
+        CapabilityKind::PacmanPresentInTarget,
+        "pacman",
+        "usr/bin/pacman",
+    )
 }
 
 fn mkinitcpio_present_in_target(fs: &dyn FilesystemProbe, root: &SystemRoot) -> Capability {
@@ -874,7 +908,7 @@ fn target_tool_capability(
     name: &str,
     rel: &str,
 ) -> Capability {
-    let tool = crate::target::diagnose::candidate::probe_target_tool(fs, root, name, rel);
+    let tool = crate::diagnose::candidate::probe_target_tool(fs, root, name, rel);
     Capability {
         name: kind,
         status: tool.status,
@@ -883,7 +917,7 @@ fn target_tool_capability(
 }
 
 fn tool_available(fs: &dyn FilesystemProbe, kind: CapabilityKind, name: &str) -> Capability {
-    match crate::target::diagnose::candidate::host_tool_exists(fs, name) {
+    match crate::diagnose::candidate::host_tool_exists(fs, name) {
         Some(p) => Capability::available(
             kind,
             vec![Evidence::new(
@@ -905,4 +939,7 @@ fn tool_available(fs: &dyn FilesystemProbe, kind: CapabilityKind, name: &str) ->
 
 // (capability helpers above intentionally unused by some callers)
 #[allow(unused_imports)]
-use crate::target::model::{Capability as _Capability, CapabilityKind as _CapabilityKind, CapabilityStatus as _CapabilityStatus};
+use crate::model::{
+    Capability as _Capability, CapabilityKind as _CapabilityKind,
+    CapabilityStatus as _CapabilityStatus,
+};

@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
-use crate::shared::error::FsError;
+use crate::error::FsError;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MetaData {

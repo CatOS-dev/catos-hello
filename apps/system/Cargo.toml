@@ -1,5 +1,13 @@
+[workspace]
+members = [
+    ".",
+    "crates/catos-process",
+    "crates/catos-target",
+]
+resolver = "2"
+
 [package]
-name = "catos-system"
+name = "catos-app"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.74"
@@ -27,6 +35,8 @@ path = "src/bin/recovery_lock_hold_helper.rs"
 required-features = ["test-helpers"]
 
 [dependencies]
+catos-process = { path = "crates/catos-process" }
+catos-target = { path = "crates/catos-target" }
 # No async runtime, TLS, D-Bus, libalpm, or heavyweight CLI framework.
 # `sha2` binds the immutable effective plan; `getrandom` is the only
 # accepted nonce/id source and fails closed when the kernel RNG fails.

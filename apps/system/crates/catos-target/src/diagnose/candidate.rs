@@ -3,16 +3,16 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::shared::error::FsError;
-use crate::shared::model::evidence::Evidence;
-use crate::mount::diagnose::fstab::{FstabEntry, FstabEntryKind, FstabSource};
-use crate::target::diagnose::filesystem::{FilesystemProbe, MetaData, RealFilesystem};
-use crate::target::diagnose::system_root::SystemRoot;
-use crate::target::model::{
+use crate::diagnose::filesystem::{FilesystemProbe, MetaData, RealFilesystem};
+use crate::diagnose::system_root::SystemRoot;
+use crate::error::FsError;
+use crate::evidence::Evidence;
+use crate::fstab::{FstabEntry, FstabEntryKind, FstabSource};
+use crate::model::{
     Ambiguity, AmbiguityKind, BlockDevice, Capability, CapabilityKind, CapabilityStatus,
-    DemotionReason, Detection, EspCandidate, EspSignals, OsLayoutSignals, OsRelease,
-    PartitionRole, Presence, Presence2, RootCandidate, RootCandidateConfidence, TargetInspection,
-    ToolPath, Warning,
+    DemotionReason, Detection, EspCandidate, EspSignals, OsLayoutSignals, OsRelease, PartitionRole,
+    Presence, Presence2, RootCandidate, RootCandidateConfidence, TargetInspection, ToolPath,
+    Warning,
 };
 
 const ESP_MIN_BYTES: u64 = 32 * 1024 * 1024;
@@ -111,8 +111,12 @@ fn root_candidate(device: &BlockDevice, root_entries: &[&FstabEntry]) -> RootCan
     );
     if matching_entry.is_some() {
         evidence.push(
-            Evidence::new("FSTAB_ROOT_MATCH", "fstab", "fstab root source matches this device")
-                .with_value(source.clone()),
+            Evidence::new(
+                "FSTAB_ROOT_MATCH",
+                "fstab",
+                "fstab root source matches this device",
+            )
+            .with_value(source.clone()),
         );
     } else if !root_entries.is_empty() {
         evidence.push(
@@ -194,9 +198,9 @@ fn esp_candidate(device: &BlockDevice, fstab: &[FstabEntry]) -> EspCandidate {
         .mount_point
         .as_ref()
         .is_some_and(|mount| is_esp_location(mount.to_string_lossy().as_ref()));
-    let fstab_referenced = fstab
-        .iter()
-        .any(|entry| is_esp_location(&entry.target) && device_matches_fstab_source(device, &entry.source));
+    let fstab_referenced = fstab.iter().any(|entry| {
+        is_esp_location(&entry.target) && device_matches_fstab_source(device, &entry.source)
+    });
     let has_efi_directory = mounted_directory_exists(device.mount_point.as_deref(), "EFI");
     let signals = EspSignals {
         gpt_esp_type,
@@ -228,8 +232,12 @@ fn esp_candidate(device: &BlockDevice, fstab: &[FstabEntry]) -> EspCandidate {
     }
     if fstab_referenced {
         evidence.push(
-            Evidence::new("FSTAB_ESP_MATCH", "fstab", "fstab boot target matches this device")
-                .with_value(source.clone()),
+            Evidence::new(
+                "FSTAB_ESP_MATCH",
+                "fstab",
+                "fstab boot target matches this device",
+            )
+            .with_value(source.clone()),
         );
     }
     if plausible_size {
@@ -273,12 +281,18 @@ fn classify_root_confidence(
     fstab_matches: bool,
     fstab_has_other_root: bool,
 ) -> (RootCandidateConfidence, Vec<DemotionReason>) {
-    use crate::target::model::DetectionStatus;
+    use crate::model::DetectionStatus;
     let Some(inspection) = inspection else {
         return if fstab_matches {
-            (RootCandidateConfidence::Medium, vec![DemotionReason::MissingOsLayout])
+            (
+                RootCandidateConfidence::Medium,
+                vec![DemotionReason::MissingOsLayout],
+            )
         } else if fstab_has_other_root {
-            (RootCandidateConfidence::Low, vec![DemotionReason::FstabPointsElsewhere])
+            (
+                RootCandidateConfidence::Low,
+                vec![DemotionReason::FstabPointsElsewhere],
+            )
         } else {
             (RootCandidateConfidence::Unknown, Vec::new())
         };
@@ -471,12 +485,18 @@ fn presence_file(
     match target_metadata(fs, root, rel) {
         Ok((_, metadata)) if metadata.is_file => Presence::Present,
         Ok((path, _)) => {
-            warnings.push(format!("{} exists but is not a regular file", path.display()));
+            warnings.push(format!(
+                "{} exists but is not a regular file",
+                path.display()
+            ));
             Presence::Absent
         }
         Err(FsError::NotFound) => Presence::Absent,
         Err(error) => {
-            warnings.push(format!("cannot inspect {}: {error}", root.join(rel).display()));
+            warnings.push(format!(
+                "cannot inspect {}: {error}",
+                root.join(rel).display()
+            ));
             Presence::Unknown
         }
     }
@@ -496,7 +516,10 @@ fn presence_dir(
         }
         Err(FsError::NotFound) => Presence::Absent,
         Err(error) => {
-            warnings.push(format!("cannot inspect {}: {error}", root.join(rel).display()));
+            warnings.push(format!(
+                "cannot inspect {}: {error}",
+                root.join(rel).display()
+            ));
             Presence::Unknown
         }
     }
@@ -634,10 +657,13 @@ pub fn probe_target_tool(
 }
 
 fn probe_target_tools(fs: &dyn FilesystemProbe, root: &SystemRoot) -> Vec<ToolPath> {
-    [("pacman", "usr/bin/pacman"), ("mkinitcpio", "usr/bin/mkinitcpio")]
-        .iter()
-        .map(|(name, rel)| probe_target_tool(fs, root, name, rel))
-        .collect()
+    [
+        ("pacman", "usr/bin/pacman"),
+        ("mkinitcpio", "usr/bin/mkinitcpio"),
+    ]
+    .iter()
+    .map(|(name, rel)| probe_target_tool(fs, root, name, rel))
+    .collect()
 }
 
 pub fn host_tool_exists(fs: &dyn FilesystemProbe, name: &str) -> Option<PathBuf> {

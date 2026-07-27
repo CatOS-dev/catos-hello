@@ -4,7 +4,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::target::model::TargetIdentity;
+use crate::model::TargetIdentity;
 
 /// Lightweight view over a selected target. Holds the offline root path
 /// (or `/` for the running root) and, when known, the ESP device path.

@@ -1,8 +1,8 @@
 //! Post-action verification hook. Re-reads target state and confirms the
 //! identity fingerprint has not drifted.
 
-use crate::target::fingerprint::TargetFingerprint;
-use crate::target::model::TargetIdentity;
+use crate::fingerprint::TargetFingerprint;
+use crate::model::TargetIdentity;
 
 /// Outcome of a verify pass.
 #[derive(Debug, Clone)]

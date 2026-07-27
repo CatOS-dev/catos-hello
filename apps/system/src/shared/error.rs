@@ -81,27 +81,24 @@ impl Error {
     }
 }
 
-/// Filesystem-probe level error. Designed to be transformed into `Evidence`
-/// or `Warning` rather than bubbling up as a hard failure.
-#[derive(Debug, Clone)]
-pub enum FsError {
-    NotFound,
-    PermissionDenied,
-    NotUtf8,
-    OutsideRoot(String),
-    Io(String),
-}
+pub use catos_target::FsError;
 
-impl fmt::Display for FsError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            FsError::NotFound => write!(f, "not found"),
-            FsError::PermissionDenied => write!(f, "permission denied"),
-            FsError::NotUtf8 => write!(f, "content not utf-8"),
-            FsError::OutsideRoot(path) => {
-                write!(f, "resolved path escapes target root: {path}")
-            }
-            FsError::Io(msg) => write!(f, "io error: {msg}"),
+impl From<catos_target::diagnose::system_root::RootError> for Error {
+    fn from(error: catos_target::diagnose::system_root::RootError) -> Self {
+        use catos_target::diagnose::system_root::RootError;
+        let reason = error.to_string();
+        match error {
+            RootError::PermissionDenied(path) => Error::PermissionDenied {
+                path: path.into(),
+                detail: "cannot stat target root".into(),
+            },
+            RootError::Relative(path)
+            | RootError::DoesNotExist(path)
+            | RootError::NotADirectory(path)
+            | RootError::EscapeAttempt(path) => Error::InvalidRoot {
+                path: path.into(),
+                reason,
+            },
         }
     }
 }

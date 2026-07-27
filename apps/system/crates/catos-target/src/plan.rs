@@ -16,10 +16,10 @@
 
 use std::path::PathBuf;
 
-use crate::target::diagnose::filesystem::RealFilesystem;
-use crate::target::diagnose::runtime::detect_runtime;
-use crate::target::diagnose::system_root::SystemRoot;
-use crate::target::model::{DetectionStatus, PrimaryRuntimeMode, TargetIdentity};
+use crate::diagnose::filesystem::RealFilesystem;
+use crate::diagnose::runtime::detect_runtime;
+use crate::diagnose::system_root::SystemRoot;
+use crate::model::{DetectionStatus, PrimaryRuntimeMode, TargetIdentity};
 
 /// The high-level outcome of target discovery.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -96,8 +96,7 @@ pub fn discover_target_plan_with(fs: &RealFilesystem) -> TargetPlan {
     // the running root.
     match SystemRoot::from_user_input("/") {
         Ok(root) => {
-            let inspection =
-                crate::target::diagnose::candidate::inspect_target(fs, &root, &mut warnings);
+            let inspection = crate::diagnose::candidate::inspect_target(fs, &root, &mut warnings);
             if inspection.is_catos_target.status == DetectionStatus::Detected {
                 TargetPlan {
                     kind: TargetPlanKind::RunningRoot,

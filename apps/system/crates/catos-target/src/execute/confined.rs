@@ -9,7 +9,7 @@
 //! operation, so replacing a pathname after validation cannot redirect
 //! a write outside the target.
 //!
-//! All functions return [`crate::shared::error::FsError`]; the richer
+//! All functions return [`crate::error::FsError`]; the richer
 //! recovery-specific error taxonomy is layered on top by the btrfs
 //! snapshot-specific Btrfs operations that live in `snapshot::execute`.
 //!
@@ -25,7 +25,7 @@ use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use crate::shared::error::FsError;
+use crate::error::FsError;
 
 const RESOLVE_NO_MAGICLINKS: u64 = 0x02;
 const RESOLVE_NO_SYMLINKS: u64 = 0x04;
@@ -223,7 +223,11 @@ pub fn atomic_write(path: &Path, bytes: &[u8], mode: u32) -> Result<(), FsError>
     if rc != 0 {
         let error = std::io::Error::last_os_error();
         let _ = unlinkat_name(parent.as_raw_fd(), &temp_name);
-        return Err(map_path_error(path, "atomically rename recovery file", error));
+        return Err(map_path_error(
+            path,
+            "atomically rename recovery file",
+            error,
+        ));
     }
     fsync_fd(parent.as_raw_fd(), path, "fsync recovery parent directory")
 }
@@ -303,10 +307,7 @@ pub fn list_rooted_directory_names(
 }
 
 /// Remove an ordinary rooted directory only after proving it is empty.
-pub fn remove_empty_rooted_directory(
-    top_level: &Path,
-    rooted_path: &str,
-) -> Result<(), FsError> {
+pub fn remove_empty_rooted_directory(top_level: &Path, rooted_path: &str) -> Result<(), FsError> {
     let entry = open_rooted_parent(top_level, rooted_path, false)?;
     match entry_type(entry.parent.as_raw_fd(), &entry.name, &entry.display)? {
         None => return Ok(()),
@@ -331,9 +332,8 @@ pub fn remove_empty_rooted_directory(
             entry.display.display()
         )));
     }
-    unlinkat_dir_name(entry.parent.as_raw_fd(), &entry.name).map_err(|error| {
-        map_path_error(&entry.display, "remove empty rooted directory", error)
-    })?;
+    unlinkat_dir_name(entry.parent.as_raw_fd(), &entry.name)
+        .map_err(|error| map_path_error(&entry.display, "remove empty rooted directory", error))?;
     fsync_fd(
         entry.parent.as_raw_fd(),
         &entry.display,
@@ -423,10 +423,7 @@ pub fn list_directory_names(path: &Path) -> Result<Vec<OsString>, FsError> {
     Ok(names)
 }
 
-fn list_open_directory_names(
-    directory_fd: RawFd,
-    path: &Path,
-) -> Result<Vec<OsString>, FsError> {
+fn list_open_directory_names(directory_fd: RawFd, path: &Path) -> Result<Vec<OsString>, FsError> {
     let duplicate = unsafe { libc::fcntl(directory_fd, libc::F_DUPFD_CLOEXEC, 3) };
     if duplicate < 0 {
         return Err(io_error(
@@ -561,13 +558,13 @@ pub fn remove_rooted_file(top_level: &Path, rooted_path: &str) -> Result<(), FsE
 // `pub(crate)` so the btrfs functions can call them.
 // ---------------------------------------------------------------------------
 
-pub(crate) struct PubRootedEntry {
+pub struct PubRootedEntry {
     pub parent: OwnedFd,
     pub name: OsString,
     pub display: PathBuf,
 }
 
-pub(crate) fn open_rooted_parent_pub(
+pub fn open_rooted_parent_pub(
     top_level: &Path,
     rooted_path: &str,
     create_parent: bool,
@@ -580,7 +577,7 @@ pub(crate) fn open_rooted_parent_pub(
     })
 }
 
-pub(crate) fn entry_type_pub(
+pub fn entry_type_pub(
     parent: RawFd,
     name: &OsStr,
     path: &Path,
@@ -588,18 +585,18 @@ pub(crate) fn entry_type_pub(
     entry_type(parent, name, path)
 }
 
-pub(crate) fn fsync_fd_pub(fd: RawFd, path: &Path, operation: &str) -> Result<(), FsError> {
+pub fn fsync_fd_pub(fd: RawFd, path: &Path, operation: &str) -> Result<(), FsError> {
     fsync_fd(fd, path, operation)
 }
 
-pub(crate) fn list_rooted_directory_names_pub(
+pub fn list_rooted_directory_names_pub(
     top_level: &Path,
     rooted_path: &str,
 ) -> Result<Vec<OsString>, FsError> {
     list_rooted_directory_names(top_level, rooted_path)
 }
 
-pub(crate) fn open_rooted_directory_pub(
+pub fn open_rooted_directory_pub(
     top_level: &Path,
     rooted_path: &str,
     create: bool,
@@ -607,11 +604,11 @@ pub(crate) fn open_rooted_directory_pub(
     open_rooted_directory(top_level, rooted_path, create)
 }
 
-pub(crate) fn cstring_pub(value: &OsStr, path: &Path) -> Result<CString, FsError> {
+pub fn cstring_pub(value: &OsStr, path: &Path) -> Result<CString, FsError> {
     cstring(value, path)
 }
 
-pub(crate) fn unsafe_path_pub(path: &Path, reason: &str) -> FsError {
+pub fn unsafe_path_pub(path: &Path, reason: &str) -> FsError {
     unsafe_path(path, reason)
 }
 
@@ -737,21 +734,15 @@ fn open_directory_component(
     }
 }
 
-fn open_file_at(
-    parent: RawFd,
-    name: &OsStr,
-    flags: i32,
-    mode: u32,
-) -> Result<OwnedFd, FsError> {
+fn open_file_at(parent: RawFd, name: &OsStr, flags: i32, mode: u32) -> Result<OwnedFd, FsError> {
     let c_name = cstring(name, Path::new(name))?;
     let how = OpenHow {
         flags: flags as u64,
         mode: mode as u64,
         resolve: CONFINED_RESOLVE,
     };
-    openat2_raw(parent, &c_name, &how).map_err(|error| {
-        map_path_error(Path::new(name), "open confined recovery file", error)
-    })
+    openat2_raw(parent, &c_name, &how)
+        .map_err(|error| map_path_error(Path::new(name), "open confined recovery file", error))
 }
 
 fn openat2_raw(dirfd: RawFd, path: &CString, how: &OpenHow) -> std::io::Result<OwnedFd> {
@@ -823,11 +814,7 @@ fn reject_existing_non_regular_or_symlink(
     }
 }
 
-fn entry_type(
-    parent: RawFd,
-    name: &OsStr,
-    path: &Path,
-) -> Result<Option<libc::mode_t>, FsError> {
+fn entry_type(parent: RawFd, name: &OsStr, path: &Path) -> Result<Option<libc::mode_t>, FsError> {
     let c_name = cstring(name, path)?;
     let mut stat = std::mem::MaybeUninit::<libc::stat>::zeroed();
     let rc = unsafe {

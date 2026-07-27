@@ -106,7 +106,7 @@ pub fn parse(argv: &[String], default_root: SystemRoot) -> Result<ParseOutcome, 
                 let val = argv.get(idx + 1).ok_or_else(|| Error::InvalidArgument {
                     message: "--root requires a path argument".to_string(),
                 })?;
-                root = Some(SystemRoot::from_user_input(val)?);
+                root = Some(SystemRoot::from_user_input(val).map_err(root_error)?);
                 idx += 2;
             }
             a if a.starts_with("--root=") => {
@@ -116,7 +116,7 @@ pub fn parse(argv: &[String], default_root: SystemRoot) -> Result<ParseOutcome, 
                         message: "--root=PATH requires a non-empty path".to_string(),
                     });
                 }
-                root = Some(SystemRoot::from_user_input(val)?);
+                root = Some(SystemRoot::from_user_input(val).map_err(root_error)?);
                 idx += 1;
             }
             "--root-device" => {
@@ -358,4 +358,26 @@ fn parse_plan_file_path(value: &str, option: &str) -> Result<PathBuf, Error> {
         });
     }
     Ok(path.to_path_buf())
+}
+
+fn root_error(
+    error: catos_target::diagnose::system_root::RootError,
+) -> crate::shared::error::Error {
+    use catos_target::diagnose::system_root::RootError;
+    match error {
+        RootError::PermissionDenied(path) => crate::shared::error::Error::PermissionDenied {
+            path: path.into(),
+            detail: "cannot stat target root".into(),
+        },
+        other => crate::shared::error::Error::InvalidRoot {
+            path: match &other {
+                RootError::Relative(path)
+                | RootError::DoesNotExist(path)
+                | RootError::NotADirectory(path)
+                | RootError::PermissionDenied(path)
+                | RootError::EscapeAttempt(path) => path.into(),
+            },
+            reason: other.to_string(),
+        },
+    }
 }
