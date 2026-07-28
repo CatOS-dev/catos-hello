@@ -381,12 +381,15 @@ pub fn run_boot_repair(
     };
 
     let efi_device = derive_efi_device(target, storage_devices);
-    let snapshot_state = snapshot_repair_state(
+    let snapshot_state = match snapshot_repair_state(
         target_root,
         provider,
         &target.root_fstype,
         installed_packages,
-    );
+    ) {
+        Ok(state) => state,
+        Err(error) => return preflight_failure("SNAPSHOT_FACTS_UNREADABLE", error),
+    };
     let mkinitcpio_text =
         match crate::io::read_target_file_checked(target_root, "etc/mkinitcpio.conf") {
             Ok(Some(text)) => text,
@@ -551,7 +554,12 @@ pub fn run_boot_repair(
 
     let mut warnings = Vec::new();
     let snapshot_execution = if exec_result.failure.is_none() && snapshot_state.enabled {
-        run_snapshot_repair(provider, target_root, &runner)
+        run_snapshot_repair(
+            provider,
+            target_root,
+            snapshot_state.target_has_snapshots,
+            &runner,
+        )
     } else {
         SnapshotExecution::default()
     };
@@ -1565,6 +1573,7 @@ key_dir = "/var/lib/catos-secureboot/keys"
                 "btrfs",
                 &["snapper".into(), "grub-btrfs".into()]
             )
+            .unwrap()
             .enabled
         );
 
@@ -1580,6 +1589,7 @@ key_dir = "/var/lib/catos-secureboot/keys"
                 "btrfs",
                 &["snapper".into(), "grub-btrfs".into()]
             )
+            .unwrap()
             .enabled
         );
         assert!(
@@ -1589,6 +1599,7 @@ key_dir = "/var/lib/catos-secureboot/keys"
                 "btrfs",
                 &["snapper".into()]
             )
+            .unwrap()
             .enabled
         );
     }
@@ -1693,7 +1704,7 @@ key_dir = "/var/lib/catos-secureboot/keys"
                 b"",
             );
 
-        let result = run_snapshot_repair(ProviderId::Limine, &target_root.path, &runner);
+        let result = run_snapshot_repair(ProviderId::Limine, &target_root.path, true, &runner);
 
         assert_eq!(
             result.failure.as_deref(),

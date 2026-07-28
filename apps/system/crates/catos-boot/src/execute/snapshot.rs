@@ -9,12 +9,13 @@ use crate::execute::target::{TargetRequest, TargetRunner};
 use crate::model::{BootAction, ProviderId};
 use crate::plan::registry as boot_registry;
 
-use crate::io::read_target_file;
+use crate::io::read_target_file_checked;
 
 #[derive(Debug, Clone, Default)]
 pub(super) struct SnapshotRepairState {
     pub enabled: bool,
     pub restore_root_config: Option<String>,
+    pub target_has_snapshots: bool,
 }
 
 #[derive(Default)]
@@ -31,41 +32,59 @@ pub(super) fn snapshot_repair_state(
     provider: ProviderId,
     root_fstype: &str,
     _installed_packages: &[String],
-) -> SnapshotRepairState {
+) -> Result<SnapshotRepairState, String> {
     if root_fstype != "btrfs" || boot_registry::snapshot_profile(provider).is_none() {
-        return SnapshotRepairState::default();
+        return Ok(SnapshotRepairState::default());
     }
 
-    let root_config = read_nonempty_target_text(target_root, "/etc/snapper/configs/root");
+    let root_config = read_nonempty_target_text(target_root, "/etc/snapper/configs/root")?;
+    let target_has_snapshots = target_snapshot_catalog_has_entries(target_root)?;
     if root_config.is_some() {
-        return SnapshotRepairState {
+        return Ok(SnapshotRepairState {
             enabled: true,
             restore_root_config: None,
-        };
+            target_has_snapshots,
+        });
     }
 
     let template = read_nonempty_target_text(
         target_root,
         "/etc/snapper/config-templates/catos-root",
-    );
-    let snapshots_directory_present =
-        catos_target::execute::confined::list_rooted_directory_names(target_root, "/.snapshots")
-            .is_ok();
+    )?;
+    let snapshots_directory_present = target_directory_present(target_root, "/.snapshots")?;
     if snapshots_directory_present && template.is_some() {
-        return SnapshotRepairState {
+        return Ok(SnapshotRepairState {
             enabled: true,
             restore_root_config: template,
-        };
+            target_has_snapshots,
+        });
     }
 
-    SnapshotRepairState::default()
+    Ok(SnapshotRepairState {
+        target_has_snapshots,
+        ..SnapshotRepairState::default()
+    })
 }
 
-fn read_nonempty_target_text(target_root: &Path, rooted: &str) -> Option<String> {
-    catos_target::execute::confined::read_rooted_file(target_root, rooted)
-        .ok()
-        .and_then(|bytes| String::from_utf8(bytes).ok())
-        .filter(|text| !text.trim().is_empty())
+fn read_nonempty_target_text(
+    target_root: &Path,
+    rooted: &str,
+) -> Result<Option<String>, String> {
+    match catos_target::execute::confined::read_rooted_file(target_root, rooted) {
+        Ok(bytes) => String::from_utf8(bytes)
+            .map_err(|error| format!("target {rooted} is not UTF-8: {error}"))
+            .map(|text| (!text.trim().is_empty()).then_some(text)),
+        Err(catos_target::FsError::NotFound) => Ok(None),
+        Err(error) => Err(format!("cannot read target {rooted}: {error}")),
+    }
+}
+
+fn target_directory_present(target_root: &Path, rooted: &str) -> Result<bool, String> {
+    match catos_target::execute::confined::list_rooted_directory_names(target_root, rooted) {
+        Ok(_) => Ok(true),
+        Err(catos_target::FsError::NotFound) => Ok(false),
+        Err(error) => Err(format!("cannot inspect target directory {rooted}: {error}")),
+    }
 }
 
 pub(super) fn write_restored_snapper_config(
@@ -73,7 +92,7 @@ pub(super) fn write_restored_snapper_config(
     target_root: &Path,
     template: &str,
 ) -> Result<Vec<BootAction>, String> {
-    let current = read_target_file(target_root, "etc/conf.d/snapper");
+    let current = read_target_file_checked(target_root, "etc/conf.d/snapper")?;
     let registration = register_snapper_root(current.as_deref())?;
     Ok(vec![
         transaction.write("/etc/snapper/configs/root", template)?,
@@ -129,10 +148,26 @@ pub(super) fn requires_pre_provider_snapshot_initramfs_rebuild(
 pub(super) fn run_snapshot_repair(
     provider: ProviderId,
     target_root: &Path,
+    target_has_snapshots: bool,
     runner: &dyn TargetRunner,
 ) -> SnapshotExecution {
     let mut execution = SnapshotExecution::default();
-    let target_has_snapshots = target_snapshot_catalog_has_entries(target_root);
+    let optional_unit = match provider {
+        ProviderId::Grub => Some("grub-btrfsd.service"),
+        ProviderId::Limine => Some("limine-btrfs.service"),
+        ProviderId::SystemdBoot => Some("sdboot-btrfs.service"),
+        ProviderId::Uki | ProviderId::Efistub => None,
+    };
+    let optional_unit_present = match optional_unit {
+        Some(unit) => match snapshot_unit_present(target_root, unit) {
+            Ok(present) => present,
+            Err(error) => {
+                execution.failure = Some(error);
+                return execution;
+            }
+        },
+        None => false,
+    };
     let mut run = |binary: &str, argv: Vec<String>, description: &str, require_deployment: bool| {
         if execution.failure.is_some() {
             return;
@@ -175,7 +210,7 @@ pub(super) fn run_snapshot_repair(
 
     match provider {
         ProviderId::Grub => {
-            if snapshot_unit_present(target_root, "grub-btrfsd.service") {
+            if optional_unit_present {
                 run(
                     "systemctl",
                     vec!["enable".into(), "grub-btrfsd.service".into()],
@@ -203,7 +238,7 @@ pub(super) fn run_snapshot_repair(
                 "verify Limine snapshot entries",
                 false,
             );
-            if snapshot_unit_present(target_root, "limine-btrfs.service") {
+            if optional_unit_present {
                 run(
                     "systemctl",
                     vec!["enable".into(), "limine-btrfs.service".into()],
@@ -225,7 +260,7 @@ pub(super) fn run_snapshot_repair(
                 "verify systemd-boot snapshot entries",
                 false,
             );
-            if snapshot_unit_present(target_root, "sdboot-btrfs.service") {
+            if optional_unit_present {
                 run(
                     "systemctl",
                     vec!["enable".into(), "sdboot-btrfs.service".into()],
@@ -241,28 +276,57 @@ pub(super) fn run_snapshot_repair(
     execution
 }
 
-fn target_snapshot_catalog_has_entries(target_root: &Path) -> bool {
-    catos_target::execute::confined::list_rooted_directory_names(target_root, "/.snapshots")
-        .unwrap_or_default()
-        .into_iter()
-        .filter_map(|entry| entry.into_string().ok())
-        .filter(|entry| entry.chars().all(|character| character.is_ascii_digit()))
-        .any(|entry| {
-            let info_present = matches!(
-                catos_target::execute::confined::rooted_regular_file_size(
-                    target_root,
-                    &format!("/.snapshots/{entry}/info.xml"),
-                ),
-                Ok(Some(size)) if size > 0
-            );
-            let snapshot_directory_present =
-                catos_target::execute::confined::list_rooted_directory_names(
-                    target_root,
-                    &format!("/.snapshots/{entry}/snapshot"),
-                )
-                .is_ok();
-            info_present && snapshot_directory_present
-        })
+fn target_snapshot_catalog_has_entries(target_root: &Path) -> Result<bool, String> {
+    let entries = match catos_target::execute::confined::list_rooted_directory_names(
+        target_root,
+        "/.snapshots",
+    ) {
+        Ok(entries) => entries,
+        Err(catos_target::FsError::NotFound) => return Ok(false),
+        Err(error) => {
+            return Err(format!(
+                "cannot enumerate target snapshot catalog /.snapshots: {error}"
+            ))
+        }
+    };
+    for entry in entries {
+        let Some(entry) = entry.to_str() else {
+            continue;
+        };
+        if !entry.chars().all(|character| character.is_ascii_digit()) {
+            continue;
+        }
+        let info_present = match catos_target::execute::confined::rooted_regular_file_size(
+            target_root,
+            &format!("/.snapshots/{entry}/info.xml"),
+        ) {
+            Ok(Some(size)) => size > 0,
+            Ok(None) | Err(catos_target::FsError::NotFound) => false,
+            Err(error) => {
+                return Err(format!(
+                    "cannot inspect target snapshot {entry} info.xml: {error}"
+                ))
+            }
+        };
+        let snapshot_directory_present = match
+            catos_target::execute::confined::list_rooted_directory_names(
+                target_root,
+                &format!("/.snapshots/{entry}/snapshot"),
+            )
+        {
+            Ok(_) => true,
+            Err(catos_target::FsError::NotFound) => false,
+            Err(error) => {
+                return Err(format!(
+                    "cannot inspect target snapshot {entry} directory: {error}"
+                ))
+            }
+        };
+        if info_present && snapshot_directory_present {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 fn snapshot_generate_reports_zero_deployment(result: &crate::model::TargetCommandResult) -> bool {
@@ -277,22 +341,30 @@ fn snapshot_generate_reports_zero_deployment(result: &crate::model::TargetComman
         .contains("deployed 0 snapshots")
 }
 
-fn snapshot_unit_present(target_root: &Path, unit: &str) -> bool {
-    catos_target::execute::confined::read_rooted_file(
-        target_root,
-        &format!("/usr/lib/systemd/system/{unit}"),
-    )
-    .is_ok()
-        || catos_target::execute::confined::read_rooted_file(
-            target_root,
-            &format!("/etc/systemd/system/{unit}"),
-        )
-        .is_ok()
+fn snapshot_unit_present(target_root: &Path, unit: &str) -> Result<bool, String> {
+    for rooted in [
+        format!("/usr/lib/systemd/system/{unit}"),
+        format!("/etc/systemd/system/{unit}"),
+    ] {
+        match catos_target::execute::confined::rooted_regular_file_size(target_root, &rooted) {
+            Ok(Some(_)) => return Ok(true),
+            Ok(None) | Err(catos_target::FsError::NotFound) => {}
+            Err(error) => {
+                return Err(format!("cannot inspect target snapshot unit {rooted}: {error}"))
+            }
+        }
+    }
+    Ok(false)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{snapshot_repair_state, target_snapshot_catalog_has_entries};
+    use super::{
+        run_snapshot_repair, snapshot_repair_state, target_snapshot_catalog_has_entries,
+        write_restored_snapper_config,
+    };
+    use crate::execute::config::ConfigTransaction;
+    use crate::execute::target::RecordedTargetRunner;
     use crate::model::ProviderId;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -320,6 +392,74 @@ mod tests {
     }
 
     #[test]
+    fn unreadable_root_config_is_not_silently_treated_as_disabled() {
+        use std::os::unix::fs::PermissionsExt;
+
+        if unsafe { libc::geteuid() } == 0 {
+            return;
+        }
+        let root = TempRoot::new("unreadable-root");
+        let config = root.0.join("etc/snapper/configs/root");
+        std::fs::create_dir_all(config.parent().unwrap()).unwrap();
+        std::fs::write(&config, b"SUBVOLUME=\"/\"\n").unwrap();
+        std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+        let result = snapshot_repair_state(&root.0, ProviderId::Grub, "btrfs", &[]);
+        std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn non_utf8_snapper_registration_is_not_overwritten() {
+        let root = TempRoot::new("non-utf8-registration");
+        let registration = root.0.join("etc/conf.d/snapper");
+        std::fs::create_dir_all(registration.parent().unwrap()).unwrap();
+        std::fs::write(&registration, [0xff, 0xfe]).unwrap();
+        let mut transaction = ConfigTransaction::new(&root.0);
+
+        let result = write_restored_snapper_config(
+            &mut transaction,
+            &root.0,
+            "SUBVOLUME=\"/\"\n",
+        );
+
+        assert!(result.is_err());
+        assert_eq!(std::fs::read(registration).unwrap(), [0xff, 0xfe]);
+    }
+
+    #[test]
+    fn unreadable_snapshot_catalog_is_not_reported_empty() {
+        use std::os::unix::fs::symlink;
+
+        let root = TempRoot::new("catalog-symlink");
+        let outside = TempRoot::new("catalog-outside");
+        symlink(&outside.0, root.0.join(".snapshots")).unwrap();
+
+        assert!(target_snapshot_catalog_has_entries(&root.0).is_err());
+    }
+
+    #[test]
+    fn snapshot_unit_inspection_failure_runs_no_target_commands() {
+        use std::os::unix::fs::symlink;
+
+        let root = TempRoot::new("unit-symlink");
+        let outside = TempRoot::new("unit-outside");
+        let unit = root.0.join("usr/lib/systemd/system/grub-btrfsd.service");
+        std::fs::create_dir_all(unit.parent().unwrap()).unwrap();
+        symlink(outside.0.join("unit"), &unit).unwrap();
+        let runner = RecordedTargetRunner::new();
+
+        let result = run_snapshot_repair(ProviderId::Grub, &root.0, false, &runner);
+
+        assert!(result.failure.as_deref().is_some_and(|failure| {
+            failure.contains("cannot inspect target snapshot unit")
+        }));
+        assert!(result.actions.is_empty());
+        runner.assert_consumed();
+    }
+
+    #[test]
     fn empty_root_config_is_restored_from_a_valid_target_template() {
         let root = TempRoot::new("restore-empty-root");
         std::fs::create_dir_all(root.0.join("etc/snapper/configs")).unwrap();
@@ -332,7 +472,7 @@ mod tests {
         )
         .unwrap();
 
-        let state = snapshot_repair_state(&root.0, ProviderId::Grub, "btrfs", &[]);
+        let state = snapshot_repair_state(&root.0, ProviderId::Grub, "btrfs", &[]).unwrap();
         assert!(state.enabled);
         assert_eq!(
             state.restore_root_config.as_deref(),
@@ -347,7 +487,7 @@ mod tests {
         std::fs::create_dir_all(root.0.join(".snapshots")).unwrap();
         std::fs::write(root.0.join("etc/snapper/configs/root"), b"\n").unwrap();
 
-        let state = snapshot_repair_state(&root.0, ProviderId::Grub, "btrfs", &[]);
+        let state = snapshot_repair_state(&root.0, ProviderId::Grub, "btrfs", &[]).unwrap();
         assert!(!state.enabled);
         assert!(state.restore_root_config.is_none());
     }
@@ -357,12 +497,12 @@ mod tests {
         let root = TempRoot::new("catalog");
         let entry = root.0.join(".snapshots/1");
         std::fs::create_dir_all(entry.join("snapshot")).unwrap();
-        assert!(!target_snapshot_catalog_has_entries(&root.0));
+        assert!(!target_snapshot_catalog_has_entries(&root.0).unwrap());
 
         std::fs::write(entry.join("info.xml"), b"").unwrap();
-        assert!(!target_snapshot_catalog_has_entries(&root.0));
+        assert!(!target_snapshot_catalog_has_entries(&root.0).unwrap());
 
         std::fs::write(entry.join("info.xml"), b"<snapshot/>\n").unwrap();
-        assert!(target_snapshot_catalog_has_entries(&root.0));
+        assert!(target_snapshot_catalog_has_entries(&root.0).unwrap());
     }
 }
