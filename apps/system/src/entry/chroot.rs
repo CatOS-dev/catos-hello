@@ -188,7 +188,17 @@ pub fn run(argv: &[String], program: &str) -> i32 {
         }
     };
 
-    let extra_mounts = prompt_extra_mounts(program, &devices);
+    let extra_mounts = match prompt_extra_mounts(program, &devices) {
+        Ok(selections) => selections,
+        Err(error) => {
+            return fail_with_luks_cleanup(
+                program,
+                opened_luks.take(),
+                exit_code::PROBE_FAILED,
+                error,
+            )
+        }
+    };
     let plan = match build_plan(ChrootPlanInputs {
         root_device: &root_device,
         root_subvolume: selected_subvolume.as_ref(),
@@ -439,19 +449,19 @@ fn parse_argv(argv: &[String]) -> Result<ChrootOptions, String> {
     Ok(options)
 }
 
-fn prompt_extra_mounts(program: &str, devices: &[BlockDevice]) -> Vec<ExtraMountSelection> {
+fn prompt_extra_mounts(
+    program: &str,
+    devices: &[BlockDevice],
+) -> Result<Vec<ExtraMountSelection>, String> {
     if !std::io::stdin().is_terminal() {
-        return Vec::new();
+        return Ok(Vec::new());
     }
     let mut selections = Vec::new();
-    while prompt_yes_no(program, "Mount an additional partition?", false) {
-        let Some(mount_point) = prompt_mount_point(program) else {
+    while prompt_yes_no(program, "Mount an additional partition?", false)? {
+        let Some(mount_point) = prompt_mount_point(program)? else {
             continue;
         };
-        if mount_point.eq_ignore_ascii_case("skip") {
-            continue;
-        }
-        let Some(device) = prompt_select_device(program, &mount_point, devices, true) else {
+        let Some(device) = prompt_select_device(program, &mount_point, devices, true)? else {
             continue;
         };
         selections.push(ExtraMountSelection {
@@ -459,7 +469,7 @@ fn prompt_extra_mounts(program: &str, devices: &[BlockDevice]) -> Vec<ExtraMount
             mount_point,
         });
     }
-    selections
+    Ok(selections)
 }
 
 fn prompt_select_device(
@@ -467,7 +477,7 @@ fn prompt_select_device(
     role: &str,
     devices: &[BlockDevice],
     allow_skip: bool,
-) -> Option<BlockDevice> {
+) -> Result<Option<BlockDevice>, String> {
     let stdin = io::stdin();
     let stdout = io::stdout();
     let mut input = stdin.lock();
@@ -489,16 +499,18 @@ fn prompt_select_device_with<R: BufRead, W: Write>(
     role: &str,
     devices: &[BlockDevice],
     allow_skip: bool,
-) -> Option<BlockDevice> {
+) -> Result<Option<BlockDevice>, String> {
     if devices.is_empty() {
-        writeln!(output, "{program}: no devices available to pick {role} from").ok()?;
-        return None;
+        writeln!(output, "{program}: no devices available to pick {role} from")
+            .map_err(prompt_output_error)?;
+        return Ok(None);
     }
-    writeln!(output, "\nAvailable devices for {role}:").ok()?;
+    writeln!(output, "\nAvailable devices for {role}:").map_err(prompt_output_error)?;
     for (index, device) in devices.iter().enumerate() {
-        writeln!(output, "  [{}] {device}", index + 1).ok()?;
+        writeln!(output, "  [{}] {device}", index + 1).map_err(prompt_output_error)?;
     }
-    writeln!(output, "  [0] {}", if allow_skip { "Skip" } else { "Back" }).ok()?;
+    writeln!(output, "  [0] {}", if allow_skip { "Skip" } else { "Back" })
+        .map_err(prompt_output_error)?;
     let upper = devices.len();
     loop {
         write!(
@@ -506,32 +518,34 @@ fn prompt_select_device_with<R: BufRead, W: Write>(
             "{program}: pick device [0-{upper}]{}: ",
             if allow_skip { " (blank to skip)" } else { "" }
         )
-        .ok()?;
-        output.flush().ok()?;
+        .map_err(prompt_output_error)?;
+        output.flush().map_err(prompt_output_error)?;
         let mut line = String::new();
-        let read = input.read_line(&mut line).ok()?;
+        let read = input.read_line(&mut line).map_err(prompt_input_error)?;
         if read == 0 {
-            writeln!(output).ok()?;
-            return None;
+            writeln!(output).map_err(prompt_output_error)?;
+            return Ok(None);
         }
         if line.trim().is_empty() && allow_skip {
-            return None;
+            return Ok(None);
         }
         let Ok(index) = line.trim().parse::<usize>() else {
-            writeln!(output, "{program}: enter a number from 0 to {upper}").ok()?;
+            writeln!(output, "{program}: enter a number from 0 to {upper}")
+                .map_err(prompt_output_error)?;
             continue;
         };
         if index == 0 {
-            return None;
+            return Ok(None);
         }
         if let Some(device) = devices.get(index - 1) {
-            return Some(device.clone());
+            return Ok(Some(device.clone()));
         }
-        writeln!(output, "{program}: enter a number from 0 to {upper}").ok()?;
+        writeln!(output, "{program}: enter a number from 0 to {upper}")
+            .map_err(prompt_output_error)?;
     }
 }
 
-fn prompt_mount_point(program: &str) -> Option<String> {
+fn prompt_mount_point(program: &str) -> Result<Option<String>, String> {
     let stdin = io::stdin();
     let stdout = io::stdout();
     let mut input = stdin.lock();
@@ -543,32 +557,33 @@ fn prompt_mount_point_with<R: BufRead, W: Write>(
     input: &mut R,
     output: &mut W,
     program: &str,
-) -> Option<String> {
+) -> Result<Option<String>, String> {
     loop {
         write!(
             output,
             "{program}: mount point (for example /boot; blank to cancel): "
         )
-        .ok()?;
-        output.flush().ok()?;
+        .map_err(prompt_output_error)?;
+        output.flush().map_err(prompt_output_error)?;
         let mut line = String::new();
-        let read = input.read_line(&mut line).ok()?;
+        let read = input.read_line(&mut line).map_err(prompt_input_error)?;
         if read == 0 {
-            writeln!(output).ok()?;
-            return None;
+            writeln!(output).map_err(prompt_output_error)?;
+            return Ok(None);
         }
         let value = line.trim().to_string();
         if value.is_empty() || value.eq_ignore_ascii_case("skip") {
-            return None;
+            return Ok(None);
         }
         if value.starts_with('/') {
-            return Some(value);
+            return Ok(Some(value));
         }
-        writeln!(output, "{program}: mount point must start with /").ok()?;
+        writeln!(output, "{program}: mount point must start with /")
+            .map_err(prompt_output_error)?;
     }
 }
 
-fn prompt_yes_no(program: &str, prompt: &str, default: bool) -> bool {
+fn prompt_yes_no(program: &str, prompt: &str, default: bool) -> Result<bool, String> {
     let stdin = io::stdin();
     let stdout = io::stdout();
     let mut input = stdin.lock();
@@ -582,33 +597,32 @@ fn prompt_yes_no_with<R: BufRead, W: Write>(
     program: &str,
     prompt: &str,
     default: bool,
-) -> bool {
+) -> Result<bool, String> {
     loop {
         let choices = if default { "Y/n" } else { "y/N" };
-        if write!(output, "{program}: {prompt} [{choices}] ").is_err()
-            || output.flush().is_err()
-        {
-            return false;
-        }
+        write!(output, "{program}: {prompt} [{choices}] ").map_err(prompt_output_error)?;
+        output.flush().map_err(prompt_output_error)?;
         let mut line = String::new();
-        let Ok(read) = input.read_line(&mut line) else {
-            return false;
-        };
+        let read = input.read_line(&mut line).map_err(prompt_input_error)?;
         if read == 0 {
-            let _ = writeln!(output);
-            return false;
+            writeln!(output).map_err(prompt_output_error)?;
+            return Ok(false);
         }
         match line.trim().to_ascii_lowercase().as_str() {
-            "" => return default,
-            "y" | "yes" => return true,
-            "n" | "no" => return false,
-            _ => {
-                if writeln!(output, "{program}: enter y or n").is_err() {
-                    return false;
-                }
-            }
+            "" => return Ok(default),
+            "y" | "yes" => return Ok(true),
+            "n" | "no" => return Ok(false),
+            _ => writeln!(output, "{program}: enter y or n").map_err(prompt_output_error)?,
         }
     }
+}
+
+fn prompt_output_error(error: io::Error) -> String {
+    format!("interactive output failed: {error}")
+}
+
+fn prompt_input_error(error: io::Error) -> String {
+    format!("interactive input failed: {error}")
 }
 
 #[cfg(test)]
@@ -810,6 +824,67 @@ mod tests {
         assert!(warnings[0].contains("mystery0"));
     }
 
+    struct FailingWriter;
+
+    impl Write for FailingWriter {
+        fn write(&mut self, _buffer: &[u8]) -> io::Result<usize> {
+            Err(io::Error::new(io::ErrorKind::BrokenPipe, "closed output"))
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Err(io::Error::new(io::ErrorKind::BrokenPipe, "closed output"))
+        }
+    }
+
+    struct FailingReader;
+
+    impl io::Read for FailingReader {
+        fn read(&mut self, _buffer: &mut [u8]) -> io::Result<usize> {
+            Err(io::Error::other("input failed"))
+        }
+    }
+
+    impl BufRead for FailingReader {
+        fn fill_buf(&mut self) -> io::Result<&[u8]> {
+            Err(io::Error::other("input failed"))
+        }
+
+        fn consume(&mut self, _amount: usize) {}
+    }
+
+    #[test]
+    fn prompt_io_failures_are_not_reported_as_user_cancellation() {
+        let devices = vec![BlockDevice {
+            name: "/dev/sda1".into(),
+            fs_type: Some("ext4".into()),
+            uuid: None,
+            partuuid: None,
+            label: None,
+            partlabel: None,
+        }];
+        let mut input = io::Cursor::new(b"1\n".to_vec());
+        assert!(prompt_select_device_with(
+            &mut input,
+            &mut FailingWriter,
+            "catos-chroot",
+            "/boot",
+            &devices,
+            true,
+        )
+        .is_err());
+
+        let mut output = Vec::new();
+        assert!(prompt_mount_point_with(&mut FailingReader, &mut output, "catos-chroot").is_err());
+        assert!(prompt_yes_no_with(
+            &mut FailingReader,
+            &mut output,
+            "catos-chroot",
+            "Mount an additional partition?",
+            false,
+        )
+        .is_err());
+    }
+
     #[test]
     fn extra_mount_device_picker_is_one_based_and_blank_skips() {
         let devices = vec![BlockDevice {
@@ -830,7 +905,8 @@ mod tests {
                 "/boot",
                 &devices,
                 true,
-            ),
+            )
+            .unwrap(),
             Some(devices[0].clone())
         );
         let rendered = String::from_utf8(output).unwrap();
@@ -847,6 +923,7 @@ mod tests {
             &devices,
             true,
         )
+        .unwrap()
         .is_none());
     }
 
@@ -855,7 +932,7 @@ mod tests {
         let mut mount_input = io::Cursor::new(b"boot\n/boot\n".to_vec());
         let mut output = Vec::new();
         assert_eq!(
-            prompt_mount_point_with(&mut mount_input, &mut output, "catos-chroot"),
+            prompt_mount_point_with(&mut mount_input, &mut output, "catos-chroot").unwrap(),
             Some("/boot".into())
         );
         assert!(String::from_utf8(output)
@@ -864,13 +941,16 @@ mod tests {
 
         let mut confirm_input = io::Cursor::new(b"maybe\nyes\n".to_vec());
         let mut output = Vec::new();
-        assert!(prompt_yes_no_with(
-            &mut confirm_input,
-            &mut output,
-            "catos-chroot",
-            "Mount an additional partition?",
-            false,
-        ));
+        assert!(
+            prompt_yes_no_with(
+                &mut confirm_input,
+                &mut output,
+                "catos-chroot",
+                "Mount an additional partition?",
+                false,
+            )
+            .unwrap()
+        );
         assert!(String::from_utf8(output)
             .unwrap()
             .contains("enter y or n"));
