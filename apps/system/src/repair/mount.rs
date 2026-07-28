@@ -553,6 +553,32 @@ fn rollback_pending_subvolumes(report: &mut MountRepairReport, top: &Path) {
 // repair needs, without entering the write/apply flow.
 // ---------------------------------------------------------------------------
 
+#[derive(Debug, Clone)]
+pub(crate) struct BootRepairSessionOpenError {
+    pub(crate) reason: String,
+    pub(crate) cleanup: CleanupSummary,
+}
+
+impl BootRepairSessionOpenError {
+    fn clean(reason: impl Into<String>) -> Self {
+        Self {
+            reason: reason.into(),
+            cleanup: CleanupSummary {
+                all_clean: true,
+                ..CleanupSummary::default()
+            },
+        }
+    }
+}
+
+impl std::fmt::Display for BootRepairSessionOpenError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "{}", self.reason)
+    }
+}
+
+impl std::error::Error for BootRepairSessionOpenError {}
+
 pub(crate) struct BootRepairTargetSession {
     target: MountTargetIdentity,
     devices: Vec<BlockDevice>,
@@ -575,38 +601,10 @@ impl BootRepairTargetSession {
     }
 
     pub(crate) fn cleanup(&mut self) -> CleanupSummary {
-        let mut cleanup = CleanupSummary {
-            unmounted: Vec::new(),
-            residual: Vec::new(),
-            all_clean: true,
-        };
-        for mount_point in self.auxiliary_mounts.drain(..).rev() {
-            match crate::mount::execute::syscall::umount2(&mount_point, 0) {
-                Ok(()) => cleanup.unmounted.push(mount_point.display().to_string()),
-                Err(error) => {
-                    let detach = crate::mount::execute::syscall::umount2(
-                        &mount_point,
-                        crate::mount::execute::syscall::mnt_flags::MNT_DETACH,
-                    );
-                    cleanup.all_clean = false;
-                    cleanup.residual.push(match detach {
-                        Ok(()) => format!(
-                            "{}: umount2 failed ({error}); detached lazily",
-                            mount_point.display()
-                        ),
-                        Err(detach_error) => format!(
-                            "{}: umount2 failed ({error}); lazy detach failed ({detach_error})",
-                            mount_point.display()
-                        ),
-                    });
-                }
-            }
-        }
-        let root_cleanup = self.root_session.cleanup();
-        cleanup.unmounted.extend(root_cleanup.unmounted);
-        cleanup.residual.extend(root_cleanup.residual);
-        cleanup.all_clean &= root_cleanup.all_clean;
-        cleanup
+        let auxiliary = cleanup_auxiliary_mounts_with(&mut self.auxiliary_mounts, |path, flags| {
+            crate::mount::execute::syscall::umount2(path, flags).map_err(|error| error.to_string())
+        });
+        merge_cleanup(auxiliary, self.root_session.cleanup())
     }
 }
 
@@ -617,24 +615,32 @@ pub(crate) fn open_boot_repair_target_session(
     root_device: Option<&str>,
     root_subvolume: Option<&str>,
     esp_device: Option<&str>,
-) -> Result<BootRepairTargetSession, String> {
+) -> Result<BootRepairTargetSession, BootRepairSessionOpenError> {
     let fs = RealFilesystem;
     let (devices, _) = discover_devices(&fs);
-    let root = select_cli_root(&devices, root_device)
-        .ok_or_else(|| "root device must identify exactly one verified CatOS root".to_string())?;
+    let root = select_cli_root(&devices, root_device).ok_or_else(|| {
+        BootRepairSessionOpenError::clean(
+            "root device must identify exactly one verified CatOS root",
+        )
+    })?;
     let requested_subvol = match (root.filesystem.as_deref(), root_subvolume) {
         (Some("btrfs"), Some(value)) => value,
         (Some("btrfs"), None) => "/@",
-        (_, Some(_)) => return Err("--root-subvolume is valid only for Btrfs roots".into()),
+        (_, Some(_)) => {
+            return Err(BootRepairSessionOpenError::clean(
+                "--root-subvolume is valid only for Btrfs roots",
+            ))
+        }
         (_, None) => "",
     };
     if root.filesystem.as_deref() == Some("btrfs") && requested_subvol != "/@" {
-        return Err("boot repair supports the CatOS standard Btrfs root subvolume /@".into());
+        return Err(BootRepairSessionOpenError::clean(
+            "boot repair supports the CatOS standard Btrfs root subvolume /@",
+        ));
     }
-    let root_device_path = root
-        .dev_path
-        .as_deref()
-        .ok_or_else(|| "selected root has no stable device path".to_string())?;
+    let root_device_path = root.dev_path.as_deref().ok_or_else(|| {
+        BootRepairSessionOpenError::clean("selected root has no stable device path")
+    })?;
     let running_root = is_running_root_device(root);
     let selected_probe = if running_root {
         inspect_running_root()
@@ -645,9 +651,15 @@ pub(crate) fn open_boot_repair_target_session(
         )
         .map_err(|error| error.message)
     }
-    .map_err(|error| format!("cannot inspect selected target read-only: {error}"))?;
+    .map_err(|error| {
+        BootRepairSessionOpenError::clean(format!(
+            "cannot inspect selected target read-only: {error}"
+        ))
+    })?;
     if selected_probe.inspection.is_catos_target.status != DetectionStatus::Detected {
-        return Err("selected target is not identified as CatOS".into());
+        return Err(BootRepairSessionOpenError::clean(
+            "selected target is not identified as CatOS",
+        ));
     }
     let topology_probe = probe_unmounted_candidates(&devices, &selected_probe.fstab);
     let esp = select_mount_repair_esp(
@@ -655,13 +667,15 @@ pub(crate) fn open_boot_repair_target_session(
         &selected_probe.fstab,
         &topology_probe.esps,
         esp_device,
-    )?;
+    )
+    .map_err(BootRepairSessionOpenError::clean)?;
     let boot_layout = detect_boot_mount_layout(
         &selected_probe.fstab,
         &devices,
         root_device_path,
         esp.and_then(|device| device.dev_path.as_deref()),
-    )?;
+    )
+    .map_err(BootRepairSessionOpenError::clean)?;
     let target = MountTargetIdentity {
         root_device: root_device_path.to_path_buf(),
         root_fstype: root.filesystem.clone().unwrap_or_default(),
@@ -672,13 +686,14 @@ pub(crate) fn open_boot_repair_target_session(
         esp_uuid: esp.and_then(|device| device.uuid.clone()),
         boot_layout: Some(boot_layout),
     };
-    let lock = DeviceLock::try_acquire(root_device_path).map_err(|error| error.message)?;
+    let lock = DeviceLock::try_acquire(root_device_path)
+        .map_err(|error| BootRepairSessionOpenError::clean(error.message))?;
     let root_session = TargetMountRwSession::mount(
         root_device_path,
         root.filesystem.as_deref().unwrap_or_default(),
         running_root,
     )
-    .map_err(|error| error.message.to_string())?;
+    .map_err(|error| BootRepairSessionOpenError::clean(error.message.to_string()))?;
     let mut session = BootRepairTargetSession {
         target,
         devices,
@@ -686,8 +701,13 @@ pub(crate) fn open_boot_repair_target_session(
         auxiliary_mounts: Vec::new(),
         _lock: lock,
     };
-    session.mount_runtime_filesystems()?;
-    session.mount_boot_layout()?;
+    let initialization = session
+        .mount_runtime_filesystems()
+        .and_then(|()| session.mount_boot_layout());
+    if let Err(reason) = initialization {
+        let cleanup = session.cleanup();
+        return Err(BootRepairSessionOpenError { reason, cleanup });
+    }
     Ok(session)
 }
 
@@ -701,167 +721,490 @@ fn boot_runtime_bind_flags(source: &str) -> u64 {
 
 impl BootRepairTargetSession {
     fn mount_runtime_filesystems(&mut self) -> Result<(), String> {
-        use crate::mount::execute::syscall;
-        for source in ["/dev", "/proc", "/sys", "/run"] {
-            if !Path::new(source).is_dir() {
-                return Err(format!(
-                    "required host runtime mount {source} is unavailable"
-                ));
-            }
-            self.bind_host_path(source, source, &syscall::mount)?;
-        }
-        let efivars = Path::new("/sys/firmware/efi/efivars");
-        if efivars.is_dir() {
-            self.bind_host_path(
-                "/sys/firmware/efi/efivars",
-                "/sys/firmware/efi/efivars",
-                &syscall::mount,
-            )?;
-        }
-        Ok(())
+        let target_root = self.target_root();
+        mount_runtime_filesystems_with(
+            &target_root,
+            &mut self.auxiliary_mounts,
+            |path| path.is_dir(),
+            |source, target, fstype, flags, options| {
+                crate::mount::execute::syscall::mount(source, target, fstype, flags, options)
+                    .map_err(|error| error.to_string())
+            },
+        )
     }
 
     fn mount_boot_layout(&mut self) -> Result<(), String> {
-        use crate::mount::execute::syscall;
-        use crate::mount::model::BootMountLayout;
-        let Some(layout) = self.target.boot_layout.clone() else {
-            return Err("target boot layout was not detected".into());
-        };
-        let mount_fn = &syscall::mount;
-        match layout {
-            BootMountLayout::BootInsideRoot => Ok(()),
-            BootMountLayout::EspAtBootEfi { esp_device } => {
-                self.mount_device_at(&esp_device, "/boot/efi", None, mount_fn)
-            }
-            BootMountLayout::EspAtEfi { esp_device } => {
-                self.mount_device_at(&esp_device, "/efi", None, mount_fn)
-            }
-            BootMountLayout::EspAtBoot { esp_device } => {
-                self.mount_device_at(&esp_device, "/boot", None, mount_fn)
-            }
-            BootMountLayout::SeparateBootAndEsp {
-                boot_device,
-                esp_device,
-                esp_mount_point,
-            } => {
-                self.mount_device_at(&boot_device, "/boot", None, mount_fn)?;
-                self.mount_device_at(&esp_device, &esp_mount_point, None, mount_fn)
-            }
-            BootMountLayout::BootBtrfsSubvolume {
-                subvolume,
-                esp_device,
-                esp_mount_point,
-            } => {
-                self.mount_device_at(
-                    &self.target.root_device.clone(),
-                    "/boot",
-                    Some(format!("subvol={subvolume}")),
-                    mount_fn,
-                )?;
-                match (esp_device, esp_mount_point) {
-                    (Some(device), Some(mount_point)) => {
-                        self.mount_device_at(&device, &mount_point, None, mount_fn)
-                    }
-                    (None, None) => Ok(()),
-                    _ => Err("Btrfs /boot layout has incomplete ESP metadata".into()),
-                }
-            }
-        }
-    }
-
-    fn mount_device_at(
-        &mut self,
-        device: &Path,
-        target_relative: &str,
-        options: Option<String>,
-        mount_fn: &impl Fn(
-            Option<&str>,
-            &Path,
-            Option<&str>,
-            u64,
-            Option<&str>,
-        ) -> Result<(), crate::mount::execute::syscall::SyscallError>,
-    ) -> Result<(), String> {
-        use crate::mount::execute::syscall::ms_flags;
-        let filesystem = self
-            .devices
-            .iter()
-            .find(|candidate| {
-                candidate
-                    .dev_path
-                    .as_deref()
-                    .is_some_and(|path| same_block_device(path, device))
-            })
-            .and_then(|candidate| candidate.filesystem.as_deref())
-            .ok_or_else(|| format!("{} has no detected filesystem", device.display()))?;
-        let mount_point = self
-            .target_root()
-            .join(target_relative.trim_start_matches('/'));
-        match std::fs::symlink_metadata(&mount_point) {
-            Ok(metadata) if metadata.file_type().is_symlink() => {
-                return Err(format!("{} is a symlink", mount_point.display()));
-            }
-            Ok(metadata) if !metadata.is_dir() => {
-                return Err(format!("{} is not a directory", mount_point.display()));
-            }
-            Ok(_) => {}
-            Err(error) => return Err(format!("cannot inspect {}: {error}", mount_point.display())),
-        }
-        let source = device
-            .to_str()
-            .ok_or_else(|| format!("{} is not valid UTF-8", device.display()))?;
-        mount_fn(
-            Some(source),
-            &mount_point,
-            Some(filesystem),
-            ms_flags::MS_NOSUID | ms_flags::MS_NODEV,
-            options.as_deref(),
+        let target_root = self.target_root();
+        mount_boot_layout_with(
+            &self.target,
+            &target_root,
+            &self.devices,
+            &mut self.auxiliary_mounts,
+            |source, target, fstype, flags, options| {
+                crate::mount::execute::syscall::mount(source, target, fstype, flags, options)
+                    .map_err(|error| error.to_string())
+            },
         )
-        .map_err(|error| {
-            format!(
-                "mount {} at {}: {error}",
-                device.display(),
-                mount_point.display()
+    }
+}
+
+fn mount_runtime_filesystems_with<D, M>(
+    target_root: &Path,
+    auxiliary_mounts: &mut Vec<PathBuf>,
+    mut host_is_dir: D,
+    mut mount_fn: M,
+) -> Result<(), String>
+where
+    D: FnMut(&Path) -> bool,
+    M: FnMut(Option<&str>, &Path, Option<&str>, u64, Option<&str>) -> Result<(), String>,
+{
+    for source in ["/dev", "/proc", "/sys", "/run"] {
+        if !host_is_dir(Path::new(source)) {
+            return Err(format!(
+                "required host runtime mount {source} is unavailable"
+            ));
+        }
+        bind_host_path_with(target_root, auxiliary_mounts, source, source, &mut mount_fn)?;
+    }
+    let efivars = Path::new("/sys/firmware/efi/efivars");
+    if host_is_dir(efivars) {
+        bind_host_path_with(
+            target_root,
+            auxiliary_mounts,
+            "/sys/firmware/efi/efivars",
+            "/sys/firmware/efi/efivars",
+            &mut mount_fn,
+        )?;
+    }
+    Ok(())
+}
+
+fn mount_boot_layout_with<M>(
+    target: &MountTargetIdentity,
+    target_root: &Path,
+    devices: &[BlockDevice],
+    auxiliary_mounts: &mut Vec<PathBuf>,
+    mut mount_fn: M,
+) -> Result<(), String>
+where
+    M: FnMut(Option<&str>, &Path, Option<&str>, u64, Option<&str>) -> Result<(), String>,
+{
+    use crate::mount::model::BootMountLayout;
+    let Some(layout) = target.boot_layout.clone() else {
+        return Err("target boot layout was not detected".into());
+    };
+    match layout {
+        BootMountLayout::BootInsideRoot => Ok(()),
+        BootMountLayout::EspAtBootEfi { esp_device } => mount_device_at_with(
+            target_root,
+            devices,
+            auxiliary_mounts,
+            &esp_device,
+            "/boot/efi",
+            None,
+            &mut mount_fn,
+        ),
+        BootMountLayout::EspAtEfi { esp_device } => mount_device_at_with(
+            target_root,
+            devices,
+            auxiliary_mounts,
+            &esp_device,
+            "/efi",
+            None,
+            &mut mount_fn,
+        ),
+        BootMountLayout::EspAtBoot { esp_device } => mount_device_at_with(
+            target_root,
+            devices,
+            auxiliary_mounts,
+            &esp_device,
+            "/boot",
+            None,
+            &mut mount_fn,
+        ),
+        BootMountLayout::SeparateBootAndEsp {
+            boot_device,
+            esp_device,
+            esp_mount_point,
+        } => {
+            mount_device_at_with(
+                target_root,
+                devices,
+                auxiliary_mounts,
+                &boot_device,
+                "/boot",
+                None,
+                &mut mount_fn,
+            )?;
+            mount_device_at_with(
+                target_root,
+                devices,
+                auxiliary_mounts,
+                &esp_device,
+                &esp_mount_point,
+                None,
+                &mut mount_fn,
             )
-        })?;
-        self.auxiliary_mounts.push(mount_point);
-        Ok(())
+        }
+        BootMountLayout::BootBtrfsSubvolume {
+            subvolume,
+            esp_device,
+            esp_mount_point,
+        } => {
+            mount_device_at_with(
+                target_root,
+                devices,
+                auxiliary_mounts,
+                &target.root_device,
+                "/boot",
+                Some(format!("subvol={subvolume}")),
+                &mut mount_fn,
+            )?;
+            match (esp_device, esp_mount_point) {
+                (Some(device), Some(mount_point)) => mount_device_at_with(
+                    target_root,
+                    devices,
+                    auxiliary_mounts,
+                    &device,
+                    &mount_point,
+                    None,
+                    &mut mount_fn,
+                ),
+                (None, None) => Ok(()),
+                _ => Err("Btrfs /boot layout has incomplete ESP metadata".into()),
+            }
+        }
+    }
+}
+
+fn mount_device_at_with<M>(
+    target_root: &Path,
+    devices: &[BlockDevice],
+    auxiliary_mounts: &mut Vec<PathBuf>,
+    device: &Path,
+    target_relative: &str,
+    options: Option<String>,
+    mount_fn: &mut M,
+) -> Result<(), String>
+where
+    M: FnMut(Option<&str>, &Path, Option<&str>, u64, Option<&str>) -> Result<(), String>,
+{
+    use crate::mount::execute::syscall::ms_flags;
+    let filesystem = devices
+        .iter()
+        .find(|candidate| {
+            candidate
+                .dev_path
+                .as_deref()
+                .is_some_and(|path| same_block_device(path, device))
+        })
+        .and_then(|candidate| candidate.filesystem.as_deref())
+        .ok_or_else(|| format!("{} has no detected filesystem", device.display()))?;
+    let mount_point = target_root.join(target_relative.trim_start_matches('/'));
+    validate_boot_mountpoint(&mount_point)?;
+    let source = device
+        .to_str()
+        .ok_or_else(|| format!("{} is not valid UTF-8", device.display()))?;
+    mount_fn(
+        Some(source),
+        &mount_point,
+        Some(filesystem),
+        ms_flags::MS_NOSUID | ms_flags::MS_NODEV,
+        options.as_deref(),
+    )
+    .map_err(|error| {
+        format!(
+            "mount {} at {}: {error}",
+            device.display(),
+            mount_point.display()
+        )
+    })?;
+    auxiliary_mounts.push(mount_point);
+    Ok(())
+}
+
+fn bind_host_path_with<M>(
+    target_root: &Path,
+    auxiliary_mounts: &mut Vec<PathBuf>,
+    source: &str,
+    target_relative: &str,
+    mount_fn: &mut M,
+) -> Result<(), String>
+where
+    M: FnMut(Option<&str>, &Path, Option<&str>, u64, Option<&str>) -> Result<(), String>,
+{
+    let mount_point = target_root.join(target_relative.trim_start_matches('/'));
+    validate_boot_mountpoint(&mount_point)?;
+    mount_fn(
+        Some(source),
+        &mount_point,
+        None,
+        boot_runtime_bind_flags(source),
+        None,
+    )
+    .map_err(|error| format!("bind mount {source} at {}: {error}", mount_point.display()))?;
+    auxiliary_mounts.push(mount_point);
+    Ok(())
+}
+
+fn validate_boot_mountpoint(mount_point: &Path) -> Result<(), String> {
+    match std::fs::symlink_metadata(mount_point) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            Err(format!("{} is a symlink", mount_point.display()))
+        }
+        Ok(metadata) if !metadata.is_dir() => {
+            Err(format!("{} is not a directory", mount_point.display()))
+        }
+        Ok(_) => Ok(()),
+        Err(error) => Err(format!("cannot inspect {}: {error}", mount_point.display())),
+    }
+}
+
+fn cleanup_auxiliary_mounts_with<U>(
+    auxiliary_mounts: &mut Vec<PathBuf>,
+    mut umount_fn: U,
+) -> CleanupSummary
+where
+    U: FnMut(&Path, i32) -> Result<(), String>,
+{
+    let mut cleanup = CleanupSummary {
+        all_clean: true,
+        ..CleanupSummary::default()
+    };
+    for mount_point in auxiliary_mounts.drain(..).rev() {
+        match umount_fn(&mount_point, 0) {
+            Ok(()) => cleanup.unmounted.push(mount_point.display().to_string()),
+            Err(error) => {
+                let detach = umount_fn(
+                    &mount_point,
+                    crate::mount::execute::syscall::mnt_flags::MNT_DETACH,
+                );
+                cleanup.all_clean = false;
+                cleanup.residual.push(match detach {
+                    Ok(()) => format!(
+                        "{}: umount2 failed ({error}); detached lazily",
+                        mount_point.display()
+                    ),
+                    Err(detach_error) => format!(
+                        "{}: umount2 failed ({error}); lazy detach failed ({detach_error})",
+                        mount_point.display()
+                    ),
+                });
+            }
+        }
+    }
+    cleanup
+}
+
+fn merge_cleanup(mut auxiliary: CleanupSummary, root: CleanupSummary) -> CleanupSummary {
+    auxiliary.unmounted.extend(root.unmounted);
+    auxiliary.residual.extend(root.residual);
+    auxiliary.all_clean &= root.all_clean;
+    auxiliary
+}
+
+#[cfg(test)]
+mod boot_session_tests {
+    use super::*;
+    use crate::mount::model::BootMountLayout;
+    use crate::target::model::{DeviceClass, DiskKind, PartitionRole};
+    use std::cell::RefCell;
+    use std::rc::Rc;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+    struct TempRoot(PathBuf);
+
+    impl TempRoot {
+        fn new() -> Self {
+            let path = std::env::temp_dir().join(format!(
+                "catos-boot-session-{}-{}",
+                std::process::id(),
+                SEQUENCE.fetch_add(1, Ordering::Relaxed)
+            ));
+            for relative in [
+                "dev",
+                "proc",
+                "sys",
+                "run",
+                "sys/firmware/efi/efivars",
+                "boot",
+                "boot/efi",
+            ] {
+                std::fs::create_dir_all(path.join(relative)).unwrap();
+            }
+            Self(path)
+        }
     }
 
-    fn bind_host_path(
-        &mut self,
-        source: &str,
-        target_relative: &str,
-        mount_fn: &impl Fn(
-            Option<&str>,
-            &Path,
-            Option<&str>,
-            u64,
-            Option<&str>,
-        ) -> Result<(), crate::mount::execute::syscall::SyscallError>,
-    ) -> Result<(), String> {
-        let mount_point = self
-            .target_root()
-            .join(target_relative.trim_start_matches('/'));
-        match std::fs::symlink_metadata(&mount_point) {
-            Ok(metadata) if metadata.file_type().is_symlink() => {
-                return Err(format!("{} is a symlink", mount_point.display()));
-            }
-            Ok(metadata) if !metadata.is_dir() => {
-                return Err(format!("{} is not a directory", mount_point.display()));
-            }
-            Ok(_) => {}
-            Err(error) => return Err(format!("cannot inspect {}: {error}", mount_point.display())),
+    impl Drop for TempRoot {
+        fn drop(&mut self) {
+            std::fs::remove_dir_all(&self.0).unwrap();
         }
-        mount_fn(
-            Some(source),
-            &mount_point,
-            None,
-            boot_runtime_bind_flags(source),
-            None,
-        )
-        .map_err(|error| format!("bind mount {source} at {}: {error}", mount_point.display()))?;
-        self.auxiliary_mounts.push(mount_point);
-        Ok(())
+    }
+
+    fn device(name: &str, path: &str, filesystem: &str) -> BlockDevice {
+        BlockDevice {
+            name: name.into(),
+            dev_path: Some(PathBuf::from(path)),
+            major_minor: None,
+            parent: String::new(),
+            class: DeviceClass::Partition,
+            disk_kind: DiskKind::Gpt,
+            partition_role: PartitionRole::LinuxFilesystem,
+            partition_number: None,
+            size_sectors: None,
+            read_only: false,
+            removable: false,
+            filesystem: Some(filesystem.into()),
+            uuid: None,
+            part_uuid: None,
+            label: None,
+            part_label: None,
+            mount_point: None,
+            mounts: Vec::new(),
+            mounted_before_session: false,
+            evidence: Vec::new(),
+        }
+    }
+
+    fn target() -> MountTargetIdentity {
+        MountTargetIdentity {
+            root_device: PathBuf::from("/dev/root"),
+            root_fstype: "btrfs".into(),
+            root_subvol: Some("/@".into()),
+            root_uuid: Some("root".into()),
+            esp_device: Some(PathBuf::from("/dev/esp")),
+            esp_uuid: Some("esp".into()),
+            boot_layout: Some(BootMountLayout::SeparateBootAndEsp {
+                boot_device: PathBuf::from("/dev/boot"),
+                esp_device: PathBuf::from("/dev/esp"),
+                esp_mount_point: "/boot/efi".into(),
+            }),
+        }
+    }
+
+    #[test]
+    fn every_initialization_failure_cleans_completed_mounts_in_reverse_order() {
+        let expected = [
+            "dev",
+            "proc",
+            "sys",
+            "run",
+            "sys/firmware/efi/efivars",
+            "boot",
+            "boot/efi",
+        ];
+        let devices = vec![
+            device("boot", "/dev/boot", "ext4"),
+            device("esp", "/dev/esp", "vfat"),
+        ];
+
+        for fail_at in 0..expected.len() {
+            let root = TempRoot::new();
+            let mounted = Rc::new(RefCell::new(Vec::<PathBuf>::new()));
+            let mounted_for_call = Rc::clone(&mounted);
+            let mut calls = 0usize;
+            let mut auxiliary = Vec::new();
+            let mount_result = mount_runtime_filesystems_with(
+                &root.0,
+                &mut auxiliary,
+                |_| true,
+                |_, target, _, _, _| {
+                    if calls == fail_at {
+                        return Err(format!("injected mount failure at {fail_at}"));
+                    }
+                    calls += 1;
+                    mounted_for_call.borrow_mut().push(target.to_path_buf());
+                    Ok(())
+                },
+            )
+            .and_then(|()| {
+                mount_boot_layout_with(
+                    &target(),
+                    &root.0,
+                    &devices,
+                    &mut auxiliary,
+                    |_, target, _, _, _| {
+                        if calls == fail_at {
+                            return Err(format!("injected mount failure at {fail_at}"));
+                        }
+                        calls += 1;
+                        mounted_for_call.borrow_mut().push(target.to_path_buf());
+                        Ok(())
+                    },
+                )
+            });
+            assert!(
+                mount_result.is_err(),
+                "failure window {fail_at} did not fail"
+            );
+
+            let unmounted = Rc::new(RefCell::new(Vec::<PathBuf>::new()));
+            let unmounted_for_call = Rc::clone(&unmounted);
+            let auxiliary_cleanup = cleanup_auxiliary_mounts_with(&mut auxiliary, |path, flags| {
+                assert_eq!(flags, 0);
+                unmounted_for_call.borrow_mut().push(path.to_path_buf());
+                Ok(())
+            });
+            let root_cleanup = CleanupSummary {
+                unmounted: vec!["<root-session>".into()],
+                all_clean: true,
+                ..CleanupSummary::default()
+            };
+            let cleanup = merge_cleanup(auxiliary_cleanup, root_cleanup);
+
+            let expected_mounted = expected[..fail_at]
+                .iter()
+                .map(|relative| root.0.join(relative))
+                .collect::<Vec<_>>();
+            assert_eq!(
+                *mounted.borrow(),
+                expected_mounted,
+                "failure window {fail_at}"
+            );
+            let mut expected_unmounted = expected_mounted;
+            expected_unmounted.reverse();
+            assert_eq!(
+                *unmounted.borrow(),
+                expected_unmounted,
+                "failure window {fail_at}"
+            );
+            assert_eq!(
+                cleanup.unmounted.last().map(String::as_str),
+                Some("<root-session>")
+            );
+            assert!(cleanup.all_clean);
+        }
+    }
+
+    #[test]
+    fn auxiliary_unmount_failure_is_reported_and_root_cleanup_is_preserved() {
+        let mut mounts = vec![PathBuf::from("/target/dev"), PathBuf::from("/target/proc")];
+        let cleanup = cleanup_auxiliary_mounts_with(&mut mounts, |path, flags| {
+            if path == Path::new("/target/proc") && flags == 0 {
+                Err("busy".into())
+            } else {
+                Ok(())
+            }
+        });
+        let cleanup = merge_cleanup(
+            cleanup,
+            CleanupSummary {
+                residual: vec!["root cleanup failed".into()],
+                all_clean: false,
+                ..CleanupSummary::default()
+            },
+        );
+        assert!(!cleanup.all_clean);
+        assert!(cleanup
+            .residual
+            .iter()
+            .any(|item| item.contains("detached lazily")));
+        assert!(cleanup
+            .residual
+            .iter()
+            .any(|item| item == "root cleanup failed"));
     }
 }

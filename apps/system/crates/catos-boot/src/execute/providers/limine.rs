@@ -139,8 +139,8 @@ mod tests {
     #[test]
     fn limine_execute_runs_install_then_update() {
         let runner = RecordedTargetRunner::new()
-            .queue_raw(0, b"".to_vec(), b"".to_vec())
-            .queue_raw(0, b"".to_vec(), b"".to_vec());
+            .expect_raw("limine-install", Vec::<String>::new(), 0, b"", b"")
+            .expect_raw("limine-update", Vec::<String>::new(), 0, b"", b"");
         let result = LimineProvider.execute(&ctx(), &runner);
         assert!(result.failure.is_none());
         let binaries: Vec<&str> = result
@@ -149,6 +149,7 @@ mod tests {
             .map(|r| r.command.binary.as_str())
             .collect();
         assert_eq!(binaries, vec!["limine-install", "limine-update"]);
+        runner.assert_consumed();
     }
 
     #[test]
@@ -162,18 +163,32 @@ mod tests {
 
     #[test]
     fn limine_verify_records_limine_list() {
-        let runner = RecordedTargetRunner::new().queue_raw(0, b"CatOS\n".to_vec(), b"".to_vec());
+        let runner = RecordedTargetRunner::new().expect_raw(
+            "limine-list",
+            Vec::<String>::new(),
+            0,
+            b"CatOS\n",
+            b"",
+        );
         let result = LimineProvider.verify(&ctx(), &runner);
         assert!(result.passed);
         assert!(result.verification.passed);
         assert!(runner.invoked_binary("limine-list"));
+        runner.assert_consumed();
     }
 
     #[test]
     fn limine_verify_fails_when_limine_list_exits_nonzero() {
-        let runner = RecordedTargetRunner::new().queue_raw(1, b"".to_vec(), b"missing".to_vec());
+        let runner = RecordedTargetRunner::new().expect_raw(
+            "limine-list",
+            Vec::<String>::new(),
+            1,
+            b"",
+            b"missing",
+        );
         let result = LimineProvider.verify(&ctx(), &runner);
         assert!(!result.passed);
         assert!(result.verification.failure_message.is_some());
+        runner.assert_consumed();
     }
 }

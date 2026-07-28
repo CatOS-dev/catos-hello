@@ -180,7 +180,13 @@ mod tests {
 
     #[test]
     fn uki_execute_runs_force_update() {
-        let runner = RecordedTargetRunner::new().queue_raw(0, b"".to_vec(), b"".to_vec());
+        let runner = RecordedTargetRunner::new().expect_raw(
+            "catos-firmware-boot-update",
+            ["--force"],
+            0,
+            b"",
+            b"",
+        );
         let provider = FirmwareProvider {
             method: FirmwareMethod::Uki,
             efi_device: Some(("/dev/nvme0n1".to_string(), 1)),
@@ -190,11 +196,18 @@ mod tests {
         assert!(runner.invoked_binary("catos-firmware-boot-update"));
         let inv = runner.invocations()[0].clone();
         assert_eq!(inv.argv, vec!["--force".to_string()]);
+        runner.assert_consumed();
     }
 
     #[test]
     fn firmware_verify_uses_force_and_verify_flags() {
-        let runner = RecordedTargetRunner::new().queue_raw(0, b"verified".to_vec(), b"".to_vec());
+        let runner = RecordedTargetRunner::new().expect_raw(
+            "catos-firmware-boot-update",
+            ["--force", "--verify"],
+            0,
+            b"verified",
+            b"",
+        );
         let provider = FirmwareProvider {
             method: FirmwareMethod::Efistub,
             efi_device: None,
@@ -206,17 +219,24 @@ mod tests {
             inv.argv,
             vec!["--force".to_string(), "--verify".to_string()]
         );
+        runner.assert_consumed();
     }
 
     #[test]
     fn failed_force_update_records_failure() {
-        let runner =
-            RecordedTargetRunner::new().queue_raw(1, b"".to_vec(), b"missing kernel".to_vec());
+        let runner = RecordedTargetRunner::new().expect_raw(
+            "catos-firmware-boot-update",
+            ["--force"],
+            1,
+            b"",
+            b"missing kernel",
+        );
         let provider = FirmwareProvider {
             method: FirmwareMethod::Uki,
             efi_device: None,
         };
         let result = provider.execute(&ctx(), &runner);
         assert!(result.failure.is_some());
+        runner.assert_consumed();
     }
 }

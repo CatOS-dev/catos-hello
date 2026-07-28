@@ -204,9 +204,20 @@ mod tests {
     #[test]
     fn grub_uefi_uses_x86_64_efi_target() {
         let runner = RecordedTargetRunner::new()
-            .queue_raw(0, b"".to_vec(), b"".to_vec())
-            .queue_raw(0, b"".to_vec(), b"".to_vec())
-            .queue_raw(0, b"".to_vec(), b"".to_vec());
+            .expect_raw("mkinitcpio", ["-P"], 0, b"", b"")
+            .expect_raw(
+                "grub-install",
+                [
+                    "--target=x86_64-efi",
+                    "--efi-directory=/boot/efi",
+                    "--bootloader-id=CatOS",
+                    "--recheck",
+                ],
+                0,
+                b"",
+                b"",
+            )
+            .expect_raw("grub-mkconfig", ["-o", "/boot/grub/grub.cfg"], 0, b"", b"");
         let provider = GrubProvider {
             firmware: FirmwareClass::Efi,
             mkinitcpio_text: "",
@@ -231,14 +242,26 @@ mod tests {
             .iter()
             .any(|arg| arg == "--bootloader-id=CatOS"));
         assert!(grub_install.argv.iter().any(|arg| arg == "--recheck"));
+        runner.assert_consumed();
     }
 
     #[test]
     fn grub_uefi_aarch64_uses_arm64_efi_target() {
         let runner = RecordedTargetRunner::new()
-            .queue_raw(0, b"".to_vec(), b"".to_vec())
-            .queue_raw(0, b"".to_vec(), b"".to_vec())
-            .queue_raw(0, b"".to_vec(), b"".to_vec());
+            .expect_raw("mkinitcpio", ["-P"], 0, b"", b"")
+            .expect_raw(
+                "grub-install",
+                [
+                    "--target=arm64-efi",
+                    "--efi-directory=/boot/efi",
+                    "--bootloader-id=CatOS",
+                    "--recheck",
+                ],
+                0,
+                b"",
+                b"",
+            )
+            .expect_raw("grub-mkconfig", ["-o", "/boot/grub/grub.cfg"], 0, b"", b"");
         let provider = GrubProvider {
             firmware: FirmwareClass::Efi,
             mkinitcpio_text: "",
@@ -254,14 +277,21 @@ mod tests {
             .argv
             .iter()
             .any(|arg| arg == "--target=arm64-efi"));
+        runner.assert_consumed();
     }
 
     #[test]
     fn grub_bios_uses_i386_pc_target_and_disk_arg() {
         let runner = RecordedTargetRunner::new()
-            .queue_raw(0, b"".to_vec(), b"".to_vec())
-            .queue_raw(0, b"".to_vec(), b"".to_vec())
-            .queue_raw(0, b"".to_vec(), b"".to_vec());
+            .expect_raw("mkinitcpio", ["-P"], 0, b"", b"")
+            .expect_raw(
+                "grub-install",
+                ["--target=i386-pc", "--recheck", "/dev/sda"],
+                0,
+                b"",
+                b"",
+            )
+            .expect_raw("grub-mkconfig", ["-o", "/boot/grub/grub.cfg"], 0, b"", b"");
         let provider = GrubProvider {
             firmware: FirmwareClass::Bios,
             mkinitcpio_text: "",
@@ -283,11 +313,12 @@ mod tests {
             grub_install.argv.last().map(String::as_str),
             Some("/dev/sda")
         );
+        runner.assert_consumed();
     }
 
     #[test]
     fn grub_bios_without_install_path_fails() {
-        let runner = RecordedTargetRunner::new().queue_raw(0, b"".to_vec(), b"".to_vec());
+        let runner = RecordedTargetRunner::new().expect_raw("mkinitcpio", ["-P"], 0, b"", b"");
         let provider = GrubProvider {
             firmware: FirmwareClass::Bios,
             mkinitcpio_text: "",
@@ -297,14 +328,26 @@ mod tests {
         ctx.bios_install_path = None;
         let result = provider.execute(&ctx, &runner);
         assert!(result.failure.is_some());
+        runner.assert_consumed();
     }
 
     #[test]
     fn grub_recipe_emits_mkinitcpio_then_grub_install_then_mkconfig() {
         let runner = RecordedTargetRunner::new()
-            .queue_raw(0, b"".to_vec(), b"".to_vec())
-            .queue_raw(0, b"".to_vec(), b"".to_vec())
-            .queue_raw(0, b"".to_vec(), b"".to_vec());
+            .expect_raw("mkinitcpio", ["-P"], 0, b"", b"")
+            .expect_raw(
+                "grub-install",
+                [
+                    "--target=x86_64-efi",
+                    "--efi-directory=/boot/efi",
+                    "--bootloader-id=CatOS",
+                    "--recheck",
+                ],
+                0,
+                b"",
+                b"",
+            )
+            .expect_raw("grub-mkconfig", ["-o", "/boot/grub/grub.cfg"], 0, b"", b"");
         let provider = GrubProvider {
             firmware: FirmwareClass::Efi,
             mkinitcpio_text: "",
@@ -321,6 +364,7 @@ mod tests {
             binaries,
             vec!["mkinitcpio", "grub-install", "grub-mkconfig"]
         );
+        runner.assert_consumed();
     }
 
     #[test]

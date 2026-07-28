@@ -329,6 +329,61 @@ impl BootRepairOutcome {
 }
 
 // ---------------------------------------------------------------------------
+// Kernel cmdline target facts
+// ---------------------------------------------------------------------------
+
+/// One verified dm-crypt mapping used by the target.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LuksMapping {
+    pub luks_uuid: String,
+    pub mapper_name: String,
+}
+
+/// The single resume target emitted on the kernel command line.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ResumeTarget {
+    /// A normal swap partition identified by its swap UUID.
+    Uuid { uuid: String },
+    /// An already-defined encrypted swap mapping.
+    Mapper { mapper_name: String },
+    /// A swap file whose backing block device and physical offset were
+    /// established from the mounted target.
+    SwapFile { device: String, offset: u64 },
+}
+
+/// Fully diagnosed inputs for kernel command-line construction. Empty values
+/// here are negative facts established by inspecting the target fstab and
+/// block topology, not caller-supplied defaults.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct BootCmdlineFacts {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub luks_root: Option<LuksMapping>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resume: Option<ResumeTarget>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub evidence: Vec<Evidence>,
+}
+
+/// Failure to establish a complete, unambiguous cmdline identity. Boot repair
+/// must refuse before writing provider configuration when this is returned.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BootCmdlineFactsError {
+    pub code: String,
+    pub message: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub evidence: Vec<Evidence>,
+}
+
+impl std::fmt::Display for BootCmdlineFactsError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "{}: {}", self.code, self.message)
+    }
+}
+
+impl std::error::Error for BootCmdlineFactsError {}
+
+// ---------------------------------------------------------------------------
 // Kernel cmdline conflict reporting
 // ---------------------------------------------------------------------------
 
@@ -514,6 +569,9 @@ pub struct BootRepairReport {
     /// in the GRUB defaults.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kernel_cmdline: Option<String>,
+    /// Verified LUKS/swap/resume facts used to build `kernel_cmdline`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cmdline_facts: Option<BootCmdlineFacts>,
     /// Cmdline conflicts the builder refused to resolve silently.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub cmdline_conflicts: Vec<CmdlineConflict>,

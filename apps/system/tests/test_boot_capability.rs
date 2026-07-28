@@ -46,9 +46,7 @@ fn cmdline_plan_is_pure_and_preserves_unowned_parameters() {
         target: &target,
         existing_cmdline: "loglevel=3 mitigations=auto",
         has_plymouth: false,
-        swap_uuids: &[],
-        swap_luks_mappers: &[],
-        luks_root: None,
+        facts: &catos_system::boot::model::BootCmdlineFacts::default(),
     });
 
     assert!(conflicts.is_empty());

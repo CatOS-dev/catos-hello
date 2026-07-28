@@ -311,7 +311,9 @@ mod tests {
 
     #[test]
     fn successful_reapply_records_fingerprint_and_pending() {
-        let runner = RecordedTargetRunner::new().queue_raw(
+        let runner = RecordedTargetRunner::new().expect_raw(
+            "catos-secureboot",
+            ["enable", "--generate-enrollment-password", "--json"],
             0,
             br#"{"fingerprint":"AA:BB","enrollment_pending":true,"enrollment_password":"sekret"}"#
                 .to_vec(),
@@ -334,12 +336,18 @@ mod tests {
             .unwrap_or_default()
             .contains("sekret"));
         assert!(runner.invoked_binary("catos-secureboot"));
+        runner.assert_consumed();
     }
 
     #[test]
     fn failed_reapply_reports_manual_intervention() {
-        let runner =
-            RecordedTargetRunner::new().queue_raw(2, b"".to_vec(), b"enroll failed".to_vec());
+        let runner = RecordedTargetRunner::new().expect_raw(
+            "catos-secureboot",
+            ["enable", "--generate-enrollment-password", "--json"],
+            2,
+            b"",
+            b"enroll failed",
+        );
         let inputs = SecureBootInputs {
             provider: ProviderId::Grub,
             target_marker_present: true,
@@ -350,11 +358,14 @@ mod tests {
         assert!(report.enable_invoked);
         assert!(report.failure_message.is_some());
         assert!(action.is_some());
+        runner.assert_consumed();
     }
 
     #[test]
     fn missing_fingerprint_in_payload_reports_manual_intervention() {
-        let runner = RecordedTargetRunner::new().queue_raw(
+        let runner = RecordedTargetRunner::new().expect_raw(
+            "catos-secureboot",
+            ["enable", "--generate-enrollment-password", "--json"],
             0,
             br#"{"enrollment_pending":true}"#.to_vec(),
             b"".to_vec(),
@@ -366,11 +377,14 @@ mod tests {
         };
         let (_report, outcome, _action) = finalize_secure_boot(&runner, &inputs);
         assert_eq!(outcome, Some(BootRepairOutcome::ManualInterventionRequired));
+        runner.assert_consumed();
     }
 
     #[test]
     fn argv_for_enable_is_fixed() {
-        let runner = RecordedTargetRunner::new().queue_raw(
+        let runner = RecordedTargetRunner::new().expect_raw(
+            "catos-secureboot",
+            ["enable", "--generate-enrollment-password", "--json"],
             0,
             br#"{"fingerprint":"AA:BB","enrollment_pending":false}"#.to_vec(),
             b"".to_vec(),
@@ -392,5 +406,6 @@ mod tests {
                 "--json".to_string(),
             ]
         );
+        runner.assert_consumed();
     }
 }

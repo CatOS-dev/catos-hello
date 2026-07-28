@@ -18,7 +18,7 @@
 //! * Btrfs subvolume flags are added only when the target root is
 //!   Btrfs and a subvolume path is known.
 
-use crate::model::CmdlineConflict;
+use crate::model::{BootCmdlineFacts, CmdlineConflict, ResumeTarget};
 use catos_mount::model::MountTargetIdentity;
 
 /// Inputs to [`build_kernel_cmdline`].
@@ -35,18 +35,8 @@ pub struct CmdlineInputs<'a> {
     /// bootloadu `target_has("plymouth")` check; the caller (target
     /// package probe) supplies the answer so the builder stays pure.
     pub has_plymouth: bool,
-    /// Swap device UUIDs the builder should emit `resume=UUID=...`
-    /// for. Each entry is the swap filesystem's UUID, matching the
-    /// bootloadu partition iteration. Empty when the target has no
-    /// swap.
-    pub swap_uuids: &'a [String],
-    /// LUKS-mapped swap devices. Each entry becomes
-    /// `resume=/dev/mapper/<mapper>`.
-    pub swap_luks_mappers: &'a [String],
-    /// LUKS root, if any. `(luks_uuid, mapper_name)`. When present,
-    /// the cmdline uses `cryptdevice=UUID=<uuid>:<mapper>
-    /// root=/dev/mapper/<mapper>` instead of `root=UUID=<root_uuid>`.
-    pub luks_root: Option<(String, String)>,
+    /// Verified target-side root encryption and resume facts.
+    pub facts: &'a BootCmdlineFacts,
 }
 
 /// Default parameters the recipe always emits, in the order bootloadu
@@ -71,9 +61,12 @@ pub fn build_kernel_cmdline(inputs: &CmdlineInputs<'_>) -> (String, Vec<CmdlineC
     let mut parameters = default_parameters(inputs.has_plymouth);
 
     // Root parameter: either LUKS-mapped or UUID-based.
-    if let Some((luks_uuid, mapper)) = &inputs.luks_root {
-        parameters.push(format!("cryptdevice=UUID={luks_uuid}:{mapper}"));
-        parameters.push(format!("root=/dev/mapper/{mapper}"));
+    if let Some(mapping) = &inputs.facts.luks_root {
+        parameters.push(format!(
+            "cryptdevice=UUID={}:{}",
+            mapping.luks_uuid, mapping.mapper_name
+        ));
+        parameters.push(format!("root=/dev/mapper/{}", mapping.mapper_name));
     } else if let Some(root_uuid) = target.root_uuid.as_deref() {
         if !root_uuid.is_empty() {
             parameters.push(format!("root=UUID={root_uuid}"));
@@ -89,15 +82,17 @@ pub fn build_kernel_cmdline(inputs: &CmdlineInputs<'_>) -> (String, Vec<CmdlineC
         }
     }
 
-    // Resume (swap) parameters.
-    for uuid in inputs.swap_uuids {
-        if !uuid.is_empty() {
-            parameters.push(format!("resume=UUID={uuid}"));
-        }
-    }
-    for mapper in inputs.swap_luks_mappers {
-        if !mapper.is_empty() {
-            parameters.push(format!("resume=/dev/mapper/{mapper}"));
+    // Resume (swap) parameters. Diagnosis guarantees at most one target.
+    if let Some(resume) = &inputs.facts.resume {
+        match resume {
+            ResumeTarget::Uuid { uuid } => parameters.push(format!("resume=UUID={uuid}")),
+            ResumeTarget::Mapper { mapper_name } => {
+                parameters.push(format!("resume=/dev/mapper/{mapper_name}"));
+            }
+            ResumeTarget::SwapFile { device, offset } => {
+                parameters.push(format!("resume={device}"));
+                parameters.push(format!("resume_offset={offset}"));
+            }
         }
     }
 
@@ -113,6 +108,7 @@ pub fn build_kernel_cmdline(inputs: &CmdlineInputs<'_>) -> (String, Vec<CmdlineC
         "rootflags",
         "cryptdevice",
         "resume",
+        "resume_offset",
     ];
     let existing = parse_parameters(inputs.existing_cmdline);
     let mut conflicts = Vec::new();
@@ -215,9 +211,7 @@ mod tests {
             target: &target,
             existing_cmdline: "",
             has_plymouth: false,
-            swap_uuids: &[],
-            swap_luks_mappers: &[],
-            luks_root: None,
+            facts: &crate::model::BootCmdlineFacts::default(),
         });
         assert!(cmdline.contains("quiet"));
         assert!(cmdline.contains("rw"));
@@ -233,9 +227,7 @@ mod tests {
             target: &target,
             existing_cmdline: "",
             has_plymouth: true,
-            swap_uuids: &[],
-            swap_luks_mappers: &[],
-            luks_root: None,
+            facts: &crate::model::BootCmdlineFacts::default(),
         });
         assert!(cmdline.contains("splash"));
     }
@@ -247,9 +239,12 @@ mod tests {
             target: &target,
             existing_cmdline: "",
             has_plymouth: false,
-            swap_uuids: &["swap-uuid".into()],
-            swap_luks_mappers: &[],
-            luks_root: None,
+            facts: &BootCmdlineFacts {
+                resume: Some(ResumeTarget::Uuid {
+                    uuid: "swap-uuid".into(),
+                }),
+                ..BootCmdlineFacts::default()
+            },
         });
         assert!(cmdline.contains("resume=UUID=swap-uuid"));
     }
@@ -269,14 +264,38 @@ mod tests {
             target: &target,
             existing_cmdline: "",
             has_plymouth: false,
-            swap_uuids: &[],
-            swap_luks_mappers: &[],
-            luks_root: Some(("luks-uuid".into(), "cryptroot".into())),
+            facts: &BootCmdlineFacts {
+                luks_root: Some(crate::model::LuksMapping {
+                    luks_uuid: "luks-uuid".into(),
+                    mapper_name: "cryptroot".into(),
+                }),
+                ..BootCmdlineFacts::default()
+            },
         });
         assert!(cmdline.contains("cryptdevice=UUID=luks-uuid:cryptroot"));
         assert!(cmdline.contains("root=/dev/mapper/cryptroot"));
         // Mapper-based root should NOT also emit root=UUID=...
         assert!(!cmdline.contains("root=UUID=mapper-uuid"));
+    }
+
+    #[test]
+    fn swapfile_emits_resume_device_and_offset() {
+        let target = btrfs_target();
+        let (cmdline, conflicts) = build_kernel_cmdline(&CmdlineInputs {
+            target: &target,
+            existing_cmdline: "",
+            has_plymouth: false,
+            facts: &BootCmdlineFacts {
+                resume: Some(ResumeTarget::SwapFile {
+                    device: "/dev/mapper/cryptroot".into(),
+                    offset: 4096,
+                }),
+                ..BootCmdlineFacts::default()
+            },
+        });
+        assert!(cmdline.contains("resume=/dev/mapper/cryptroot"));
+        assert!(cmdline.contains("resume_offset=4096"));
+        assert!(conflicts.is_empty());
     }
 
     #[test]
@@ -286,9 +305,7 @@ mod tests {
             target: &target,
             existing_cmdline: "mitigations=off i915.enable_guc=2",
             has_plymouth: false,
-            swap_uuids: &[],
-            swap_luks_mappers: &[],
-            luks_root: None,
+            facts: &crate::model::BootCmdlineFacts::default(),
         });
         assert!(cmdline.contains("mitigations=off"));
         assert!(cmdline.contains("i915.enable_guc=2"));
@@ -304,9 +321,7 @@ mod tests {
             // Existing cmdline points root at a different UUID.
             existing_cmdline: "root=UUID=stale-root",
             has_plymouth: false,
-            swap_uuids: &[],
-            swap_luks_mappers: &[],
-            luks_root: None,
+            facts: &crate::model::BootCmdlineFacts::default(),
         });
         assert!(conflicts.iter().any(|c| matches!(c,
             CmdlineConflict::ConflictingValue { key, .. } if key == "root"
@@ -320,9 +335,7 @@ mod tests {
             target: &target,
             existing_cmdline: "root=UUID=abc-123",
             has_plymouth: false,
-            swap_uuids: &[],
-            swap_luks_mappers: &[],
-            luks_root: None,
+            facts: &crate::model::BootCmdlineFacts::default(),
         });
         assert!(conflicts.is_empty());
     }
@@ -339,9 +352,7 @@ mod tests {
             target: &target,
             existing_cmdline: "archisobasedir=arch archisolabel=CATOS",
             has_plymouth: false,
-            swap_uuids: &[],
-            swap_luks_mappers: &[],
-            luks_root: None,
+            facts: &crate::model::BootCmdlineFacts::default(),
         });
         // Recipe parameters still present.
         assert!(cmdline.contains("root=UUID=abc-123"));

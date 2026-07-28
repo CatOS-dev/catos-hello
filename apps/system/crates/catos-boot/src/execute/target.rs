@@ -495,8 +495,8 @@ mod tests {
     #[test]
     fn recorded_runner_records_invocations_in_order() {
         let runner = RecordedTargetRunner::new()
-            .queue_raw(0, b"ok".to_vec(), b"".to_vec())
-            .queue_raw(1, b"".to_vec(), b"oops".to_vec());
+            .expect_raw("grub-install", ["--target=x86_64-efi"], 0, b"ok", b"")
+            .expect_raw("mkinitcpio", ["-P"], 1, b"", b"oops");
         let req_a = TargetRequest::new(
             "grub-install",
             vec!["--target=x86_64-efi".into()],
@@ -514,16 +514,15 @@ mod tests {
         assert_eq!(invocations[1].binary, "mkinitcpio");
         assert!(runner.invoked_binary("grub-install"));
         assert!(!runner.invoked_binary("bootctl"));
+        runner.assert_consumed();
     }
 
     #[test]
-    fn recorded_runner_fails_when_queue_empty() {
+    #[should_panic(expected = "unconfigured target command")]
+    fn recorded_runner_panics_when_queue_empty() {
         let runner = RecordedTargetRunner::new();
         let req = TargetRequest::new("bootctl", vec!["is-installed".into()], "verify");
-        let result = runner.invoke(&req);
-        assert_eq!(result.exit_code, -1);
-        assert!(result.binary_missing);
-        assert_eq!(result.command.binary, "bootctl");
+        let _ = runner.invoke(&req);
     }
 
     #[test]

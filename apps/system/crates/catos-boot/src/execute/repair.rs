@@ -54,7 +54,8 @@ use crate::execute::secureboot::{finalize_secure_boot, SecureBootInputs};
 use crate::execute::target::{TargetRequest, TargetRunner, TrustedTargetRunner};
 use crate::io::read_target_file;
 use crate::model::{
-    BootRepairOutcome, BootRepairReport, BootVerification, PlatformFacts, SecureBootReport,
+    BootCmdlineFacts, BootRepairOutcome, BootRepairReport, BootVerification, PlatformFacts,
+    SecureBootReport,
 };
 use crate::plan::cmdline::{build_kernel_cmdline, CmdlineInputs};
 use crate::plan::registry as boot_registry;
@@ -84,6 +85,7 @@ pub fn run_boot_repair(
     bios_install_path: Option<&str>,
     installed_packages: &[String],
     storage_devices: &[catos_target::model::BlockDevice],
+    cmdline_facts: &BootCmdlineFacts,
 ) -> BootRepairReport {
     // 1. Detect provider from target evidence.
     let verdict = detect(detection, target);
@@ -98,6 +100,7 @@ pub fn run_boot_repair(
                 target: Some(target.clone()),
                 platform: Some(platform),
                 provider_evidence: evidence,
+                cmdline_facts: Some(cmdline_facts.clone()),
                 final_outcome: BootRepairOutcome::AmbiguousProvider,
                 requires_human_action: true,
                 fully_complete: false,
@@ -114,6 +117,7 @@ pub fn run_boot_repair(
                 target: Some(target.clone()),
                 platform: Some(platform),
                 provider_evidence: evidence,
+                cmdline_facts: Some(cmdline_facts.clone()),
                 final_outcome: BootRepairOutcome::AmbiguousProvider,
                 requires_human_action: true,
                 fully_complete: false,
@@ -140,6 +144,7 @@ pub fn run_boot_repair(
             detected_provider: Some(provider),
             firmware_method: method,
             provider_evidence: evidence,
+            cmdline_facts: Some(cmdline_facts.clone()),
             final_outcome: BootRepairOutcome::Unsupported,
             requires_human_action: true,
             fully_complete: false,
@@ -168,9 +173,7 @@ pub fn run_boot_repair(
         target,
         existing_cmdline: &existing_cmdline,
         has_plymouth: installed_packages.iter().any(|p| p == "plymouth"),
-        swap_uuids: &[],
-        swap_luks_mappers: &[],
-        luks_root: None,
+        facts: cmdline_facts,
     });
     if !conflicts.is_empty() {
         return BootRepairReport {
@@ -257,6 +260,7 @@ pub fn run_boot_repair(
                 firmware_method: method,
                 provider_evidence: evidence,
                 kernel_cmdline: Some(cmdline),
+                cmdline_facts: Some(cmdline_facts.clone()),
                 final_outcome: BootRepairOutcome::ManualInterventionRequired,
                 requires_human_action: true,
                 fully_complete: false,
@@ -284,6 +288,7 @@ pub fn run_boot_repair(
                     firmware_method: method,
                     provider_evidence: evidence,
                     kernel_cmdline: Some(cmdline),
+                    cmdline_facts: Some(cmdline_facts.clone()),
                     final_outcome: BootRepairOutcome::ManualInterventionRequired,
                     requires_human_action: true,
                     fully_complete: false,
@@ -444,6 +449,7 @@ pub fn run_boot_repair(
         firmware_method: method,
         provider_evidence: evidence,
         kernel_cmdline: Some(cmdline),
+        cmdline_facts: Some(cmdline_facts.clone()),
         cmdline_conflicts: conflicts,
         actions,
         verification: Some(verification),
@@ -452,11 +458,15 @@ pub fn run_boot_repair(
         final_outcome,
         requires_human_action,
         fully_complete,
-        evidence: vec![Evidence::new(
-            "PROVIDER_RECIPED",
-            "repair::boot",
-            format!("{} recipe executed", provider.as_str()),
-        )],
+        evidence: {
+            let mut report_evidence = cmdline_facts.evidence.clone();
+            report_evidence.push(Evidence::new(
+                "PROVIDER_RECIPED",
+                "repair::boot",
+                format!("{} recipe executed", provider.as_str()),
+            ));
+            report_evidence
+        },
         warnings,
     }
 }
@@ -826,6 +836,7 @@ mod tests {
             None,
             &[],
             &[],
+            &BootCmdlineFacts::default(),
         );
 
         assert_eq!(
@@ -1178,12 +1189,26 @@ mod tests {
         )
         .unwrap();
         let runner = RecordedTargetRunner::new()
-            .queue_raw(0, b"snapper root ok".to_vec(), Vec::<u8>::new())
-            .queue_raw(0, b"timer enabled".to_vec(), Vec::<u8>::new())
-            .queue_raw(
+            .expect_raw(
+                "snapper",
+                ["--no-dbus", "-c", "root", "get-config"],
                 0,
-                b"deployed 0 snapshots, 0 kernel sets, 0 objects, 0 bytes".to_vec(),
-                Vec::<u8>::new(),
+                b"snapper root ok",
+                b"",
+            )
+            .expect_raw(
+                "systemctl",
+                ["enable", "snapper-cleanup.timer"],
+                0,
+                b"timer enabled",
+                b"",
+            )
+            .expect_raw(
+                "limine-btrfs",
+                ["generate"],
+                0,
+                b"deployed 0 snapshots, 0 kernel sets, 0 objects, 0 bytes",
+                b"",
             );
 
         let result = run_snapshot_repair(ProviderId::Limine, &target_root.path, &runner);
@@ -1200,6 +1225,7 @@ mod tests {
         );
         assert_eq!(invocations[2].binary, "limine-btrfs");
         assert_eq!(invocations[2].argv, vec!["generate".to_string()]);
+        runner.assert_consumed();
     }
 
     #[test]
@@ -1214,6 +1240,7 @@ mod tests {
             None,
             &[],
             &[],
+            &BootCmdlineFacts::default(),
         );
         assert_eq!(report.final_outcome, BootRepairOutcome::AmbiguousProvider);
         assert!(report.requires_human_action);
@@ -1236,6 +1263,7 @@ mod tests {
             None,
             &[],
             &[],
+            &BootCmdlineFacts::default(),
         );
         assert_eq!(report.final_outcome, BootRepairOutcome::AmbiguousProvider);
     }
@@ -1260,6 +1288,7 @@ mod tests {
             None,
             &[],
             &[],
+            &BootCmdlineFacts::default(),
         );
         assert_eq!(report.final_outcome, BootRepairOutcome::Unsupported);
     }

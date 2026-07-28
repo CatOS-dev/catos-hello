@@ -518,13 +518,7 @@ fn grub_uefi_recipe_uses_correct_target_and_efi_directory() {
             b"",
             b"",
         )
-        .expect_raw(
-            "grub-mkconfig",
-            ["-o", "/boot/grub/grub.cfg"],
-            0,
-            b"",
-            b"",
-        );
+        .expect_raw("grub-mkconfig", ["-o", "/boot/grub/grub.cfg"], 0, b"", b"");
     let provider = GrubProvider {
         firmware: FirmwareClass::Efi,
         mkinitcpio_text: "",
@@ -563,13 +557,7 @@ fn grub_bios_recipe_uses_i386_pc_and_disk() {
             b"",
             b"",
         )
-        .expect_raw(
-            "grub-mkconfig",
-            ["-o", "/boot/grub/grub.cfg"],
-            0,
-            b"",
-            b"",
-        );
+        .expect_raw("grub-mkconfig", ["-o", "/boot/grub/grub.cfg"], 0, b"", b"");
     let provider = GrubProvider {
         firmware: FirmwareClass::Bios,
         mkinitcpio_text: "",
@@ -797,9 +785,7 @@ fn cmdline_preserves_user_parameters() {
         target: &target,
         existing_cmdline: "mitigations=off i915.enable_guc=2",
         has_plymouth: false,
-        swap_uuids: &[],
-        swap_luks_mappers: &[],
-        luks_root: None,
+        facts: &catos_system::boot::model::BootCmdlineFacts::default(),
     });
     assert!(cmdline.contains("mitigations=off"));
     assert!(cmdline.contains("i915.enable_guc=2"));
@@ -814,9 +800,7 @@ fn cmdline_conflicting_root_value_surfaces_conflict() {
         target: &target,
         existing_cmdline: "root=UUID=stale",
         has_plymouth: false,
-        swap_uuids: &[],
-        swap_luks_mappers: &[],
-        luks_root: None,
+        facts: &catos_system::boot::model::BootCmdlineFacts::default(),
     });
     assert!(conflicts.iter().any(|c| matches!(c,
         catos_system::boot::model::CmdlineConflict::ConflictingValue { key, .. } if key == "root"
@@ -917,13 +901,7 @@ fn systemd_boot_runs_kernel_install_for_each_discovered_kernel() {
         },
     ];
     let runner = RecordedTargetRunner::new()
-        .expect_raw(
-            "bootctl",
-            ["--esp-path=/boot/efi", "install"],
-            0,
-            b"",
-            b"",
-        )
+        .expect_raw("bootctl", ["--esp-path=/boot/efi", "install"], 0, b"", b"")
         .expect_raw(
             "kernel-install",
             [
@@ -987,13 +965,7 @@ fn systemd_boot_execute_stops_on_first_kernel_install_failure() {
         initramfs: "/boot/initramfs-linux.img".into(),
     }];
     let runner = RecordedTargetRunner::new()
-        .expect_raw(
-            "bootctl",
-            ["--esp-path=/boot/efi", "install"],
-            0,
-            b"",
-            b"",
-        )
+        .expect_raw("bootctl", ["--esp-path=/boot/efi", "install"], 0, b"", b"")
         .expect_raw(
             "kernel-install",
             ["add", "6.18.0", "/usr/lib/modules/6.18.0/vmlinuz"],

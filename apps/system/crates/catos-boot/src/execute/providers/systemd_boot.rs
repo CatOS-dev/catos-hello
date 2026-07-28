@@ -177,11 +177,29 @@ mod tests {
         let kernels = kernels();
         let runner = RecordedTargetRunner::new()
             // bootctl install
-            .queue_raw(0, b"".to_vec(), b"".to_vec())
-            // kernel-install add linux
-            .queue_raw(0, b"".to_vec(), b"".to_vec())
-            // kernel-install add linux-lts
-            .queue_raw(0, b"".to_vec(), b"".to_vec());
+            .expect_raw("bootctl", ["--esp-path=/boot/efi", "install"], 0, b"", b"")
+            .expect_raw(
+                "kernel-install",
+                [
+                    "add",
+                    "6.18.0-arch1-1",
+                    "/usr/lib/modules/6.18.0-arch1-1/vmlinuz",
+                ],
+                0,
+                b"",
+                b"",
+            )
+            .expect_raw(
+                "kernel-install",
+                [
+                    "add",
+                    "6.18.0-arch1-1-lts",
+                    "/usr/lib/modules/6.18.0-arch1-1-lts/vmlinuz",
+                ],
+                0,
+                b"",
+                b"",
+            );
         let provider = SystemdBootProvider { kernels: &kernels };
         let result = provider.execute(&ctx(), &runner);
         assert!(result.failure.is_none());
@@ -197,14 +215,25 @@ mod tests {
             "/usr/lib/modules/6.18.0-arch1-1/vmlinuz"
         );
         assert_eq!(kernel_install_calls[1].argv[1], "6.18.0-arch1-1-lts");
+        runner.assert_consumed();
     }
 
     #[test]
     fn execute_stops_on_first_kernel_install_failure() {
         let kernels = kernels();
         let runner = RecordedTargetRunner::new()
-            .queue_raw(0, b"".to_vec(), b"".to_vec()) // bootctl install
-            .queue_raw(1, b"".to_vec(), b"oops".to_vec()); // first kernel-install
+            .expect_raw("bootctl", ["--esp-path=/boot/efi", "install"], 0, b"", b"")
+            .expect_raw(
+                "kernel-install",
+                [
+                    "add",
+                    "6.18.0-arch1-1",
+                    "/usr/lib/modules/6.18.0-arch1-1/vmlinuz",
+                ],
+                1,
+                b"",
+                b"oops",
+            );
         let provider = SystemdBootProvider { kernels: &kernels };
         let result = provider.execute(&ctx(), &runner);
         assert!(result.failure.is_some());
@@ -217,11 +246,18 @@ mod tests {
                 .count(),
             1
         );
+        runner.assert_consumed();
     }
 
     #[test]
     fn verify_uses_correct_esp_path_flag() {
-        let runner = RecordedTargetRunner::new().queue_raw(0, b"yes".to_vec(), b"".to_vec());
+        let runner = RecordedTargetRunner::new().expect_raw(
+            "bootctl",
+            ["--esp-path=/boot/efi", "is-installed"],
+            0,
+            b"yes",
+            b"",
+        );
         let provider = SystemdBootProvider { kernels: &[] };
         let result = provider.verify(&ctx(), &runner);
         assert!(result.passed);
@@ -232,5 +268,6 @@ mod tests {
             .unwrap();
         assert!(bootctl.argv.iter().any(|arg| arg == "--esp-path=/boot/efi"));
         assert!(bootctl.argv.iter().any(|arg| arg == "is-installed"));
+        runner.assert_consumed();
     }
 }
