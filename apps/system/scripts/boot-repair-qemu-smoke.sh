@@ -508,6 +508,12 @@ if esp.is_dir():
         else: child.unlink()
 (root/'etc/kernel').mkdir(parents=True, exist_ok=True)
 (root/'etc/kernel/cmdline').write_text('console=ttyS0,115200n8 systemd.show_status=yes\n')
+(root/'etc/catos').mkdir(parents=True, exist_ok=True)
+(root/'etc/catos/secureboot.conf').write_text(
+    '[secureboot]\n'
+    'state_path = "/var/lib/catos-secureboot/state.json"\n'
+    'key_dir = "/var/lib/catos-secureboot/keys"\n'
+)
 if scenario in ('grub-bios','grub-uefi','grub-uefi-failure','lock-conflict'):
     directory=root/'etc/default/grub.d'; directory.mkdir(parents=True, exist_ok=True)
     (directory/'00-catos.cfg').write_text('GRUB_DISTRIBUTOR=CatOS\nGRUB_TIMEOUT=1\nGRUB_TERMINAL_OUTPUT=console\n')
@@ -681,6 +687,10 @@ required={
 missing=required-set(commands)
 if missing:
     raise SystemExit(f'missing target commands: {sorted(missing)}; commands={commands}')
+if 'catos-secureboot' in commands:
+    raise SystemExit(
+        'package configuration without persisted state incorrectly triggered Secure Boot enable'
+    )
 print(f'pass: {scenario} repair report')
 PY
 }

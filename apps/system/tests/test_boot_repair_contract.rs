@@ -224,7 +224,7 @@ fn secureboot_inputs(
 ) -> catos_system::boot::execute::secureboot::SecureBootInputs {
     catos_system::boot::execute::secureboot::SecureBootInputs {
         provider,
-        target_marker_present: target_policy,
+        target_policy_present: target_policy,
         ..Default::default()
     }
 }

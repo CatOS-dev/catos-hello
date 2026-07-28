@@ -632,7 +632,7 @@ pub(in crate::doctor) fn run_secure_boot_section(
     };
 
     if !context.candidate.running_environment_member {
-        let target_marker = match crate::boot::diagnose::target::target_secureboot_marker_present(
+        let target_policy_present = match crate::boot::diagnose::target::target_secureboot_policy_present(
             &root,
         ) {
             Ok(value) => value,
@@ -641,7 +641,7 @@ pub(in crate::doctor) fn run_secure_boot_section(
                 report.limitations.push(DoctorLimitation::new(
                     id,
                     "SECURE_BOOT_POLICY_INCOMPLETE",
-                    format!("cannot inspect target Secure Boot marker: {error}"),
+                    format!("cannot inspect target Secure Boot policy state: {error}"),
                 ));
                 return Ok(());
             }
@@ -665,9 +665,9 @@ pub(in crate::doctor) fn run_secure_boot_section(
             sections,
             id,
             Evidence::new(
-                "TARGET_POLICY_MARKER",
+                "TARGET_SECUREBOOT_POLICY",
                 "doctor::secure_boot",
-                format!("target Secure Boot marker present: {target_marker}"),
+                format!("target Secure Boot policy present: {target_policy_present}"),
             ),
         );
         push_evidence(
@@ -775,7 +775,7 @@ pub(in crate::doctor) fn run_secure_boot_section(
     let firmware_sb_on = firmware_sb_body
         .as_deref()
         .and_then(secure_boot_enabled_from_efivar);
-    let target_marker = match crate::boot::diagnose::target::target_secureboot_marker_present(
+    let target_policy_present = match crate::boot::diagnose::target::target_secureboot_policy_present(
         &root,
     ) {
         Ok(value) => value,
@@ -784,7 +784,7 @@ pub(in crate::doctor) fn run_secure_boot_section(
             report.limitations.push(DoctorLimitation::new(
                 id,
                 "SECURE_BOOT_POLICY_INCOMPLETE",
-                format!("cannot inspect target Secure Boot marker: {error}"),
+                format!("cannot inspect target Secure Boot policy state: {error}"),
             ));
             return Ok(());
         }
@@ -814,9 +814,9 @@ pub(in crate::doctor) fn run_secure_boot_section(
         sections,
         id,
         Evidence::new(
-            "TARGET_POLICY_MARKER",
+            "TARGET_SECUREBOOT_POLICY",
             "doctor::secure_boot",
-            format!("target Secure Boot marker present: {target_marker}"),
+            format!("target Secure Boot policy present: {target_policy_present}"),
         ),
     );
     if firmware_sb_on.is_none() {
@@ -829,14 +829,14 @@ pub(in crate::doctor) fn run_secure_boot_section(
         return Ok(());
     }
     let firmware_sb_on = firmware_sb_on.expect("checked firmware Secure Boot state");
-    let policy_inconsistent = !secure_boot_policy_consistent(firmware_sb_on, target_marker);
+    let policy_inconsistent = !secure_boot_policy_consistent(firmware_sb_on, target_policy_present);
     if policy_inconsistent {
         let section = set_section(sections, id, DoctorSectionStatus::Unhealthy);
         section.issues.push(DoctorIssue::new(
             issue_code::SECURE_BOOT_STATE_INCOMPLETE,
             DoctorSeverity::Error,
             id,
-            "Secure Boot policy is inconsistent between firmware runtime state and the target policy marker",
+            "Secure Boot policy is inconsistent between firmware runtime state and the target persisted policy",
         ));
         let esp_device = context
             .esp
@@ -890,8 +890,8 @@ fn read_optional_target_bytes(root: &Path, relative: &str) -> Result<Option<Vec<
     }
 }
 
-fn secure_boot_policy_consistent(firmware_enabled: bool, target_marker: bool) -> bool {
-    firmware_enabled == target_marker
+fn secure_boot_policy_consistent(firmware_enabled: bool, target_policy_present: bool) -> bool {
+    firmware_enabled == target_policy_present
 }
 
 fn secure_boot_enabled_from_efivar(body: &[u8]) -> Option<bool> {
@@ -962,25 +962,6 @@ mod tests {
         assert_eq!(secure_boot_enabled_from_efivar(&[7, 0, 0, 0, 1]), Some(true));
         assert_eq!(secure_boot_enabled_from_efivar(&[7, 0, 0, 0, 2]), None);
         assert_eq!(secure_boot_enabled_from_efivar(&[7, 0, 0, 0]), None);
-    }
-
-    #[test]
-    fn secure_boot_marker_probe_accepts_all_supported_marker_locations() {
-        for relative in [
-            "etc/catos/secureboot",
-            "etc/catos/secureboot.conf",
-            "var/lib/catos/secureboot",
-        ] {
-            let root = scratch("secureboot-marker");
-            let path = root.join(relative);
-            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-            std::fs::write(&path, b"enabled\n").unwrap();
-            assert!(
-                crate::boot::diagnose::target::target_secureboot_marker_present(&root).unwrap(),
-                "marker {relative} was not detected"
-            );
-            std::fs::remove_dir_all(root).unwrap();
-        }
     }
 
     #[test]

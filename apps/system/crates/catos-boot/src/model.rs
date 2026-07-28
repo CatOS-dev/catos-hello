@@ -513,10 +513,9 @@ pub struct BootVerification {
 /// live host has it on.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct SecureBootReport {
-    /// `true` iff the target already had CatOS Secure Boot configured
-    /// (e.g. `/etc/catos/secureboot` marker, signed bootloader
-    /// artefact). Repair may re-apply the existing policy in that
-    /// case.
+    /// `true` iff the target already had CatOS Secure Boot configured,
+    /// proven by a valid persisted state record and complete machine key
+    /// material. Repair may re-apply the existing policy in that case.
     pub target_policy_present: bool,
     /// `true` iff repair invoked `catos-secureboot enable ...` to
     /// re-apply the existing target policy.

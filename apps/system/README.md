@@ -645,8 +645,9 @@ replaces `libcalamares.utils.target_env_call` with a much narrower contract:
 Repair **never auto-enables** Secure Boot just because the live host has it
 on. The target's existing policy is the only authority:
 
-- The target's `/etc/catos/secureboot` marker (or a signed artefact plus the
-  `catos-secureboot` package) authorises re-applying the existing policy via
+- A valid target `catos-secureboot` state record (at the path selected by
+  `/etc/catos/secureboot.conf`) plus complete machine key material authorises
+  re-applying the existing policy via
   `catos-secureboot enable --generate-enrollment-password --json`.
 - EFI Stub is explicitly unsupported by the registry's `supportedProviders`
   list; repair refuses before invoking `catos-secureboot`.
@@ -777,10 +778,9 @@ The report aggregates seven sections, in canonical order:
    `repair::boot_repair::detect::detect` (GRUB, Limine, systemd-boot,
    UKI, EFI Stub). Doctor never invokes the provider's `execute` or
    `verify` methods.
-6. **Secure Boot** — consistency between firmware runtime state, the
-   target's `/etc/catos/secureboot` policy marker, and the
-   firmware-boot configuration. Doctor never enrolls, disables, or
-   signs.
+6. **Secure Boot** — consistency between firmware runtime state and the
+   target's persisted `catos-secureboot` policy state. Doctor never enrolls,
+   disables, or signs.
 7. **Recovery** — read-only enumeration of in-flight Btrfs snapshot
    transactions. Uses `Engine::load` + `reconcile_status` (both
    read-only). Doctor never calls `Engine::drive`, `Engine::begin`,

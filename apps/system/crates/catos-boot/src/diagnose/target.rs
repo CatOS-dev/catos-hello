@@ -872,67 +872,203 @@ fn list_optional_target_directory(
     }
 }
 
-pub fn target_secureboot_marker_present(target_root: &Path) -> Result<bool, String> {
-    for relative in [
-        "etc/catos/secureboot",
-        "etc/catos/secureboot.conf",
-        "var/lib/catos/secureboot",
-    ] {
-        if secureboot_marker_file_present(target_root, relative)? {
-            return Ok(true);
+pub fn target_secureboot_policy_present(target_root: &Path) -> Result<bool, String> {
+    let paths = secureboot_storage_paths(target_root)?;
+    let state = read_optional_target_file(target_root, &paths.state_path)?;
+    let key_paths = [
+        rooted_child(&paths.key_dir, "machine.key")?,
+        rooted_child(&paths.key_dir, "machine.crt")?,
+        rooted_child(&paths.key_dir, "machine.der")?,
+    ];
+    let key_presence = key_paths
+        .iter()
+        .map(|path| target_nonempty_regular_file_present(target_root, path))
+        .collect::<Result<Vec<_>, _>>()?;
+    let key_count = key_presence.iter().filter(|present| **present).count();
+
+    let Some(state) = state else {
+        if key_count != 0 {
+            return Err(format!(
+                "CatOS Secure Boot key material is present without policy state {}",
+                paths.state_path
+            ));
         }
-    }
-    Ok(false)
-}
-
-fn secureboot_marker_file_present(target_root: &Path, relative: &str) -> Result<bool, String> {
-    use catos_target::execute::confined::{rooted_path_kind, RootedPathKind};
-
-    let rooted = format!("/{relative}");
-    match rooted_path_kind(target_root, &rooted) {
-        Ok(None) | Err(catos_target::FsError::NotFound) => Ok(false),
-        Ok(Some(RootedPathKind::RegularFile)) => Ok(true),
-        Ok(Some(RootedPathKind::Symlink)) => {
-            Err(format!("target Secure Boot marker {rooted} is a symlink"))
-        }
-        Ok(Some(RootedPathKind::Directory | RootedPathKind::Other)) => Err(format!(
-            "target Secure Boot marker {rooted} is not a regular file"
-        )),
-        Err(error) => Err(format!(
-            "cannot inspect target Secure Boot marker {rooted}: {error}"
-        )),
-    }
-}
-
-pub fn target_signed_catos_efi_present(
-    target_root: &Path,
-    esp_mount_point: Option<&str>,
-) -> Result<bool, String> {
-    let Some(esp_mount_point) = esp_mount_point else {
         return Ok(false);
     };
-    let directory = format!("/{}/EFI/CatOS", esp_mount_point.trim_start_matches('/'));
-    let entries = match list_optional_target_directory(target_root, &directory)? {
-        Some(entries) => entries,
-        None => return Ok(false),
-    };
-    let mut has_efi = false;
-    let mut has_signature = false;
-    for entry in entries {
-        let entry = entry
-            .to_str()
-            .ok_or_else(|| format!("target directory {directory} contains non-UTF-8 name"))?;
-        let relative = format!("{}/{}", directory.trim_start_matches('/'), entry);
-        if entry.ends_with(".efi") && target_regular_file_present_checked(target_root, &relative)? {
-            has_efi = true;
-        }
-        if (entry.ends_with(".sig") || entry.ends_with(".p7b"))
-            && target_regular_file_present_checked(target_root, &relative)?
-        {
-            has_signature = true;
-        }
+    if key_count != key_paths.len() {
+        return Err(format!(
+            "CatOS Secure Boot policy state exists but machine key material is incomplete under {}",
+            paths.key_dir
+        ));
     }
-    Ok(has_efi && has_signature)
+
+    validate_secureboot_state(&state, &paths.state_path)?;
+    Ok(true)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SecureBootStoragePaths {
+    state_path: String,
+    key_dir: String,
+}
+
+fn secureboot_storage_paths(target_root: &Path) -> Result<SecureBootStoragePaths, String> {
+    const CONFIG_PATH: &str = "/etc/catos/secureboot.conf";
+    const DEFAULT_STATE_PATH: &str = "/var/lib/catos-secureboot/state.json";
+    const DEFAULT_KEY_DIR: &str = "/var/lib/catos-secureboot/keys";
+
+    let Some(config) = read_optional_target_file(target_root, CONFIG_PATH)? else {
+        return Ok(SecureBootStoragePaths {
+            state_path: DEFAULT_STATE_PATH.into(),
+            key_dir: DEFAULT_KEY_DIR.into(),
+        });
+    };
+    let config = String::from_utf8(config)
+        .map_err(|_| format!("target Secure Boot configuration {CONFIG_PATH} is not UTF-8"))?;
+    let mut in_secureboot = false;
+    let mut state_path: Option<String> = None;
+    let mut key_dir: Option<String> = None;
+    for (index, raw) in config.lines().enumerate() {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if line.starts_with('[') {
+            let section = line.split('#').next().unwrap_or_default().trim();
+            in_secureboot = section == "[secureboot]";
+            continue;
+        }
+        if !in_secureboot {
+            continue;
+        }
+        let Some((name, raw_value)) = line.split_once('=') else {
+            continue;
+        };
+        let target = match name.trim() {
+            "state_path" => &mut state_path,
+            "key_dir" => &mut key_dir,
+            _ => continue,
+        };
+        if target.is_some() {
+            return Err(format!(
+                "duplicate {} in target Secure Boot configuration at line {}",
+                name.trim(),
+                index + 1
+            ));
+        }
+        let value = parse_simple_toml_path(raw_value, name.trim(), index + 1)?;
+        *target = Some(value);
+    }
+    Ok(SecureBootStoragePaths {
+        state_path: state_path.unwrap_or_else(|| DEFAULT_STATE_PATH.into()),
+        key_dir: key_dir.unwrap_or_else(|| DEFAULT_KEY_DIR.into()),
+    })
+}
+
+fn parse_simple_toml_path(raw: &str, name: &str, line: usize) -> Result<String, String> {
+    let raw = raw.trim();
+    let quote = match raw.as_bytes().first().copied() {
+        Some(b'"') => b'"',
+        Some(b'\'') => b'\'',
+        _ => {
+            return Err(format!(
+                "target Secure Boot {name} at line {line} must use a quoted TOML string"
+            ))
+        }
+    };
+    let rest = &raw[1..];
+    let Some(end) = rest.as_bytes().iter().position(|byte| *byte == quote) else {
+        return Err(format!(
+            "target Secure Boot {name} at line {line} has no closing quote"
+        ));
+    };
+    let value = &rest[..end];
+    if quote == b'"' && value.contains('\\') {
+        return Err(format!(
+            "target Secure Boot {name} at line {line} uses unsupported string escapes"
+        ));
+    }
+    let trailing = rest[end + 1..].trim();
+    if !trailing.is_empty() && !trailing.starts_with('#') {
+        return Err(format!(
+            "target Secure Boot {name} at line {line} has trailing data"
+        ));
+    }
+    validate_rooted_policy_path(value, name)
+}
+
+fn validate_rooted_policy_path(value: &str, name: &str) -> Result<String, String> {
+    use std::path::Component;
+
+    let path = Path::new(value);
+    if !path.is_absolute() || path == Path::new("/") {
+        return Err(format!("target Secure Boot {name} must be an absolute non-root path"));
+    }
+    if path.components().any(|component| {
+        matches!(
+            component,
+            Component::CurDir | Component::ParentDir | Component::Prefix(_)
+        )
+    }) {
+        return Err(format!("target Secure Boot {name} contains an unsafe path component"));
+    }
+    if value.contains('\0') {
+        return Err(format!("target Secure Boot {name} contains NUL"));
+    }
+    Ok(value.to_string())
+}
+
+fn rooted_child(directory: &str, name: &str) -> Result<String, String> {
+    let directory = validate_rooted_policy_path(directory, "key_dir")?;
+    Ok(format!("{}/{}", directory.trim_end_matches('/'), name))
+}
+
+fn read_optional_target_file(target_root: &Path, rooted: &str) -> Result<Option<Vec<u8>>, String> {
+    match catos_target::execute::confined::read_rooted_file(target_root, rooted) {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(catos_target::FsError::NotFound) => Ok(None),
+        Err(error) => Err(format!("cannot read target file {rooted}: {error}")),
+    }
+}
+
+fn target_nonempty_regular_file_present(target_root: &Path, rooted: &str) -> Result<bool, String> {
+    match catos_target::execute::confined::rooted_regular_file_size(target_root, rooted) {
+        Ok(Some(size)) => Ok(size > 0),
+        Ok(None) | Err(catos_target::FsError::NotFound) => Ok(false),
+        Err(error) => Err(format!("cannot inspect target file {rooted}: {error}")),
+    }
+}
+
+fn validate_secureboot_state(bytes: &[u8], path: &str) -> Result<(), String> {
+    let value: serde_json::Value = serde_json::from_slice(bytes)
+        .map_err(|error| format!("target Secure Boot state {path} is invalid JSON: {error}"))?;
+    let object = value
+        .as_object()
+        .ok_or_else(|| format!("target Secure Boot state {path} is not a JSON object"))?;
+    if object.get("version").and_then(serde_json::Value::as_u64) != Some(1) {
+        return Err(format!("target Secure Boot state {path} has unsupported version"));
+    }
+    let fingerprint = object
+        .get("certificate_fingerprint")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| {
+            format!("target Secure Boot state {path} has no certificate fingerprint")
+        })?;
+    if fingerprint.len() != 64 || !fingerprint.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(format!(
+            "target Secure Boot state {path} has an invalid SHA-256 certificate fingerprint"
+        ));
+    }
+    if object
+        .get("enrollment_pending")
+        .and_then(serde_json::Value::as_bool)
+        .is_none()
+    {
+        return Err(format!(
+            "target Secure Boot state {path} has no boolean enrollment_pending field"
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(test)]

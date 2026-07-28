@@ -6,9 +6,8 @@
 //! * Repair **never auto-enables** Secure Boot just because the live
 //!   host has it on. The target's own policy is the only authority.
 //! * Repair **never silently disables** Secure Boot.
-//! * When the target's existing policy is detected (e.g. previously
-//!   enrolled CatOS certificate, signed bootloader artefact, or the
-//!   `catos-secureboot` package + a configuration marker), repair
+//! * When the target's existing policy is detected from the persisted
+//!   `catos-secureboot` state record and complete machine key material, repair
 //!   may re-apply that existing policy by invoking
 //!   `catos-secureboot enable --generate-enrollment-password --json`.
 //! * EFI variable writes, MOK enrollment, and signing operations are
@@ -36,16 +35,10 @@ pub struct SecureBootInputs {
     /// The provider currently selected for boot repair. Secure Boot
     /// is refused for EFI Stub.
     pub provider: ProviderId,
-    /// Whether the target's `/etc/catos/secureboot` marker exists
-    /// (bootloadu writes it when `catos-secureboot enable` has been
-    /// invoked at least once).
-    pub target_marker_present: bool,
-    /// Whether the target's pacman DB reports the
-    /// `catos-secureboot` package.
-    pub package_present: bool,
-    /// Whether a signed bootloader artefact was observed on the
-    /// target ESP (corroborating evidence; not authoritative alone).
-    pub signed_artefact_observed: bool,
+    /// Whether the target contains a valid persisted CatOS Secure Boot
+    /// state record and complete machine key material. The package config
+    /// alone is never policy evidence.
+    pub target_policy_present: bool,
     /// Verbatim payload (stdout) captured from `catos-secureboot`
     /// when the orchestrator replayed a previous result for
     /// resumption. `None` for a fresh invocation.
@@ -58,12 +51,7 @@ pub struct SecureBootInputs {
 /// `/sys/firmware/efi/efivars/SecureBoot-*` value is NEVER consulted
 /// for the target. Only target-side evidence is.
 pub fn should_finalize(inputs: &SecureBootInputs) -> FinalizeDecision {
-    // Target policy is "present" when bootloadu has previously
-    // enrolled a CatOS certificate. We treat the marker as
-    // authoritative; the package + signed artefact are corroborating.
-    let target_policy_present =
-        inputs.target_marker_present || (inputs.package_present && inputs.signed_artefact_observed);
-    if !target_policy_present {
+    if !inputs.target_policy_present {
         return FinalizeDecision::LeaveUntouched;
     }
     if !registry::secure_boot_supported(inputs.provider) {
@@ -116,7 +104,7 @@ pub fn finalize_secure_boot<R: TargetRunner>(
         ),
         FinalizeDecision::Unsupported => (
             SecureBootReport {
-                target_policy_present: inputs.target_marker_present,
+                target_policy_present: inputs.target_policy_present,
                 enable_invoked: false,
                 ambiguous: false,
                 failure_message: Some(format!(
@@ -239,9 +227,7 @@ mod tests {
     fn inputs(provider: ProviderId) -> SecureBootInputs {
         SecureBootInputs {
             provider,
-            target_marker_present: false,
-            package_present: false,
-            signed_artefact_observed: false,
+            target_policy_present: false,
             previous_payload: None,
         }
     }
@@ -255,7 +241,7 @@ mod tests {
     #[test]
     fn efistub_with_target_policy_is_unsupported() {
         let mut inputs = inputs(ProviderId::Efistub);
-        inputs.target_marker_present = true;
+        inputs.target_policy_present = true;
         let decision = should_finalize(&inputs);
         assert_eq!(decision, FinalizeDecision::Unsupported);
     }
@@ -264,7 +250,7 @@ mod tests {
     fn efistub_secureboot_unsupported_requires_human_action() {
         let runner = RecordedTargetRunner::new();
         let mut inputs = inputs(ProviderId::Efistub);
-        inputs.target_marker_present = true;
+        inputs.target_policy_present = true;
         let (report, outcome, action) = finalize_secure_boot(&runner, &inputs);
 
         assert!(!report.enable_invoked);
@@ -279,34 +265,13 @@ mod tests {
     }
 
     #[test]
-    fn target_marker_authorises_reapply() {
+    fn persisted_target_policy_authorises_reapply() {
         let inputs = SecureBootInputs {
             provider: ProviderId::Grub,
-            target_marker_present: true,
+            target_policy_present: true,
             ..SecureBootInputs::default()
         };
         assert_eq!(should_finalize(&inputs), FinalizeDecision::Reapply);
-    }
-
-    #[test]
-    fn package_plus_signed_artefact_authorises_reapply() {
-        let inputs = SecureBootInputs {
-            provider: ProviderId::Uki,
-            package_present: true,
-            signed_artefact_observed: true,
-            ..SecureBootInputs::default()
-        };
-        assert_eq!(should_finalize(&inputs), FinalizeDecision::Reapply);
-    }
-
-    #[test]
-    fn package_alone_does_not_authorise_reapply() {
-        let inputs = SecureBootInputs {
-            provider: ProviderId::Grub,
-            package_present: true,
-            ..SecureBootInputs::default()
-        };
-        assert_eq!(should_finalize(&inputs), FinalizeDecision::LeaveUntouched);
     }
 
     #[test]
@@ -321,7 +286,7 @@ mod tests {
         );
         let inputs = SecureBootInputs {
             provider: ProviderId::Grub,
-            target_marker_present: true,
+            target_policy_present: true,
             ..SecureBootInputs::default()
         };
         let (report, outcome, action) = finalize_secure_boot(&runner, &inputs);
@@ -350,7 +315,7 @@ mod tests {
         );
         let inputs = SecureBootInputs {
             provider: ProviderId::Grub,
-            target_marker_present: true,
+            target_policy_present: true,
             ..SecureBootInputs::default()
         };
         let (report, outcome, action) = finalize_secure_boot(&runner, &inputs);
@@ -372,7 +337,7 @@ mod tests {
         );
         let inputs = SecureBootInputs {
             provider: ProviderId::Grub,
-            target_marker_present: true,
+            target_policy_present: true,
             ..SecureBootInputs::default()
         };
         let (_report, outcome, _action) = finalize_secure_boot(&runner, &inputs);
@@ -391,7 +356,7 @@ mod tests {
         );
         let inputs = SecureBootInputs {
             provider: ProviderId::Grub,
-            target_marker_present: true,
+            target_policy_present: true,
             ..SecureBootInputs::default()
         };
         let _ = finalize_secure_boot(&runner, &inputs);

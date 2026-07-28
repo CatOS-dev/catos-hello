@@ -421,21 +421,13 @@ pub fn run_boot_repair(
         Ok(inputs) => inputs,
         Err(error) => return preflight_failure("INITRAMFS_FACTS_INCOMPLETE", error),
     };
-    let secureboot_inputs = match (
-        target_secureboot_marker_present(target_root),
-        target_signed_catos_efi_present(target_root, ctx.esp_mount_point.as_deref()),
-    ) {
-        (Ok(target_marker_present), Ok(signed_artefact_observed)) => SecureBootInputs {
+    let secureboot_inputs = match target_secureboot_policy_present(target_root) {
+        Ok(target_policy_present) => SecureBootInputs {
             provider,
-            target_marker_present,
-            package_present: installed_packages
-                .iter()
-                .any(|package| package == "catos-secureboot"),
-            signed_artefact_observed,
+            target_policy_present,
             previous_payload: None,
         },
-        (Err(error), _) => return preflight_failure("SECUREBOOT_POLICY_UNREADABLE", error),
-        (_, Err(error)) => return preflight_failure("SECUREBOOT_ASSETS_UNREADABLE", error),
+        Err(error) => return preflight_failure("SECUREBOOT_POLICY_UNREADABLE", error),
     };
     let mut config_transaction = ConfigTransaction::new(target_root);
     let mut config_actions = match write_provider_configs(
@@ -691,8 +683,7 @@ use crate::diagnose::target::{
     detect_target_architecture, target_regular_file_present,
 };
 use crate::diagnose::target::{
-    collect_target_kernels, derive_efi_device, target_secureboot_marker_present,
-    target_signed_catos_efi_present,
+    collect_target_kernels, derive_efi_device, target_secureboot_policy_present,
 };
 #[cfg(test)]
 use crate::model::FirmwareClass;
@@ -734,6 +725,24 @@ mod tests {
     impl Drop for TempTargetRoot {
         fn drop(&mut self) {
             fs::remove_dir_all(&self.path).unwrap();
+        }
+    }
+
+    fn write_secureboot_policy(root: &Path, state_path: &str, key_dir: &str, version: u64) {
+        let state = root.join(state_path.trim_start_matches('/'));
+        fs::create_dir_all(state.parent().unwrap()).unwrap();
+        fs::write(
+            &state,
+            format!(
+                "{{\"version\":{version},\"enrollment_pending\":true,\"certificate_fingerprint\":\"{}\",\"last_error\":\"\",\"updated_at\":\"2026-07-28T00:00:00+00:00\"}}\n",
+                "A".repeat(64)
+            ),
+        )
+        .unwrap();
+        let keys = root.join(key_dir.trim_start_matches('/'));
+        fs::create_dir_all(&keys).unwrap();
+        for name in ["machine.key", "machine.crt", "machine.der"] {
+            fs::write(keys.join(name), b"key-material").unwrap();
         }
     }
 
@@ -1384,43 +1393,160 @@ mod tests {
     }
 
     #[test]
-    fn regular_secureboot_marker_is_authoritative() {
-        let target_root = TempTargetRoot::new();
-        fs::create_dir_all(target_root.path.join("etc/catos")).unwrap();
-        fs::write(target_root.path.join("etc/catos/secureboot"), b"enabled\n").unwrap();
-
-        assert!(target_secureboot_marker_present(&target_root.path).unwrap());
-    }
-
-    #[test]
-    fn non_regular_secureboot_marker_is_rejected() {
-        let target_root = TempTargetRoot::new();
-        fs::create_dir_all(target_root.path.join("etc/catos/secureboot")).unwrap();
-
-        let error = target_secureboot_marker_present(&target_root.path).unwrap_err();
-        assert!(error.contains("not a regular file"));
-    }
-
-    #[test]
-    fn empty_regular_secureboot_marker_is_still_a_marker() {
-        let target_root = TempTargetRoot::new();
-        fs::create_dir_all(target_root.path.join("etc/catos")).unwrap();
-        fs::write(target_root.path.join("etc/catos/secureboot"), b"").unwrap();
-
-        assert!(target_secureboot_marker_present(&target_root.path).unwrap());
-    }
-
-    #[test]
-    fn firmware_boot_configuration_is_not_a_secureboot_marker() {
+    fn secureboot_package_configuration_alone_is_not_policy_evidence() {
         let target_root = TempTargetRoot::new();
         fs::create_dir_all(target_root.path.join("etc/catos")).unwrap();
         fs::write(
-            target_root.path.join("etc/catos/firmware-boot.conf"),
-            "method = uki\n",
+            target_root.path.join("etc/catos/secureboot.conf"),
+            r#"[secureboot]
+state_path = "/var/lib/catos-secureboot/state.json"
+key_dir = "/var/lib/catos-secureboot/keys"
+"#,
         )
         .unwrap();
 
-        assert!(!target_secureboot_marker_present(&target_root.path).unwrap());
+        assert!(!target_secureboot_policy_present(&target_root.path).unwrap());
+    }
+
+    #[test]
+    fn persisted_secureboot_state_and_keys_are_policy_evidence() {
+        let target_root = TempTargetRoot::new();
+        write_secureboot_policy(
+            &target_root.path,
+            "/var/lib/catos-secureboot/state.json",
+            "/var/lib/catos-secureboot/keys",
+            1,
+        );
+
+        assert!(target_secureboot_policy_present(&target_root.path).unwrap());
+    }
+
+    #[test]
+    fn custom_secureboot_storage_paths_are_honoured() {
+        let target_root = TempTargetRoot::new();
+        fs::create_dir_all(target_root.path.join("etc/catos")).unwrap();
+        fs::write(
+            target_root.path.join("etc/catos/secureboot.conf"),
+            r#"[secureboot]
+state_path = "/srv/catos/sb-state.json" # target state
+key_dir = "/srv/catos/keys"
+"#,
+        )
+        .unwrap();
+        write_secureboot_policy(
+            &target_root.path,
+            "/srv/catos/sb-state.json",
+            "/srv/catos/keys",
+            1,
+        );
+
+        assert!(target_secureboot_policy_present(&target_root.path).unwrap());
+    }
+
+    #[test]
+    fn literal_string_secureboot_paths_are_supported() {
+        let target_root = TempTargetRoot::new();
+        fs::create_dir_all(target_root.path.join("etc/catos")).unwrap();
+        fs::write(
+            target_root.path.join("etc/catos/secureboot.conf"),
+            "[secureboot]\nstate_path = '/srv/catos/state.json'\nkey_dir = '/srv/catos/keys'\n",
+        )
+        .unwrap();
+        write_secureboot_policy(
+            &target_root.path,
+            "/srv/catos/state.json",
+            "/srv/catos/keys",
+            1,
+        );
+
+        assert!(target_secureboot_policy_present(&target_root.path).unwrap());
+    }
+
+    #[test]
+    fn secureboot_state_without_complete_keys_is_rejected() {
+        let target_root = TempTargetRoot::new();
+        write_secureboot_policy(
+            &target_root.path,
+            "/var/lib/catos-secureboot/state.json",
+            "/var/lib/catos-secureboot/keys",
+            1,
+        );
+        fs::remove_file(
+            target_root
+                .path
+                .join("var/lib/catos-secureboot/keys/machine.der"),
+        )
+        .unwrap();
+
+        let error = target_secureboot_policy_present(&target_root.path).unwrap_err();
+        assert!(error.contains("machine key material is incomplete"));
+    }
+
+    #[test]
+    fn secureboot_keys_without_state_are_rejected() {
+        let target_root = TempTargetRoot::new();
+        let keys = target_root.path.join("var/lib/catos-secureboot/keys");
+        fs::create_dir_all(&keys).unwrap();
+        for name in ["machine.key", "machine.crt", "machine.der"] {
+            fs::write(keys.join(name), b"key-material").unwrap();
+        }
+
+        let error = target_secureboot_policy_present(&target_root.path).unwrap_err();
+        assert!(error.contains("without policy state"));
+    }
+
+    #[test]
+    fn unsafe_secureboot_storage_override_is_rejected_before_target_io() {
+        let target_root = TempTargetRoot::new();
+        fs::create_dir_all(target_root.path.join("etc/catos")).unwrap();
+        fs::write(
+            target_root.path.join("etc/catos/secureboot.conf"),
+            r#"[secureboot]
+state_path = "../outside/state.json"
+key_dir = "/var/lib/catos-secureboot/keys"
+"#,
+        )
+        .unwrap();
+
+        let error = target_secureboot_policy_present(&target_root.path).unwrap_err();
+        assert!(error.contains("absolute non-root path"));
+    }
+
+    #[test]
+    fn invalid_secureboot_certificate_fingerprint_is_rejected() {
+        let target_root = TempTargetRoot::new();
+        write_secureboot_policy(
+            &target_root.path,
+            "/var/lib/catos-secureboot/state.json",
+            "/var/lib/catos-secureboot/keys",
+            1,
+        );
+        let state = target_root
+            .path
+            .join("var/lib/catos-secureboot/state.json");
+        fs::write(
+            state,
+            r#"{"version":1,"enrollment_pending":false,"certificate_fingerprint":"AA"}
+"#,
+        )
+        .unwrap();
+
+        let error = target_secureboot_policy_present(&target_root.path).unwrap_err();
+        assert!(error.contains("invalid SHA-256 certificate fingerprint"));
+    }
+
+    #[test]
+    fn unsupported_secureboot_state_version_is_rejected() {
+        let target_root = TempTargetRoot::new();
+        write_secureboot_policy(
+            &target_root.path,
+            "/var/lib/catos-secureboot/state.json",
+            "/var/lib/catos-secureboot/keys",
+            2,
+        );
+
+        let error = target_secureboot_policy_present(&target_root.path).unwrap_err();
+        assert!(error.contains("unsupported version"));
     }
 
     #[test]
