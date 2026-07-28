@@ -26,7 +26,8 @@
 //! catos-update -V, --version   Show version.
 //! ```
 
-use std::io::Write;
+use std::io::{self, BufRead, Write};
+use std::path::Path;
 use std::process::Command;
 
 use crate::error::exit_code;
@@ -66,11 +67,11 @@ fn parse_argv(argv: &[String]) -> Result<UpdateOptions, String> {
 
 /// Entry point invoked from `entry::invocation_dispatch`. `--help` /
 /// `--version` have already been handled by the top-level dispatcher.
-pub fn run(argv: &[String]) -> i32 {
+pub fn run(argv: &[String], program: &str) -> i32 {
     let opts = match parse_argv(argv) {
         Ok(opts) => opts,
         Err(message) => {
-            eprintln!("catos-update: {message}");
+            eprintln!("{program}: {message}");
             return exit_code::ARG_ERROR;
         }
     };
@@ -81,22 +82,21 @@ pub fn run(argv: &[String]) -> i32 {
     let pending = match pacman::list_pending_updates() {
         Ok(lines) => lines,
         Err(message) => {
-            eprintln!("catos-update: {message}");
+            eprintln!("{program}: {message}");
             return exit_code::PROBE_FAILED;
         }
     };
 
     if pending.is_empty() {
-        println!("catos-update: system is up to date");
-        return exit_code::SUCCESS;
+        return match write_status_line(&format!("{program}: system is up to date")) {
+            Ok(()) => exit_code::SUCCESS,
+            Err(error) => output_error(program, error),
+        };
     }
 
-    println!("Pending updates ({}):", pending.len());
-    let mut out = std::io::stdout();
-    for line in &pending {
-        let _ = writeln!(out, "  {line}");
+    if let Err(error) = write_pending_updates(&pending) {
+        return output_error(program, error);
     }
-    let _ = out.flush();
 
     if opts.check_only {
         return exit_code::SUCCESS;
@@ -104,66 +104,135 @@ pub fn run(argv: &[String]) -> i32 {
 
     // Confirm with the user on stdin. Default to "no" so a stray
     // newline never triggers an unprompted system mutation.
-    if !confirm_yes_no("Proceed with update? [y/N] ", false) {
-        eprintln!("catos-update: update aborted by user");
+    let confirmed = match confirm_yes_no("Proceed with update? [y/N] ", false) {
+        Ok(confirmed) => confirmed,
+        Err(error) => return output_error(program, error),
+    };
+    if !confirmed {
+        eprintln!("{program}: update aborted by user");
         return exit_code::SUCCESS;
     }
 
-    let su_cmd = match su::pick_su_cmd() {
-        Some(cmd) => cmd,
-        None => {
-            eprintln!(
-                "catos-update: no privilege elevation command found (sudo, sudo-rs, doas, run0)"
-            );
-            return exit_code::PERMISSION_DENIED;
-        }
+    let Some(pacman_path) = catos_process::trusted_tool_path("pacman") else {
+        eprintln!("{program}: trusted pacman executable was not found");
+        return exit_code::PROBE_FAILED;
     };
 
     // Run pacman -Syu with inherited stdio so its interactive prompts
     // (signature confirmations, conflict resolution) reach the user.
     // A non-zero pacman exit code is surfaced as PROBE_FAILED.
-    let mut command = Command::new(&su_cmd);
-    command.arg("pacman").arg("-Syu");
+    let (mut command, command_name) = match update_command(&pacman_path) {
+        Ok(command) => command,
+        Err(message) => {
+            eprintln!("{program}: {message}");
+            return exit_code::PERMISSION_DENIED;
+        }
+    };
+    command.arg("-Syu");
     let status = match command.status() {
         Ok(status) => status,
         Err(error) => {
-            eprintln!("catos-update: failed to run {su_cmd} pacman -Syu: {error}");
+            eprintln!("{program}: failed to run {command_name}: {error}");
             return exit_code::PROBE_FAILED;
         }
     };
     if !status.success() {
-        eprintln!("catos-update: pacman exited with status {status}");
+        eprintln!("{program}: pacman exited with status {status}");
         return exit_code::PROBE_FAILED;
     }
-    println!("catos-update: update applied");
-    exit_code::SUCCESS
+    match write_status_line(&format!("{program}: update applied")) {
+        Ok(()) => exit_code::SUCCESS,
+        Err(error) => output_error(program, error),
+    }
+}
+
+fn update_command(pacman_path: &Path) -> Result<(Command, String), String> {
+    let su_path = su::pick_su_cmd();
+    build_update_command(unsafe { libc::geteuid() }, su_path.as_deref(), pacman_path)
+}
+
+fn build_update_command(
+    effective_uid: u32,
+    su_path: Option<&Path>,
+    pacman_path: &Path,
+) -> Result<(Command, String), String> {
+    if effective_uid == 0 {
+        return Ok((
+            Command::new(pacman_path),
+            format!("{} -Syu", pacman_path.display()),
+        ));
+    }
+    let Some(su_path) = su_path else {
+        return Err("no privilege elevation command found (sudo, sudo-rs, doas, run0)".to_string());
+    };
+    let mut command = Command::new(su_path);
+    command.arg(pacman_path);
+    Ok((
+        command,
+        format!("{} {} -Syu", su_path.display(), pacman_path.display()),
+    ))
+}
+
+fn write_pending_updates(pending: &[String]) -> io::Result<()> {
+    let stdout = io::stdout();
+    let mut output = stdout.lock();
+    write_pending_updates_to(&mut output, pending)
+}
+
+fn write_pending_updates_to<W: Write>(output: &mut W, pending: &[String]) -> io::Result<()> {
+    writeln!(output, "Pending updates ({}):", pending.len())?;
+    for line in pending {
+        writeln!(output, "  {line}")?;
+    }
+    output.flush()
+}
+
+fn write_status_line(message: &str) -> io::Result<()> {
+    let stdout = io::stdout();
+    let mut output = stdout.lock();
+    writeln!(output, "{message}")?;
+    output.flush()
+}
+
+fn output_error(program: &str, error: io::Error) -> i32 {
+    eprintln!("{program}: stdout write failed: {error}");
+    exit_code::SERIALIZE_FAILED
 }
 
 /// Print the per-invocation help. Called from `entry::print_help` when
 /// `catos-update --help` is used.
-pub fn print_help() {
+pub fn print_help(program: &str) {
     let version = crate::PROGRAM_VERSION;
     print!(
-        "catos-update {version} - CatOS interactive system updater\n\nUSAGE:\n    catos-update [OPTIONS]\n\nOPTIONS:\n    -c, --check       Print pending updates without applying them.\n    -l, --list        Alias for --check.\n    -d, --devel       Reserved for AUR --devel (currently a no-op).\n    -h, --help        Show this help message and exit.\n    -V, --version     Print program version and exit.\n\nEXIT CODES:\n    0   Updates listed, applied, or system up to date.\n    2   An option was not recognised.\n    4   No privilege elevation command available.\n    5   Could not enumerate or apply updates.\n"
+        "{program} {version} - CatOS interactive system updater\n\nUSAGE:\n    {program} [OPTIONS]\n\nOPTIONS:\n    -c, --check       Print pending updates without applying them.\n    -l, --list        Alias for --check.\n    -d, --devel       Reserved for AUR --devel (currently a no-op).\n    -h, --help        Show this help message and exit.\n    -V, --version     Print program version and exit.\n\nEXIT CODES:\n    0   Updates listed, applied, or system up to date.\n    2   An option was not recognised.\n    4   No privilege elevation command available.\n    5   Could not enumerate or apply updates.\n    6   Output could not be written completely.\n"
     );
 }
 
 /// Read a single line from stdin and treat it as a yes/no answer.
 /// Empty input falls back to `default`.
-fn confirm_yes_no(prompt: &str, default: bool) -> bool {
-    use std::io::Write;
-    let mut out = std::io::stdout();
-    let _ = write!(out, "{prompt}");
-    let _ = out.flush();
+fn confirm_yes_no(prompt: &str, default: bool) -> io::Result<bool> {
+    let stdin = io::stdin();
+    let stdout = io::stdout();
+    let mut input = stdin.lock();
+    let mut output = stdout.lock();
+    confirm_yes_no_with(&mut input, &mut output, prompt, default)
+}
+
+fn confirm_yes_no_with<R: BufRead, W: Write>(
+    input: &mut R,
+    output: &mut W,
+    prompt: &str,
+    default: bool,
+) -> io::Result<bool> {
+    write!(output, "{prompt}")?;
+    output.flush()?;
     let mut line = String::new();
-    if std::io::stdin().read_line(&mut line).is_err() {
-        return false;
-    }
+    input.read_line(&mut line)?;
     let trimmed = line.trim().to_ascii_lowercase();
     if trimmed.is_empty() {
-        return default;
+        return Ok(default);
     }
-    matches!(trimmed.as_str(), "y" | "yes")
+    Ok(matches!(trimmed.as_str(), "y" | "yes"))
 }
 
 #[cfg(test)]
@@ -194,5 +263,64 @@ mod tests {
     fn empty_argv_means_full_flow() {
         let opts = parse_argv(&[]).expect("empty argv");
         assert!(!opts.check_only);
+    }
+
+    #[test]
+    fn pending_update_output_propagates_write_failures() {
+        struct BrokenWriter;
+        impl Write for BrokenWriter {
+            fn write(&mut self, _buf: &[u8]) -> io::Result<usize> {
+                Err(io::Error::new(io::ErrorKind::BrokenPipe, "closed"))
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+        let error = write_pending_updates_to(&mut BrokenWriter, &["pkg 1 -> 2".into()])
+            .expect_err("write failure must be returned");
+        assert_eq!(error.kind(), io::ErrorKind::BrokenPipe);
+    }
+
+    #[test]
+    fn confirmation_prompt_propagates_write_failures() {
+        let mut input = io::Cursor::new(b"y\n".to_vec());
+        let mut output = io::Cursor::new(Vec::<u8>::new());
+        assert!(confirm_yes_no_with(&mut input, &mut output, "Proceed? ", false).unwrap());
+
+        struct BrokenWriter;
+        impl Write for BrokenWriter {
+            fn write(&mut self, _buf: &[u8]) -> io::Result<usize> {
+                Err(io::Error::new(io::ErrorKind::BrokenPipe, "closed"))
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+        let mut input = io::Cursor::new(b"y\n".to_vec());
+        assert!(confirm_yes_no_with(&mut input, &mut BrokenWriter, "Proceed? ", false).is_err());
+    }
+
+    #[test]
+    fn update_command_uses_only_absolute_trusted_paths() {
+        let pacman = Path::new("/usr/bin/pacman");
+
+        let (root_command, _) = build_update_command(0, None, pacman).unwrap();
+        assert_eq!(root_command.get_program(), pacman.as_os_str());
+
+        let sudo = Path::new("/usr/bin/sudo");
+        let (user_command, _) = build_update_command(1000, Some(sudo), pacman).unwrap();
+        assert_eq!(user_command.get_program(), sudo.as_os_str());
+        assert_eq!(
+            user_command.get_args().next(),
+            Some(pacman.as_os_str()),
+            "the trusted pacman path must be passed as an absolute argument"
+        );
+    }
+
+    #[test]
+    fn non_root_update_without_an_elevation_tool_is_rejected() {
+        let error = build_update_command(1000, None, Path::new("/usr/bin/pacman"))
+            .expect_err("non-root update needs an elevation tool");
+        assert!(error.contains("no privilege elevation command"), "{error}");
     }
 }

@@ -35,26 +35,46 @@ pub fn list_pending_updates() -> Result<Vec<String>, String> {
         CHECKUPDATES_TIMEOUT,
         CHECKUPDATES_MAX_OUTPUT,
     )?;
-    Ok(parse_pending(&output))
+    parse_pending(&output)
 }
 
 /// Parse `checkupdates` output into a list of non-empty update lines.
 ///
-/// `checkupdates` returns 0 when there are updates AND when there
-/// are none (the latter produces empty stdout). It returns non-zero
-/// only on actual failure, so we treat a non-success status strictly:
-/// the host cannot enumerate updates safely.
-fn parse_pending(output: &ToolOutput) -> Vec<String> {
-    if !output.success() {
-        return Vec::new();
+/// `checkupdates` returns 0 when updates are available, 2 when the system is
+/// already current, and another non-zero status on failure. Timeouts and
+/// truncated output are also failures because an incomplete package list must
+/// never be presented as authoritative.
+fn parse_pending(output: &ToolOutput) -> Result<Vec<String>, String> {
+    if output.timed_out {
+        return Err("checkupdates timed out before update enumeration completed".into());
+    }
+    if output.stdout_truncated || output.stderr_truncated {
+        return Err("checkupdates output exceeded the safety limit and was truncated".into());
+    }
+    match output.status.code() {
+        Some(2) => return Ok(Vec::new()),
+        Some(0) => {}
+        Some(code) => {
+            let detail = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            return Err(if detail.is_empty() {
+                format!("checkupdates exited with status {code}")
+            } else {
+                format!("checkupdates exited with status {code}: {detail}")
+            });
+        }
+        None => return Err("checkupdates was terminated by a signal".into()),
     }
     let stdout = String::from_utf8_lossy(&output.stdout);
-    stdout
+    let updates = stdout
         .lines()
         .map(str::trim)
         .filter(|line| !line.is_empty())
         .map(str::to_string)
-        .collect()
+        .collect::<Vec<_>>();
+    if updates.is_empty() {
+        return Err("checkupdates exited successfully but returned no update entries".into());
+    }
+    Ok(updates)
 }
 
 #[cfg(test)]
@@ -62,13 +82,12 @@ mod tests {
     use super::*;
     use std::os::unix::process::ExitStatusExt;
 
-    fn fake_output(success: bool, stdout: &[u8]) -> ToolOutput {
-        let raw = if success { 0 } else { 1 };
+    fn fake_output(code: i32, stdout: &[u8], stderr: &[u8]) -> ToolOutput {
         ToolOutput {
             path: std::path::PathBuf::from("/usr/bin/checkupdates"),
-            status: ExitStatusExt::from_raw(raw),
+            status: ExitStatusExt::from_raw(code << 8),
             stdout: stdout.to_vec(),
-            stderr: Vec::new(),
+            stderr: stderr.to_vec(),
             stdout_truncated: false,
             stderr_truncated: false,
             timed_out: false,
@@ -76,24 +95,41 @@ mod tests {
     }
 
     #[test]
-    fn empty_stdout_is_no_updates() {
-        assert!(parse_pending(&fake_output(true, b"")).is_empty());
+    fn successful_empty_output_is_rejected_as_inconsistent() {
+        let error = parse_pending(&fake_output(0, b"", b""))
+            .expect_err("exit 0 must contain at least one update entry");
+        assert!(error.contains("no update entries"), "{error}");
     }
 
     #[test]
     fn lines_are_trimmed_and_filtered() {
-        let out = fake_output(true, b"  foo 1-1 -> 1-2\n\n  bar 2-1 -> 2-2\n\n");
-        let lines = parse_pending(&out);
+        let out = fake_output(0, b"  foo 1-1 -> 1-2\n\n  bar 2-1 -> 2-2\n\n", b"");
+        let lines = parse_pending(&out).expect("successful update listing");
         assert_eq!(lines, vec!["foo 1-1 -> 1-2", "bar 2-1 -> 2-2"]);
     }
 
     #[test]
-    fn failed_checkupdates_yields_empty() {
-        // A non-success exit from checkupdates must not be interpreted
-        // as "no updates"; the orchestrator layer treats an empty list
-        // as up-to-date. Here we only assert the parser does not
-        // fabricate update lines out of a failure.
-        let out = fake_output(false, b"error: mirror unreachable");
-        assert!(parse_pending(&out).is_empty());
+    fn exit_two_means_no_updates() {
+        assert!(parse_pending(&fake_output(2, b"", b""))
+            .expect("checkupdates exit 2 is the documented no-update result")
+            .is_empty());
+    }
+
+    #[test]
+    fn failed_checkupdates_is_not_reported_as_up_to_date() {
+        let error = parse_pending(&fake_output(1, b"", b"error: mirror unreachable\n"))
+            .expect_err("checkupdates failure must remain an error");
+        assert!(error.contains("mirror unreachable"), "{error}");
+    }
+
+    #[test]
+    fn timed_out_or_truncated_results_are_rejected() {
+        let mut timed_out = fake_output(0, b"foo 1-1 -> 1-2\n", b"");
+        timed_out.timed_out = true;
+        assert!(parse_pending(&timed_out).is_err());
+
+        let mut truncated = fake_output(0, b"foo 1-1 -> 1-2\n", b"");
+        truncated.stdout_truncated = true;
+        assert!(parse_pending(&truncated).is_err());
     }
 }
