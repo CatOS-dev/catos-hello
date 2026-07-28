@@ -427,10 +427,17 @@ fn limine_verify_records_limine_list() {
         branding_name: "CatOS".into(),
         root_is_btrfs: true,
     };
-    let runner = RecordedTargetRunner::new().queue_raw(0, b"CatOS\n".to_vec(), b"".to_vec());
+    let runner = RecordedTargetRunner::new().expect_raw(
+        "limine-list",
+        Vec::<String>::new(),
+        0,
+        b"CatOS\n".to_vec(),
+        b"".to_vec(),
+    );
     let result = LimineProvider.verify(&ctx, &runner);
     assert!(result.passed);
     assert!(result.verification.passed);
+    runner.assert_consumed();
 }
 
 #[test]
@@ -455,10 +462,17 @@ fn limine_verify_fails_when_limine_list_exits_nonzero() {
         branding_name: "CatOS".into(),
         root_is_btrfs: true,
     };
-    let runner = RecordedTargetRunner::new().queue_raw(1, b"".to_vec(), b"missing".to_vec());
+    let runner = RecordedTargetRunner::new().expect_raw(
+        "limine-list",
+        Vec::<String>::new(),
+        1,
+        b"".to_vec(),
+        b"missing".to_vec(),
+    );
     let result = LimineProvider.verify(&ctx, &runner);
     assert!(!result.passed);
     assert!(result.verification.failure_message.is_some());
+    runner.assert_consumed();
 }
 
 // ===========================================================================
@@ -491,9 +505,26 @@ fn grub_ctx() -> ProviderCtx<'static> {
 #[test]
 fn grub_uefi_recipe_uses_correct_target_and_efi_directory() {
     let runner = RecordedTargetRunner::new()
-        .queue_raw(0, b"".to_vec(), b"".to_vec())
-        .queue_raw(0, b"".to_vec(), b"".to_vec())
-        .queue_raw(0, b"".to_vec(), b"".to_vec());
+        .expect_raw("mkinitcpio", ["-P"], 0, b"", b"")
+        .expect_raw(
+            "grub-install",
+            [
+                "--target=x86_64-efi",
+                "--efi-directory=/boot/efi",
+                "--bootloader-id=CatOS",
+                "--recheck",
+            ],
+            0,
+            b"",
+            b"",
+        )
+        .expect_raw(
+            "grub-mkconfig",
+            ["-o", "/boot/grub/grub.cfg"],
+            0,
+            b"",
+            b"",
+        );
     let provider = GrubProvider {
         firmware: FirmwareClass::Efi,
         mkinitcpio_text: "",
@@ -518,14 +549,27 @@ fn grub_uefi_recipe_uses_correct_target_and_efi_directory() {
         .argv
         .iter()
         .any(|arg| arg == "--bootloader-id=CatOS"));
+    runner.assert_consumed();
 }
 
 #[test]
 fn grub_bios_recipe_uses_i386_pc_and_disk() {
     let runner = RecordedTargetRunner::new()
-        .queue_raw(0, b"".to_vec(), b"".to_vec())
-        .queue_raw(0, b"".to_vec(), b"".to_vec())
-        .queue_raw(0, b"".to_vec(), b"".to_vec());
+        .expect_raw("mkinitcpio", ["-P"], 0, b"", b"")
+        .expect_raw(
+            "grub-install",
+            ["--target=i386-pc", "--recheck", "/dev/sda"],
+            0,
+            b"",
+            b"",
+        )
+        .expect_raw(
+            "grub-mkconfig",
+            ["-o", "/boot/grub/grub.cfg"],
+            0,
+            b"",
+            b"",
+        );
     let provider = GrubProvider {
         firmware: FirmwareClass::Bios,
         mkinitcpio_text: "",
@@ -546,12 +590,18 @@ fn grub_bios_recipe_uses_i386_pc_and_disk() {
         grub_install.argv.last().map(String::as_str),
         Some("/dev/sda")
     );
+    runner.assert_consumed();
 }
 
 #[test]
 fn grub_failure_on_mkinitcpio_stops_subsequent_commands() {
-    let runner =
-        RecordedTargetRunner::new().queue_raw(1, b"".to_vec(), b"mkinitcpio failed".to_vec());
+    let runner = RecordedTargetRunner::new().expect_raw(
+        "mkinitcpio",
+        ["-P"],
+        1,
+        b"".to_vec(),
+        b"mkinitcpio failed".to_vec(),
+    );
     let provider = GrubProvider {
         firmware: FirmwareClass::Efi,
         mkinitcpio_text: "",
@@ -561,6 +611,7 @@ fn grub_failure_on_mkinitcpio_stops_subsequent_commands() {
     assert!(result.failure.is_some());
     // Only mkinitcpio was attempted; grub-install was not reached.
     assert!(!runner.invoked_binary("grub-install"));
+    runner.assert_consumed();
 }
 
 // ===========================================================================
@@ -569,7 +620,13 @@ fn grub_failure_on_mkinitcpio_stops_subsequent_commands() {
 
 #[test]
 fn firmware_execute_runs_catos_firmware_boot_update_force() {
-    let runner = RecordedTargetRunner::new().queue_raw(0, b"".to_vec(), b"".to_vec());
+    let runner = RecordedTargetRunner::new().expect_raw(
+        "catos-firmware-boot-update",
+        ["--force"],
+        0,
+        b"",
+        b"",
+    );
     let provider = FirmwareProvider {
         method: FirmwareMethod::Uki,
         efi_device: Some(("/dev/nvme0n1".to_string(), 1)),
@@ -578,11 +635,18 @@ fn firmware_execute_runs_catos_firmware_boot_update_force() {
     assert!(result.failure.is_none());
     assert!(runner.invoked_binary("catos-firmware-boot-update"));
     assert_eq!(runner.invocations()[0].argv, vec!["--force".to_string()]);
+    runner.assert_consumed();
 }
 
 #[test]
 fn firmware_verify_uses_force_and_verify_flags() {
-    let runner = RecordedTargetRunner::new().queue_raw(0, b"verified".to_vec(), b"".to_vec());
+    let runner = RecordedTargetRunner::new().expect_raw(
+        "catos-firmware-boot-update",
+        ["--force", "--verify"],
+        0,
+        b"verified".to_vec(),
+        b"".to_vec(),
+    );
     let provider = FirmwareProvider {
         method: FirmwareMethod::Efistub,
         efi_device: None,
@@ -593,6 +657,7 @@ fn firmware_verify_uses_force_and_verify_flags() {
         runner.invocations()[0].argv,
         vec!["--force".to_string(), "--verify".to_string()]
     );
+    runner.assert_consumed();
 }
 
 fn grub_ctx_provider(provider: ProviderId) -> ProviderCtx<'static> {
@@ -852,9 +917,35 @@ fn systemd_boot_runs_kernel_install_for_each_discovered_kernel() {
         },
     ];
     let runner = RecordedTargetRunner::new()
-        .queue_raw(0, b"".to_vec(), b"".to_vec())
-        .queue_raw(0, b"".to_vec(), b"".to_vec())
-        .queue_raw(0, b"".to_vec(), b"".to_vec());
+        .expect_raw(
+            "bootctl",
+            ["--esp-path=/boot/efi", "install"],
+            0,
+            b"",
+            b"",
+        )
+        .expect_raw(
+            "kernel-install",
+            [
+                "add",
+                "6.18.0-arch1-1",
+                "/usr/lib/modules/6.18.0-arch1-1/vmlinuz",
+            ],
+            0,
+            b"",
+            b"",
+        )
+        .expect_raw(
+            "kernel-install",
+            [
+                "add",
+                "6.18.0-arch1-1-lts",
+                "/usr/lib/modules/6.18.0-arch1-1-lts/vmlinuz",
+            ],
+            0,
+            b"",
+            b"",
+        );
     let provider = SystemdBootProvider { kernels: &kernels };
     let result = provider.execute(&ctx, &runner);
     assert!(result.failure.is_none());
@@ -864,6 +955,7 @@ fn systemd_boot_runs_kernel_install_for_each_discovered_kernel() {
         .filter(|inv| inv.binary == "kernel-install")
         .collect();
     assert_eq!(kernel_install_calls.len(), 2);
+    runner.assert_consumed();
 }
 
 #[test]
@@ -895,11 +987,24 @@ fn systemd_boot_execute_stops_on_first_kernel_install_failure() {
         initramfs: "/boot/initramfs-linux.img".into(),
     }];
     let runner = RecordedTargetRunner::new()
-        .queue_raw(0, b"".to_vec(), b"".to_vec())
-        .queue_raw(1, b"".to_vec(), b"oops".to_vec());
+        .expect_raw(
+            "bootctl",
+            ["--esp-path=/boot/efi", "install"],
+            0,
+            b"",
+            b"",
+        )
+        .expect_raw(
+            "kernel-install",
+            ["add", "6.18.0", "/usr/lib/modules/6.18.0/vmlinuz"],
+            1,
+            b"",
+            b"oops".to_vec(),
+        );
     let provider = SystemdBootProvider { kernels: &kernels };
     let result = provider.execute(&ctx, &runner);
     assert!(result.failure.is_some());
+    runner.assert_consumed();
 }
 
 // ===========================================================================

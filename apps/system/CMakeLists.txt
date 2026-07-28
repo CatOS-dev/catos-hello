@@ -292,13 +292,12 @@ if(BUILD_TESTS)
         )
     endif()
     if(CATOS_SYSTEM_DOCTOR_SMOKE)
-        # Stage-5 Doctor acceptance. Real CatOS btrfs target images
-        # (healthy, fs-corrupt, mount-break, ambiguous, doctor-fail).
-        # Each scenario asserts exit code 0 per scheme B (except
-        # doctor-fail, which must be non-zero) AND verifies by
-        # sha256 byte-hash that the target image is unchanged before
-        # vs. after the catos-doctor run. Skips with exit 77 when
-        # qemu, busybox, or the kernel image is unavailable.
+        # Doctor multicall acceptance. QEMU executes /bin/catos-doctor
+        # against real Btrfs/ext4 and FAT images and validates selected
+        # target identity, provider evidence, fstab drift, filesystem
+        # corruption, ambiguous interactive/non-interactive selection,
+        # recovery transactions, cleanup, and before/after image hashes.
+        # Missing host prerequisites produce explicit CTest skip code 77.
         add_test(
             NAME catos-system-doctor-qemu-smoke
             COMMAND "${BASH_CMD}"

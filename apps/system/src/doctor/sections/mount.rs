@@ -26,27 +26,31 @@ pub(in crate::doctor) fn run_mount_section(
     let id = DoctorSectionId::Mount;
     let Some(context) = context else {
         set_section(sections, id, DoctorSectionStatus::Unknown);
-        report.limitations.push(crate::doctor::model::DoctorLimitation::new(
-            id,
-            "TARGET_CONTEXT_UNAVAILABLE",
-            "Mount requires the selected readonly Doctor target context",
-        ));
+        report
+            .limitations
+            .push(crate::doctor::model::DoctorLimitation::new(
+                id,
+                "TARGET_CONTEXT_UNAVAILABLE",
+                "Mount requires the selected readonly Doctor target context",
+            ));
         return Ok(());
     };
     let inputs = match build_mount_inputs(context) {
         Ok(inputs) => inputs,
         Err(message) => {
             set_section(sections, id, DoctorSectionStatus::Unknown);
-            report.limitations.push(crate::doctor::model::DoctorLimitation::new(
-                id,
-                "MOUNT_FACTS_INCOMPLETE",
-                message,
-            ));
+            report
+                .limitations
+                .push(crate::doctor::model::DoctorLimitation::new(
+                    id,
+                    "MOUNT_FACTS_INCOMPLETE",
+                    message,
+                ));
             return Ok(());
         }
     };
     let problems = mount_diagnose(&inputs);
-    push_mount_evidence(sections, id, &context.target);
+    push_mount_evidence(sections, id, &context.target, &inputs.fstab_text);
 
     let status = derive_mount_section_status(&problems);
     set_section(sections, id, status);
@@ -87,8 +91,14 @@ pub(in crate::doctor) fn run_mount_section(
 fn build_mount_inputs(context: &DoctorTargetContext) -> Result<MountRepairInputs, String> {
     let target = &context.target;
     let fstab_text = context.fstab.as_ref().map_err(Clone::clone)?.clone();
-    let root_device = target.root_device.clone().ok_or_else(|| "selected target has no root device".to_string())?;
-    let root_fstype = target.root_fstype.clone().ok_or_else(|| "selected target has no root filesystem type".to_string())?;
+    let root_device = target
+        .root_device
+        .clone()
+        .ok_or_else(|| "selected target has no root device".to_string())?;
+    let root_fstype = target
+        .root_fstype
+        .clone()
+        .ok_or_else(|| "selected target has no root filesystem type".to_string())?;
     let catos_confirmation = if target.root_fstype.as_deref() == Some("btrfs") {
         CatosConfirmation::Confirmed
     } else {
@@ -122,7 +132,9 @@ fn build_mount_inputs(context: &DoctorTargetContext) -> Result<MountRepairInputs
 }
 
 fn collect_subvolume_facts(root: &Path) -> Result<SubvolFacts, String> {
-    let root = root.to_str().ok_or_else(|| "target root path is not UTF-8".to_string())?;
+    let root = root
+        .to_str()
+        .ok_or_else(|| "target root path is not UTF-8".to_string())?;
     let output = catos_process::run_trusted_tool(
         "btrfs",
         &["subvolume", "list", "-a", root],
@@ -130,11 +142,17 @@ fn collect_subvolume_facts(root: &Path) -> Result<SubvolFacts, String> {
         64 * 1024,
     )?;
     if !output.success() || output.stdout_truncated {
-        return Err(format!("cannot enumerate target Btrfs subvolumes: {}", String::from_utf8_lossy(&output.stderr).trim()));
+        return Err(format!(
+            "cannot enumerate target Btrfs subvolumes: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
     }
     let listed: Vec<String> = String::from_utf8_lossy(&output.stdout)
         .lines()
-        .filter_map(|line| line.split_once(" path ").map(|(_, path)| format!("/{path}")))
+        .filter_map(|line| {
+            line.split_once(" path ")
+                .map(|(_, path)| format!("/{path}"))
+        })
         .collect();
     if listed.is_empty() {
         return Err("target Btrfs subvolume enumeration returned no entries".to_string());
@@ -341,6 +359,7 @@ fn push_mount_evidence(
     sections: &mut [(DoctorSectionId, DoctorSection)],
     id: DoctorSectionId,
     target: &TargetIdentity,
+    fstab: &str,
 ) {
     push_evidence(
         sections,
@@ -360,8 +379,15 @@ fn push_mount_evidence(
             ),
         ),
     );
-    // boot_layout is not discovered on the minimal target::plan path;
-    // surfacing it here is an open design point for a later phase.
+    push_evidence(
+        sections,
+        id,
+        Evidence::new(
+            "FSTAB_LOADED",
+            "selected-target:/etc/fstab",
+            format!("read {} bytes from the selected target fstab", fstab.len()),
+        ),
+    );
 }
 
 #[cfg(test)]

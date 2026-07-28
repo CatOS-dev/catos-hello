@@ -113,6 +113,34 @@ fn btrfs_flow<R: FsCommandRunner + ?Sized>(
     run_planned("btrfs", runner, device)
 }
 
+const DEVICE: &str = "/dev/sda1";
+
+fn expect_ext(exit_code: i32) -> RecordedRunner {
+    RecordedRunner::new().expect_raw("e2fsck", ["-y", "-C", "0", DEVICE], exit_code, b"", b"")
+}
+
+fn expect_fat(exit_code: i32) -> RecordedRunner {
+    RecordedRunner::new().expect_raw("fsck.fat", ["-a", DEVICE], exit_code, b"", b"")
+}
+
+fn expect_f2fs(exit_code: i32) -> RecordedRunner {
+    RecordedRunner::new().expect_raw("fsck.f2fs", ["-a", DEVICE], exit_code, b"", b"")
+}
+
+fn expect_xfs(exit_code: i32, stderr: impl Into<Vec<u8>>) -> RecordedRunner {
+    RecordedRunner::new().expect_raw("xfs_repair", [DEVICE], exit_code, b"", stderr)
+}
+
+fn expect_btrfs_check(exit_code: i32, stdout: impl Into<Vec<u8>>) -> RecordedRunner {
+    RecordedRunner::new().expect_raw(
+        "btrfs",
+        ["check", "--readonly", DEVICE],
+        exit_code,
+        stdout,
+        b"",
+    )
+}
+
 fn make_device(name: &str, dev: &str, fstype: &str) -> BlockDevice {
     BlockDevice {
         name: name.into(),
@@ -153,33 +181,38 @@ fn each_supported_fstype_routes_to_correct_tool() {
     // For each fstype we expect (a) supports_filesystem() returns
     // the right tool, and (b) the matching flow function actually
     // invokes that tool's binary name.
-    let ext_runner = RecordedRunner::new().queue_raw(0, b"".to_vec(), b"".to_vec());
-    let _ = e2fsck_flow(&ext_runner, "/dev/sda1");
+    let ext_runner = expect_ext(0);
+    let _ = e2fsck_flow(&ext_runner, DEVICE);
     assert_eq!(supports_filesystem("ext4").unwrap(), RepairTool::E2fsck);
     assert!(ext_runner.invoked_binary("e2fsck"));
+    ext_runner.assert_consumed();
 
-    let fat_runner = RecordedRunner::new().queue_raw(0, b"".to_vec(), b"".to_vec());
-    let _ = fat_flow(&fat_runner, "/dev/sda1");
+    let fat_runner = expect_fat(0);
+    let _ = fat_flow(&fat_runner, DEVICE);
     assert_eq!(supports_filesystem("vfat").unwrap(), RepairTool::FsckFat);
     assert!(fat_runner.invoked_binary("fsck.fat"));
+    fat_runner.assert_consumed();
 
-    let f2fs_runner = RecordedRunner::new().queue_raw(0, b"".to_vec(), b"".to_vec());
-    let _ = f2fs_flow(&f2fs_runner, "/dev/sda1");
+    let f2fs_runner = expect_f2fs(0);
+    let _ = f2fs_flow(&f2fs_runner, DEVICE);
     assert_eq!(supports_filesystem("f2fs").unwrap(), RepairTool::FsckF2fs);
     assert!(f2fs_runner.invoked_binary("fsck.f2fs"));
+    f2fs_runner.assert_consumed();
 
-    let xfs_runner = RecordedRunner::new().queue_raw(0, b"".to_vec(), b"".to_vec());
-    let _ = xfs_flow(&xfs_runner, "/dev/sda1");
+    let xfs_runner = expect_xfs(0, b"");
+    let _ = xfs_flow(&xfs_runner, DEVICE);
     assert_eq!(supports_filesystem("xfs").unwrap(), RepairTool::XfsRepair);
     assert!(xfs_runner.invoked_binary("xfs_repair"));
+    xfs_runner.assert_consumed();
 
-    let btrfs_runner = RecordedRunner::new().queue_raw(0, b"".to_vec(), b"".to_vec());
-    let _ = btrfs_flow(&btrfs_runner, "/dev/sda1");
+    let btrfs_runner = expect_btrfs_check(0, b"");
+    let _ = btrfs_flow(&btrfs_runner, DEVICE);
     assert_eq!(
         supports_filesystem("btrfs").unwrap(),
         RepairTool::BtrfsCheck
     );
     assert!(btrfs_runner.invoked_binary("btrfs"));
+    btrfs_runner.assert_consumed();
 }
 
 #[test]
@@ -187,8 +220,8 @@ fn argv_is_passed_as_separate_elements_no_shell() {
     // Spec: "不要通过 shell 拼接命令". The RecordedRunner captures
     // the literal argv; if anyone had shell-concatenated the
     // arguments, the first argv element would contain a space.
-    let runner = RecordedRunner::new().queue_raw(0, b"".to_vec(), b"".to_vec());
-    let _ = e2fsck_flow(&runner, "/dev/sda1").unwrap();
+    let runner = expect_ext(0);
+    let _ = e2fsck_flow(&runner, DEVICE).unwrap();
     let invocations = runner.invocations();
     assert_eq!(invocations[0].binary, "e2fsck");
     for arg in &invocations[0].argv {
@@ -199,89 +232,109 @@ fn argv_is_passed_as_separate_elements_no_shell() {
     }
     // The device path is its own argv element.
     assert!(invocations[0].argv.iter().any(|arg| arg == "/dev/sda1"));
+    runner.assert_consumed();
 }
 
 #[test]
 fn missing_tool_short_circuits_to_tool_missing() {
     // Spec: "工具缺失" must be detected and reported. We must NOT
     // mistake it for an executor crash.
-    let ext_runner = RecordedRunner::new().queue(ToolResult::binary_missing());
-    let ext_flow = e2fsck_flow(&ext_runner, "/dev/sda1").unwrap();
+    let ext_runner = RecordedRunner::new().expect_missing("e2fsck", ["-y", "-C", "0", DEVICE]);
+    let ext_flow = e2fsck_flow(&ext_runner, DEVICE).unwrap();
     assert_eq!(ext_flow.outcome, FlowOutcome::ToolMissing);
     assert!(ext_flow.attempts[0].exit.binary_missing);
+    ext_runner.assert_consumed();
 
-    let fat_runner = RecordedRunner::new().queue(ToolResult::binary_missing());
-    let fat_flow = fat_flow(&fat_runner, "/dev/sda1").unwrap();
+    let fat_runner = RecordedRunner::new().expect_missing("fsck.fat", ["-a", DEVICE]);
+    let fat_flow = fat_flow(&fat_runner, DEVICE).unwrap();
     assert_eq!(fat_flow.outcome, FlowOutcome::ToolMissing);
     assert!(fat_flow.attempts[0].exit.binary_missing);
+    fat_runner.assert_consumed();
 
-    let f2fs_runner = RecordedRunner::new().queue(ToolResult::binary_missing());
-    let f2fs_flow = f2fs_flow(&f2fs_runner, "/dev/sda1").unwrap();
+    let f2fs_runner = RecordedRunner::new().expect_missing("fsck.f2fs", ["-a", DEVICE]);
+    let f2fs_flow = f2fs_flow(&f2fs_runner, DEVICE).unwrap();
     assert_eq!(f2fs_flow.outcome, FlowOutcome::ToolMissing);
     assert!(f2fs_flow.attempts[0].exit.binary_missing);
+    f2fs_runner.assert_consumed();
 
     // xfs_repair: missing tool must NOT escalate to -L fallback.
-    let runner = RecordedRunner::new().queue(ToolResult::binary_missing());
-    let flow_result = xfs_flow(&runner, "/dev/sda1").unwrap();
+    let runner = RecordedRunner::new().expect_missing("xfs_repair", [DEVICE]);
+    let flow_result = xfs_flow(&runner, DEVICE).unwrap();
     assert_eq!(flow_result.outcome, FlowOutcome::ToolMissing);
     assert_eq!(flow_result.attempts.len(), 1);
     assert!(!runner.any_invocation_with_flag("-L"));
+    runner.assert_consumed();
 
     // btrfs: missing tool must NOT escalate to --repair.
-    let runner = RecordedRunner::new().queue(ToolResult::binary_missing());
-    let flow_result = btrfs_flow(&runner, "/dev/sda1").unwrap();
+    let runner = RecordedRunner::new().expect_missing("btrfs", ["check", "--readonly", DEVICE]);
+    let flow_result = btrfs_flow(&runner, DEVICE).unwrap();
     assert_eq!(flow_result.outcome, FlowOutcome::ToolMissing);
     assert_eq!(flow_result.attempts.len(), 1);
     assert!(!runner.any_invocation_with_flag("--repair"));
+    runner.assert_consumed();
 }
 
 #[test]
 fn normal_repair_success_path_reports_only_supported_certainty() {
     // Read/check tools may report Clean on exit 0; modify-mode
     // xfs_repair cannot distinguish a clean filesystem from one it fixed.
-    let runner = RecordedRunner::new().queue_raw(0, b"".to_vec(), b"".to_vec());
+    let runner = expect_ext(0);
     assert_eq!(
-        e2fsck_flow(&runner, "/dev/sda1").unwrap().outcome,
+        e2fsck_flow(&runner, DEVICE).unwrap().outcome,
         FlowOutcome::Clean
     );
-    let runner = RecordedRunner::new().queue_raw(0, b"".to_vec(), b"".to_vec());
+    runner.assert_consumed();
+
+    let runner = expect_fat(0);
     assert_eq!(
-        fat_flow(&runner, "/dev/sda1").unwrap().outcome,
+        fat_flow(&runner, DEVICE).unwrap().outcome,
         FlowOutcome::Clean
     );
-    let runner = RecordedRunner::new().queue_raw(0, b"".to_vec(), b"".to_vec());
+    runner.assert_consumed();
+
+    let runner = expect_f2fs(0);
     assert_eq!(
-        f2fs_flow(&runner, "/dev/sda1").unwrap().outcome,
+        f2fs_flow(&runner, DEVICE).unwrap().outcome,
         FlowOutcome::Clean
     );
-    let runner = RecordedRunner::new().queue_raw(0, b"".to_vec(), b"".to_vec());
+    runner.assert_consumed();
+
+    let runner = expect_xfs(0, b"");
     assert_eq!(
-        xfs_flow(&runner, "/dev/sda1").unwrap().outcome,
+        xfs_flow(&runner, DEVICE).unwrap().outcome,
         FlowOutcome::Repaired
     );
-    let runner = RecordedRunner::new().queue_raw(0, b"".to_vec(), b"".to_vec());
+    runner.assert_consumed();
+
+    let runner = expect_btrfs_check(0, b"");
     assert_eq!(
-        btrfs_flow(&runner, "/dev/sda1").unwrap().outcome,
+        btrfs_flow(&runner, DEVICE).unwrap().outcome,
         FlowOutcome::Clean
     );
+    runner.assert_consumed();
 
     // And "errors corrected" exit codes (1 for e2fsck/fat/f2fs) must
     // produce Repaired.
-    let runner = RecordedRunner::new().queue_raw(1, b"".to_vec(), b"".to_vec());
+    let runner = expect_ext(1);
     assert_eq!(
-        e2fsck_flow(&runner, "/dev/sda1").unwrap().outcome,
+        e2fsck_flow(&runner, DEVICE).unwrap().outcome,
         FlowOutcome::Repaired
     );
-    let runner = RecordedRunner::new().queue_raw(1, b"".to_vec(), b"".to_vec());
+    runner.assert_consumed();
+
+    let runner = expect_fat(1);
     assert_eq!(
-        fat_flow(&runner, "/dev/sda1").unwrap().outcome,
+        fat_flow(&runner, DEVICE).unwrap().outcome,
         FlowOutcome::Repaired
     );
-    let runner = RecordedRunner::new().queue_raw(1, b"".to_vec(), b"".to_vec());
+    runner.assert_consumed();
+
+    let runner = expect_f2fs(1);
     assert_eq!(
-        f2fs_flow(&runner, "/dev/sda1").unwrap().outcome,
+        f2fs_flow(&runner, DEVICE).unwrap().outcome,
         FlowOutcome::Repaired
     );
+    runner.assert_consumed();
 }
 
 #[test]
@@ -290,9 +343,9 @@ fn xfs_normal_failure_with_dirty_log_uses_l_fallback_marked_high_risk() {
     // And: "报告是否使用了 -L".
     // The -L attempt MUST be marked HighRiskFallback.
     let runner = RecordedRunner::new()
-        .queue_raw(2, b"".to_vec(), b"dirty log".to_vec())
-        .queue_raw(0, b"".to_vec(), b"".to_vec());
-    let flow = xfs_flow(&runner, "/dev/sda1").unwrap();
+        .expect_raw("xfs_repair", [DEVICE], 2, b"", b"dirty log")
+        .expect_raw("xfs_repair", ["-L", DEVICE], 0, b"", b"");
+    let flow = xfs_flow(&runner, DEVICE).unwrap();
     assert_eq!(flow.outcome, FlowOutcome::RepairedViaHighRiskFallback);
     assert_eq!(flow.attempts.len(), 2);
     assert!(!flow.attempts[0].high_risk);
@@ -301,27 +354,30 @@ fn xfs_normal_failure_with_dirty_log_uses_l_fallback_marked_high_risk() {
     assert_eq!(flow.attempts[1].kind, AttemptKind::HighRiskFallback);
     assert!(flow.attempts[1].rationale.contains("last-resort"));
     assert!(flow.attempts[1].rationale.contains("log"));
+    runner.assert_consumed();
 }
 
 #[test]
 fn xfs_non_dirty_log_failure_does_not_use_l() {
     // Exit 1 = runtime error. We must NOT escalate to -L for non-
     // dirty-log failures.
-    let runner = RecordedRunner::new().queue_raw(1, b"".to_vec(), b"runtime".to_vec());
-    let flow = xfs_flow(&runner, "/dev/sda1").unwrap();
+    let runner = expect_xfs(1, b"runtime");
+    let flow = xfs_flow(&runner, DEVICE).unwrap();
     assert_eq!(flow.outcome, FlowOutcome::Unrepaired);
     assert!(!runner.any_invocation_with_flag("-L"));
+    runner.assert_consumed();
 }
 
 #[test]
 fn btrfs_readonly_check_success_does_not_run_repair() {
     // Spec: "Btrfs 只读检查成功时不运行 --repair".
-    let runner = RecordedRunner::new().queue_raw(0, b"".to_vec(), b"".to_vec());
-    let flow = btrfs_flow(&runner, "/dev/sda1").unwrap();
+    let runner = expect_btrfs_check(0, b"");
+    let flow = btrfs_flow(&runner, DEVICE).unwrap();
     assert_eq!(flow.outcome, FlowOutcome::Clean);
     assert!(!runner.any_invocation_with_flag("--repair"));
     assert_eq!(flow.attempts.len(), 1);
     assert_eq!(flow.attempts[0].kind, AttemptKind::ReadonlyCheck);
+    runner.assert_consumed();
 }
 
 #[test]
@@ -329,10 +385,10 @@ fn btrfs_readonly_check_failure_runs_repair_then_rechecks() {
     // Spec: "Btrfs 检查失败后才运行 --repair" and "repair 后再次
     // 运行只读检查".
     let runner = RecordedRunner::new()
-        .queue_raw(1, b"errors".to_vec(), b"".to_vec())
-        .queue_raw(0, b"repaired".to_vec(), b"".to_vec())
-        .queue_raw(0, b"clean".to_vec(), b"".to_vec());
-    let flow = btrfs_flow(&runner, "/dev/sda1").unwrap();
+        .expect_raw("btrfs", ["check", "--readonly", DEVICE], 1, b"errors", b"")
+        .expect_raw("btrfs", ["check", "--repair", DEVICE], 0, b"repaired", b"")
+        .expect_raw("btrfs", ["check", "--readonly", DEVICE], 0, b"clean", b"");
+    let flow = btrfs_flow(&runner, DEVICE).unwrap();
     assert_eq!(flow.outcome, FlowOutcome::RepairedViaHighRiskFallback);
     assert_eq!(flow.attempts.len(), 3);
     let kinds: Vec<_> = flow.attempts.iter().map(|a| a.kind).collect();
@@ -344,6 +400,7 @@ fn btrfs_readonly_check_failure_runs_repair_then_rechecks() {
             AttemptKind::VerificationCheck
         ]
     );
+    runner.assert_consumed();
 }
 
 #[test]
@@ -352,27 +409,29 @@ fn high_risk_fallback_is_explicitly_marked_in_attempts() {
     // btrfs --repair attempts MUST carry high_risk=true and
     // kind=HighRiskFallback.
     let runner = RecordedRunner::new()
-        .queue_raw(2, b"".to_vec(), b"".to_vec())
-        .queue_raw(0, b"".to_vec(), b"".to_vec());
-    let xfs_flow_result = xfs_flow(&runner, "/dev/sda1").unwrap();
+        .expect_raw("xfs_repair", [DEVICE], 2, b"", b"")
+        .expect_raw("xfs_repair", ["-L", DEVICE], 0, b"", b"");
+    let xfs_flow_result = xfs_flow(&runner, DEVICE).unwrap();
     let high_risk = xfs_flow_result
         .attempts
         .iter()
         .find(|a| a.high_risk)
         .expect("xfs -L attempt must be high-risk");
     assert_eq!(high_risk.kind, AttemptKind::HighRiskFallback);
+    runner.assert_consumed();
 
     let runner = RecordedRunner::new()
-        .queue_raw(1, b"".to_vec(), b"".to_vec())
-        .queue_raw(0, b"".to_vec(), b"".to_vec())
-        .queue_raw(0, b"".to_vec(), b"".to_vec());
-    let btrfs_flow_result = btrfs_flow(&runner, "/dev/sda1").unwrap();
+        .expect_raw("btrfs", ["check", "--readonly", DEVICE], 1, b"", b"")
+        .expect_raw("btrfs", ["check", "--repair", DEVICE], 0, b"", b"")
+        .expect_raw("btrfs", ["check", "--readonly", DEVICE], 0, b"", b"");
+    let btrfs_flow_result = btrfs_flow(&runner, DEVICE).unwrap();
     let high_risk = btrfs_flow_result
         .attempts
         .iter()
         .find(|a| a.high_risk)
         .expect("btrfs --repair attempt must be high-risk");
     assert_eq!(high_risk.kind, AttemptKind::HighRiskFallback);
+    runner.assert_consumed();
 }
 
 #[test]
@@ -391,8 +450,8 @@ fn e2fsck_bitmask_exit_codes_are_interpreted_correctly() {
         (5, FlowOutcome::Unrepaired, &["e2fsck-code-5"]),
     ];
     for (exit_code, expected_outcome, label_substrings) in cases {
-        let runner = RecordedRunner::new().queue_raw(*exit_code, b"".to_vec(), b"".to_vec());
-        let flow = e2fsck_flow(&runner, "/dev/sda1").unwrap();
+        let runner = expect_ext(*exit_code);
+        let flow = e2fsck_flow(&runner, DEVICE).unwrap();
         assert_eq!(
             flow.outcome, *expected_outcome,
             "exit {exit_code}: expected {expected_outcome:?}, got {:?}",
@@ -405,6 +464,7 @@ fn e2fsck_bitmask_exit_codes_are_interpreted_correctly() {
                 "exit {exit_code}: label {label:?} missing {substring:?}"
             );
         }
+        runner.assert_consumed();
     }
 }
 
@@ -412,18 +472,23 @@ fn e2fsck_bitmask_exit_codes_are_interpreted_correctly() {
 fn output_truncation_is_recorded_on_attempt() {
     // Spec: "输出截断". The runner flags truncation; the attempt
     // MUST surface it verbatim.
-    let runner = RecordedRunner::new().queue(ToolResult {
-        binary_missing: false,
-        timed_out: false,
-        exit_code: 0,
-        stdout: b"clean".to_vec(),
-        stderr: b"long error".to_vec(),
-        stdout_truncated: true,
-        stderr_truncated: false,
-    });
-    let flow = e2fsck_flow(&runner, "/dev/sda1").unwrap();
+    let runner = RecordedRunner::new().expect(
+        "e2fsck",
+        ["-y", "-C", "0", DEVICE],
+        ToolResult {
+            binary_missing: false,
+            timed_out: false,
+            exit_code: 0,
+            stdout: b"clean".to_vec(),
+            stderr: b"long error".to_vec(),
+            stdout_truncated: true,
+            stderr_truncated: false,
+        },
+    );
+    let flow = e2fsck_flow(&runner, DEVICE).unwrap();
     assert!(flow.attempts[0].stdout_truncated);
     assert!(!flow.attempts[0].stderr_truncated);
+    runner.assert_consumed();
 }
 
 // ===========================================================================

@@ -94,15 +94,35 @@ fn provider_execution_and_verification_have_distinct_contracts() {
     };
 
     let execute_runner = RecordedTargetRunner::new()
-        .queue_raw(0, Vec::new(), Vec::new())
-        .queue_raw(0, Vec::new(), Vec::new());
+        .expect_raw(
+            "limine-install",
+            std::iter::empty::<&str>(),
+            0,
+            Vec::new(),
+            Vec::new(),
+        )
+        .expect_raw(
+            "limine-update",
+            std::iter::empty::<&str>(),
+            0,
+            Vec::new(),
+            Vec::new(),
+        );
     let execution = LimineProvider.execute(&ctx, &execute_runner);
     assert!(execution.failure.is_none());
     assert_eq!(execution.command_results.len(), 2);
+    execute_runner.assert_consumed();
 
-    let verify_runner = RecordedTargetRunner::new().queue_raw(0, Vec::new(), Vec::new());
+    let verify_runner = RecordedTargetRunner::new().expect_raw(
+        "limine-list",
+        std::iter::empty::<&str>(),
+        0,
+        Vec::new(),
+        Vec::new(),
+    );
     let verification = LimineProvider.verify(&ctx, &verify_runner);
     assert!(verification.passed);
     assert_eq!(verification.command_results.len(), 1);
     assert_eq!(verification.verification.checks, ["LIMINE_LIST"]);
+    verify_runner.assert_consumed();
 }

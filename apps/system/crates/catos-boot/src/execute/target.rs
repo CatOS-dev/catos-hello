@@ -25,6 +25,7 @@
 //! NOT need root, loop devices, or the tools installed.
 
 use std::cell::RefCell;
+use std::collections::VecDeque;
 use std::ffi::{CStr, CString};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::process::CommandExt;
@@ -298,7 +299,14 @@ fn target_binary_path(target_root: &Path, binary: &str) -> Option<String> {
 #[derive(Debug, Default, Clone)]
 pub struct RecordedTargetRunner {
     invocations: RefCell<Vec<TargetRequest>>,
-    queued: RefCell<Vec<TargetCommandResult>>,
+    expected: RefCell<VecDeque<ExpectedTargetInvocation>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ExpectedTargetInvocation {
+    binary: String,
+    argv: Vec<String>,
+    result: TargetCommandResult,
 }
 
 impl RecordedTargetRunner {
@@ -306,21 +314,35 @@ impl RecordedTargetRunner {
         Self::default()
     }
 
-    /// Queue the next result. Builder-style: returns `self` so tests
-    /// can chain.
-    pub fn queue(self, result: TargetCommandResult) -> Self {
-        self.queued.borrow_mut().push(result);
+    /// Declare one exact target-side binary/argv invocation and its
+    /// result. Description text remains report metadata and is stamped
+    /// from the observed request.
+    pub fn expect(
+        self,
+        binary: &str,
+        argv: impl IntoIterator<Item = impl Into<String>>,
+        result: TargetCommandResult,
+    ) -> Self {
+        self.expected
+            .borrow_mut()
+            .push_back(ExpectedTargetInvocation {
+                binary: binary.to_string(),
+                argv: argv.into_iter().map(Into::into).collect(),
+                result,
+            });
         self
     }
 
-    /// Queue a canned "exit code, stdout, stderr" result.
-    pub fn queue_raw(
+    /// Declare one exact invocation with a canned result.
+    pub fn expect_raw(
         self,
+        binary: &str,
+        argv: impl IntoIterator<Item = impl Into<String>>,
         exit_code: i32,
         stdout: impl Into<Vec<u8>>,
         stderr: impl Into<Vec<u8>>,
     ) -> Self {
-        self.queue(TargetCommandResult {
+        self.expect(binary, argv, TargetCommandResult {
             command: TargetCommand {
                 binary: String::new(),
                 argv: Vec::new(),
@@ -336,8 +358,12 @@ impl RecordedTargetRunner {
         })
     }
 
-    pub fn queue_missing(self) -> Self {
-        self.queue(TargetCommandResult {
+    pub fn expect_missing(
+        self,
+        binary: &str,
+        argv: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Self {
+        self.expect(binary, argv, TargetCommandResult {
             command: TargetCommand {
                 binary: String::new(),
                 argv: Vec::new(),
@@ -363,31 +389,38 @@ impl RecordedTargetRunner {
             .iter()
             .any(|inv| inv.binary == name)
     }
+
+    pub fn assert_consumed(&self) {
+        let expected = self.expected.borrow();
+        assert!(
+            expected.is_empty(),
+            "unconsumed target runner calls: {:?}",
+            *expected
+        );
+    }
 }
 
 impl TargetRunner for RecordedTargetRunner {
     fn invoke(&self, request: &TargetRequest) -> TargetCommandResult {
         self.invocations.borrow_mut().push(request.clone());
-        let mut queue = self.queued.borrow_mut();
-        if queue.is_empty() {
-            TargetCommandResult {
-                command: request.into(),
-                binary_missing: true,
-                timed_out: false,
-                exit_code: -1,
-                stdout: Vec::new(),
-                stderr: b"unexpected target command: no queued result".to_vec(),
-                stdout_truncated: false,
-                stderr_truncated: false,
-            }
-        } else {
-            let mut result = queue.remove(0);
-            // Always stamp the recorded result with the request we
-            // actually received, so test assertions on
-            // `result.command.argv` match what the orchestrator sent.
-            result.command = request.into();
-            result
-        }
+        let expected = self
+            .expected
+            .borrow_mut()
+            .pop_front()
+            .unwrap_or_else(|| {
+                panic!(
+                    "unconfigured target command: {} {:?}",
+                    request.binary, request.argv
+                )
+            });
+        assert_eq!(
+            (request.binary.as_str(), request.argv.as_slice()),
+            (expected.binary.as_str(), expected.argv.as_slice()),
+            "target command binary or argv changed"
+        );
+        let mut result = expected.result;
+        result.command = request.into();
+        result
     }
 }
 

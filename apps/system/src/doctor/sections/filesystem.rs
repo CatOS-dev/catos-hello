@@ -7,7 +7,7 @@ use crate::doctor::model::{
     DoctorReport, DoctorSection, DoctorSectionId, DoctorSectionStatus, DoctorSeverity,
 };
 use crate::fs::command::FsCommandRunner;
-use crate::fs::diagnose::{check_only_for, ReadonlyOutcome, ReadonlyResult};
+use crate::fs::diagnose::{btrfs, check_only_for, ReadonlyOutcome, ReadonlyResult};
 use crate::target::Evidence;
 
 use super::{is_device_mounted_rw, push_evidence, set_section, MountState};
@@ -92,7 +92,15 @@ pub(in crate::doctor) fn run_storage_section(
         && target.root_fstype.is_some()
         && target.root_uuid.is_some()
         && (target.root_fstype.as_deref() != Some("btrfs") || target.root_subvol.is_some());
-    let section = set_section(sections, id, if complete { DoctorSectionStatus::Healthy } else { DoctorSectionStatus::Unknown });
+    let section = set_section(
+        sections,
+        id,
+        if complete {
+            DoctorSectionStatus::Healthy
+        } else {
+            DoctorSectionStatus::Unknown
+        },
+    );
     section.evidence.push(Evidence::new(
         "ROOT_DEVICE",
         "doctor::storage",
@@ -108,30 +116,46 @@ pub(in crate::doctor) fn run_storage_section(
     section.evidence.push(Evidence::new(
         "ROOT_FILESYSTEM",
         "doctor::storage",
-        format!("root filesystem: {}", target.root_fstype.as_deref().unwrap_or("<unknown>")),
+        format!(
+            "root filesystem: {}",
+            target.root_fstype.as_deref().unwrap_or("<unknown>")
+        ),
     ));
     section.evidence.push(Evidence::new(
         "ROOT_UUID",
         "doctor::storage",
-        format!("root UUID: {}", target.root_uuid.as_deref().unwrap_or("<unknown>")),
+        format!(
+            "root UUID: {}",
+            target.root_uuid.as_deref().unwrap_or("<unknown>")
+        ),
     ));
     section.evidence.push(Evidence::new(
         "ROOT_SUBVOLUME",
         "doctor::storage",
-        format!("root subvolume: {}", target.root_subvol.as_deref().unwrap_or("<unknown>")),
+        format!(
+            "root subvolume: {}",
+            target.root_subvol.as_deref().unwrap_or("<unknown>")
+        ),
     ));
     section.evidence.push(Evidence::new(
         "BTRFS_FSID",
         "doctor::storage",
         format!(
             "Btrfs filesystem ID: {}",
-            context.candidate.filesystem_id.as_deref().unwrap_or("<unknown>")
+            context
+                .candidate
+                .filesystem_id
+                .as_deref()
+                .unwrap_or("<unknown>")
         ),
     ));
     section.evidence.push(Evidence::new(
         "TARGET_INVENTORY",
         "doctor::context",
-        format!("shared inventory contains {} block-device records", context.devices.len()),
+        format!(
+            "shared inventory contains {} block-device records",
+            context.devices.len()
+        ),
     ));
     match context.boot_layout.as_ref() {
         Ok(crate::mount::model::BootMountLayout::SeparateBootAndEsp { boot_device, .. }) => {
@@ -154,7 +178,11 @@ pub(in crate::doctor) fn run_storage_section(
                 "doctor::storage",
                 format!(
                     "/boot is carried by root device: {}",
-                    target.root_device.as_ref().map(|path| path.display().to_string()).unwrap_or_else(|| "<unknown>".to_string())
+                    target
+                        .root_device
+                        .as_ref()
+                        .map(|path| path.display().to_string())
+                        .unwrap_or_else(|| "<unknown>".to_string())
                 ),
             ));
         }
@@ -190,7 +218,11 @@ pub(in crate::doctor) fn run_storage_section(
             ));
         }
         Err(error) => {
-            report.limitations.push(DoctorLimitation::new(id, "ESP_FACTS_INCOMPLETE", error.clone()));
+            report.limitations.push(DoctorLimitation::new(
+                id,
+                "ESP_FACTS_INCOMPLETE",
+                error.clone(),
+            ));
         }
     }
     if !complete || !matches!(context.esp, Ok(Some(_))) {
@@ -220,7 +252,9 @@ pub(in crate::doctor) fn run_filesystem_section<R: FsCommandRunner + ?Sized>(
         ));
         return Ok(());
     }
-    let target = &context.expect("checked selected Doctor target context").target;
+    let target = &context
+        .expect("checked selected Doctor target context")
+        .target;
     let fstype = match target.root_fstype.as_deref() {
         Some(fstype) => fstype,
         None => {
@@ -256,7 +290,11 @@ pub(in crate::doctor) fn run_filesystem_section<R: FsCommandRunner + ?Sized>(
         Some(Ok(state)) => state,
         Some(Err(error)) => {
             set_section(sections, id, DoctorSectionStatus::Unknown);
-            report.limitations.push(DoctorLimitation::new(id, "MOUNT_STATE_UNAVAILABLE", format!("cannot determine whether target is mounted read-write: {error}")));
+            report.limitations.push(DoctorLimitation::new(
+                id,
+                "MOUNT_STATE_UNAVAILABLE",
+                format!("cannot determine whether target is mounted read-write: {error}"),
+            ));
             return Ok(());
         }
         None => MountState::NotMounted,
@@ -279,7 +317,12 @@ pub(in crate::doctor) fn run_filesystem_section<R: FsCommandRunner + ?Sized>(
         return Ok(());
     }
 
-    let result = match check_only_for(fstype, runner, &device) {
+    let check = if fstype == "btrfs" && mount_state == MountState::MountedRo {
+        btrfs::check_mounted_readonly(runner, &device).map(Some)
+    } else {
+        check_only_for(fstype, runner, &device)
+    };
+    let result = match check {
         Ok(Some(result)) => result,
         Ok(None) => {
             set_section(sections, id, DoctorSectionStatus::Skipped);

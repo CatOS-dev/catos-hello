@@ -4,7 +4,7 @@
 //! the former mixed filesystem flow: diagnosis is read-only, planning is pure data,
 //! and execution requires an explicit typed plan.
 
-use catos_system::fs::command::{RecordedRunner, ToolResult};
+use catos_system::fs::command::RecordedRunner;
 use catos_system::fs::diagnose::{check_only_for, BtrfsTopology, ReadonlyOutcome};
 use catos_system::fs::execute::{execute_repair_plan, FlowOutcome};
 use catos_system::fs::model::RepairTool;
@@ -64,7 +64,13 @@ fn execution_requires_and_follows_the_typed_plan() {
     let plan = build_repair_plan("ext4", "/dev/sda1", None)
         .unwrap()
         .unwrap();
-    let runner = RecordedRunner::new().queue_raw(0, Vec::new(), Vec::new());
+    let runner = RecordedRunner::new().expect_raw(
+        "e2fsck",
+        ["-y", "-C", "0", "/dev/sda1"],
+        0,
+        Vec::new(),
+        Vec::new(),
+    );
 
     let authorization = authorize(&plan, "ext4");
     let result = execute_repair_plan(&runner, &plan, &authorization)
@@ -75,11 +81,18 @@ fn execution_requires_and_follows_the_typed_plan() {
     assert_eq!(calls.len(), 1);
     assert_eq!(calls[0].binary, "e2fsck");
     assert_eq!(calls[0].argv.last().map(String::as_str), Some("/dev/sda1"));
+    runner.assert_consumed();
 }
 
 #[test]
 fn readonly_diagnosis_cannot_escalate_to_repair() {
-    let runner = RecordedRunner::new().queue_raw(1, b"errors".to_vec(), Vec::new());
+    let runner = RecordedRunner::new().expect_raw(
+        "btrfs",
+        ["check", "--readonly", "/dev/sda1"],
+        1,
+        b"errors".to_vec(),
+        Vec::new(),
+    );
 
     let result = check_only_for("btrfs", &runner, "/dev/sda1")
         .expect("read-only diagnosis must run")
@@ -88,6 +101,7 @@ fn readonly_diagnosis_cannot_escalate_to_repair() {
     assert_eq!(result.outcome, ReadonlyOutcome::CorruptionDetected);
     assert!(!runner.any_invocation_with_flag("--repair"));
     assert_eq!(runner.invocation_count(), 1);
+    runner.assert_consumed();
 }
 
 #[test]
@@ -106,7 +120,7 @@ fn missing_tool_is_reported_by_execution_not_planning() {
     let plan = build_repair_plan("xfs", "/dev/sda1", None)
         .unwrap()
         .unwrap();
-    let runner = RecordedRunner::new().queue(ToolResult::binary_missing());
+    let runner = RecordedRunner::new().expect_missing("xfs_repair", ["/dev/sda1"]);
 
     let authorization = authorize(&plan, "xfs");
     let result = execute_repair_plan(&runner, &plan, &authorization).unwrap();
@@ -114,6 +128,7 @@ fn missing_tool_is_reported_by_execution_not_planning() {
     assert_eq!(result.outcome, FlowOutcome::ToolMissing);
     assert_eq!(runner.invocation_count(), 1);
     assert!(!runner.any_invocation_with_flag("-L"));
+    runner.assert_consumed();
 }
 
 #[test]
@@ -132,4 +147,5 @@ fn mismatched_authorization_is_refused_before_runner_invocation() {
 
     assert!(error.message.contains("authorization"));
     assert_eq!(runner.invocation_count(), 0);
+    runner.assert_consumed();
 }

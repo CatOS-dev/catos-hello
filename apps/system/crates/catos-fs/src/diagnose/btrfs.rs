@@ -82,10 +82,32 @@ pub fn check<R: FsCommandRunner + ?Sized>(
     runner: &R,
     device: &str,
 ) -> Result<ReadonlyResult, crate::command::FsRunnerError> {
-    let invocation = FsCommandInvocation::new(
-        RepairTool::BtrfsCheck.binary_name(),
-        vec!["check".into(), "--readonly".into(), device.into()],
-    );
+    check_with_mount_policy(runner, device, false)
+}
+
+/// Run the same non-mutating check while the caller holds the filesystem on a
+/// controlled read-only mount. `btrfs check` otherwise refuses any mounted
+/// device and exits non-zero, which must not be misclassified as corruption.
+/// `--force` only bypasses that mounted-device guard; `--readonly` remains in
+/// effect and Doctor never uses this path for a read-write mount.
+pub fn check_mounted_readonly<R: FsCommandRunner + ?Sized>(
+    runner: &R,
+    device: &str,
+) -> Result<ReadonlyResult, crate::command::FsRunnerError> {
+    check_with_mount_policy(runner, device, true)
+}
+
+fn check_with_mount_policy<R: FsCommandRunner + ?Sized>(
+    runner: &R,
+    device: &str,
+    allow_readonly_mount: bool,
+) -> Result<ReadonlyResult, crate::command::FsRunnerError> {
+    let mut argv = vec!["check".into(), "--readonly".into()];
+    if allow_readonly_mount {
+        argv.push("--force".into());
+    }
+    argv.push(device.into());
+    let invocation = FsCommandInvocation::new(RepairTool::BtrfsCheck.binary_name(), argv);
     let result = runner.invoke(&invocation)?;
     let checksum_failed = reports_metadata_checksum_failure(&result);
     let mut interp = decode_btrfs_exit(&result);

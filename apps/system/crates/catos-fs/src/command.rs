@@ -5,6 +5,7 @@
 //! `fs::execute::runner`.
 
 use std::cell::RefCell;
+use std::collections::VecDeque;
 use std::time::Duration;
 
 use crate::model::ExitInterpretation;
@@ -163,7 +164,7 @@ pub trait FsCommandRunner: std::fmt::Debug {
 #[derive(Debug, Default, Clone)]
 pub struct RecordedRunner {
     invocations: RefCell<Vec<RecordedInvocation>>,
-    queued_results: RefCell<Vec<ToolResult>>,
+    expected: RefCell<VecDeque<ExpectedInvocation>>,
 }
 
 /// One recorded invocation, for inspection by tests.
@@ -173,40 +174,69 @@ pub struct RecordedInvocation {
     pub argv: Vec<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ExpectedInvocation {
+    invocation: RecordedInvocation,
+    result: ToolResult,
+}
+
 impl RecordedRunner {
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Queue the next result. Multiple calls queue in order; the
-    /// runner pops one per `invoke`. Builder-style: returns `self`
-    /// so tests can chain.
-    pub fn queue(self, result: ToolResult) -> Self {
-        self.queued_results.borrow_mut().push(result);
+    /// Declare one exact external call and the result it must return.
+    /// Calls are consumed in FIFO order. An invocation that was not
+    /// declared, or whose binary/argv differs, is a runner error.
+    pub fn expect(
+        self,
+        binary: &str,
+        argv: impl IntoIterator<Item = impl Into<String>>,
+        result: ToolResult,
+    ) -> Self {
+        self.expected.borrow_mut().push_back(ExpectedInvocation {
+            invocation: RecordedInvocation {
+                binary: binary.to_string(),
+                argv: argv.into_iter().map(Into::into).collect(),
+            },
+            result,
+        });
         self
     }
 
-    /// Convenience: queue a result with explicit exit/stdout/stderr.
-    pub fn queue_raw(
+    /// Convenience: declare one exact call with explicit
+    /// exit/stdout/stderr.
+    pub fn expect_raw(
         self,
+        binary: &str,
+        argv: impl IntoIterator<Item = impl Into<String>>,
         exit_code: i32,
         stdout: impl Into<Vec<u8>>,
         stderr: impl Into<Vec<u8>>,
     ) -> Self {
-        self.queue(ToolResult {
-            binary_missing: false,
-            timed_out: false,
-            exit_code,
-            stdout: stdout.into(),
-            stderr: stderr.into(),
-            stdout_truncated: false,
-            stderr_truncated: false,
-        })
+        self.expect(
+            binary,
+            argv,
+            ToolResult {
+                binary_missing: false,
+                timed_out: false,
+                exit_code,
+                stdout: stdout.into(),
+                stderr: stderr.into(),
+                stdout_truncated: false,
+                stderr_truncated: false,
+            },
+        )
     }
 
-    /// Convenience: queue a binary-missing result.
-    pub fn queue_missing(self) -> Self {
-        self.queue(ToolResult::binary_missing())
+    /// Convenience: declare one exact call whose trusted binary is
+    /// unavailable.
+    pub fn expect_missing(
+        self,
+        binary: &str,
+        argv: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Self {
+        self.expect(binary, argv, ToolResult::binary_missing())
     }
 
     /// All invocations the orchestrator made, in order. Clones the
@@ -240,22 +270,50 @@ impl RecordedRunner {
     pub fn any_invocation_with_argv<F: Fn(&str) -> bool>(&self, predicate: F) -> bool {
         self.any_invocation(|inv| inv.argv.iter().any(|arg| predicate(arg)))
     }
+
+    /// Assert that every declared external call was consumed. Tests
+    /// must call this after exercising the flow so early returns cannot
+    /// silently leave expected work unexecuted.
+    pub fn assert_consumed(&self) {
+        let expected = self.expected.borrow();
+        assert!(
+            expected.is_empty(),
+            "unconsumed filesystem runner calls: {:?}",
+            *expected
+        );
+    }
 }
 
 impl FsCommandRunner for RecordedRunner {
     fn invoke(&self, invocation: &FsCommandInvocation) -> Result<ToolResult, FsRunnerError> {
-        self.invocations.borrow_mut().push(RecordedInvocation {
+        let actual = RecordedInvocation {
             binary: invocation.binary.clone(),
             argv: invocation.argv.clone(),
-        });
-        let mut queue = self.queued_results.borrow_mut();
-        Ok(if queue.is_empty() {
-            // Default to a clean success. Tests that forget to queue
-            // enough results fail on their own assertions, not here.
-            ToolResult::success_empty()
-        } else {
-            queue.remove(0)
-        })
+        };
+        self.invocations.borrow_mut().push(actual.clone());
+        let expected = self
+            .expected
+            .borrow_mut()
+            .pop_front()
+            .ok_or_else(|| FsRunnerError {
+                message: format!(
+                    "unconfigured external call: {} {}",
+                    actual.binary,
+                    actual.argv.join(" ")
+                ),
+            })?;
+        if expected.invocation != actual {
+            return Err(FsRunnerError {
+                message: format!(
+                    "external call mismatch: expected {} {:?}, observed {} {:?}",
+                    expected.invocation.binary,
+                    expected.invocation.argv,
+                    actual.binary,
+                    actual.argv
+                ),
+            });
+        }
+        Ok(expected.result)
     }
 }
 
@@ -330,5 +388,38 @@ impl FsCommandRunner for TrustedRunner {
             stdout_truncated: output.stdout_truncated,
             stderr_truncated: output.stderr_truncated,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn recorded_runner_rejects_unconfigured_external_call() {
+        let runner = RecordedRunner::new();
+        let error = runner
+            .invoke(&FsCommandInvocation::new("e2fsck", vec!["-n".into()]))
+            .unwrap_err();
+        assert!(error.message.contains("unconfigured external call"));
+    }
+
+    #[test]
+    fn recorded_runner_rejects_binary_or_argv_mismatch() {
+        let runner = RecordedRunner::new().expect_raw("e2fsck", ["-n", "/dev/vda1"], 0, b"", b"");
+        let error = runner
+            .invoke(&FsCommandInvocation::new(
+                "e2fsck",
+                vec!["-y".into(), "/dev/vda1".into()],
+            ))
+            .unwrap_err();
+        assert!(error.message.contains("external call mismatch"));
+    }
+
+    #[test]
+    #[should_panic(expected = "unconsumed filesystem runner calls")]
+    fn recorded_runner_rejects_unconsumed_expectations() {
+        let runner = RecordedRunner::new().expect_raw("e2fsck", ["-n", "/dev/vda1"], 0, b"", b"");
+        runner.assert_consumed();
     }
 }

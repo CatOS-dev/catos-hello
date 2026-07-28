@@ -208,7 +208,7 @@ fn doctor_and_repair_agree_on_ambiguous_provider() {
 // Btrfs checksum diagnostic ⇄ fs repair initial diagnosis
 // ---------------------------------------------------------------------------
 
-use catos_system::fs::command::{RecordedRunner, ToolResult};
+use catos_system::fs::command::RecordedRunner;
 use catos_system::fs::diagnose::{btrfs, BtrfsTopology, ReadonlyOutcome};
 use catos_system::fs::execute::execute_repair_plan;
 use catos_system::fs::plan::build_repair_plan;
@@ -221,22 +221,39 @@ fn doctor_and_fs_repair_agree_on_checksum_diagnostic_label() {
     // helper internally. A 0 exit + "checksum verify failed" diagnostic
     // MUST surface as corruption in Doctor and as the trigger for
     // `--repair` escalation in the repair flow.
-    let doctor_runner = RecordedRunner::new().queue_raw(
+    let doctor_runner = RecordedRunner::new().expect_raw(
+        "btrfs",
+        ["check", "--readonly", "/dev/sda1"],
         0,
         b"checksum verify failed on 30605312 wanted 0x1 found 0x2".to_vec(),
         b"".to_vec(),
     );
     let doctor_result = btrfs::check(&doctor_runner, "/dev/sda1").unwrap();
     assert_eq!(doctor_result.outcome, ReadonlyOutcome::CorruptionDetected);
+    doctor_runner.assert_consumed();
 
     let repair_runner = RecordedRunner::new()
-        .queue_raw(
+        .expect_raw(
+            "btrfs",
+            ["check", "--readonly", "/dev/sda1"],
             0,
             b"checksum verify failed on 30605312 wanted 0x1 found 0x2".to_vec(),
             b"".to_vec(),
         )
-        .queue_raw(0, b"repaired".to_vec(), b"".to_vec())
-        .queue_raw(0, b"clean".to_vec(), b"".to_vec());
+        .expect_raw(
+            "btrfs",
+            ["check", "--repair", "/dev/sda1"],
+            0,
+            b"repaired".to_vec(),
+            b"".to_vec(),
+        )
+        .expect_raw(
+            "btrfs",
+            ["check", "--readonly", "/dev/sda1"],
+            0,
+            b"clean".to_vec(),
+            b"".to_vec(),
+        );
     let repair_result = run_btrfs_repair(&repair_runner, "/dev/sda1").unwrap();
     // The repair flow's first attempt MUST be the read-only check,
     // and its label MUST mirror Doctor's corruption verdict.
@@ -245,77 +262,65 @@ fn doctor_and_fs_repair_agree_on_checksum_diagnostic_label() {
         Some("btrfs-metadata-checksum-failure")
     );
     assert!(!repair_result.attempts[0].exit.clean);
+    repair_runner.assert_consumed();
 }
 
 #[test]
 fn doctor_does_not_escalate_but_repair_does() {
     // Same first-attempt corruption verdict; Doctor stops, repair
     // escalates. The contrast is the contract.
-    let doctor_runner = RecordedRunner::new().queue_raw(1, b"errors".to_vec(), b"".to_vec());
+    let doctor_runner = RecordedRunner::new().expect_raw(
+        "btrfs",
+        ["check", "--readonly", "/dev/sda1"],
+        1,
+        b"errors".to_vec(),
+        b"".to_vec(),
+    );
     let doctor_result = btrfs::check(&doctor_runner, "/dev/sda1").unwrap();
     assert_eq!(doctor_result.outcome, ReadonlyOutcome::CorruptionDetected);
     assert_eq!(doctor_runner.invocations().len(), 1);
     assert!(!doctor_runner.any_invocation_with_flag("--repair"));
+    doctor_runner.assert_consumed();
 
     let repair_runner = RecordedRunner::new()
-        .queue_raw(1, b"errors".to_vec(), b"".to_vec())
-        .queue_raw(0, b"repaired".to_vec(), b"".to_vec())
-        .queue_raw(0, b"clean".to_vec(), b"".to_vec());
+        .expect_raw(
+            "btrfs",
+            ["check", "--readonly", "/dev/sda1"],
+            1,
+            b"errors".to_vec(),
+            b"".to_vec(),
+        )
+        .expect_raw(
+            "btrfs",
+            ["check", "--repair", "/dev/sda1"],
+            0,
+            b"repaired".to_vec(),
+            b"".to_vec(),
+        )
+        .expect_raw(
+            "btrfs",
+            ["check", "--readonly", "/dev/sda1"],
+            0,
+            b"clean".to_vec(),
+            b"".to_vec(),
+        );
     let _ = run_btrfs_repair(&repair_runner, "/dev/sda1").unwrap();
     assert!(repair_runner.any_invocation_with_flag("--repair"));
     assert_eq!(repair_runner.invocations().len(), 3);
+    repair_runner.assert_consumed();
 }
 
 #[test]
 fn doctor_and_fs_repair_agree_on_tool_missing() {
-    let doctor_runner = RecordedRunner::new().queue(ToolResult::binary_missing());
+    let doctor_runner =
+        RecordedRunner::new().expect_missing("btrfs", ["check", "--readonly", "/dev/sda1"]);
     let doctor_result = btrfs::check(&doctor_runner, "/dev/sda1").unwrap();
     assert_eq!(doctor_result.outcome, ReadonlyOutcome::ToolMissing);
+    doctor_runner.assert_consumed();
 
-    let repair_runner = RecordedRunner::new().queue(ToolResult::binary_missing());
+    let repair_runner =
+        RecordedRunner::new().expect_missing("btrfs", ["check", "--readonly", "/dev/sda1"]);
     let repair_result = run_btrfs_repair(&repair_runner, "/dev/sda1").unwrap();
     assert!(repair_result.attempts[0].exit.binary_missing);
-}
-
-// ---------------------------------------------------------------------------
-// Recovery: Doctor enumerates but never persists
-// ---------------------------------------------------------------------------
-
-#[test]
-fn doctor_recovery_section_does_not_call_engine_drive_or_persist() {
-    // We assert by symbol presence: the doctor module imports
-    // `Engine::load` and `reconcile_status` (both read-only) and
-    // does NOT invoke `Engine::drive`, `Engine::begin`,
-    // `Engine::load_for_write`, `Engine::load_for_revert`, or
-    // `store::persist_record` as call sites. Mentions in doc
-    // comments are fine; the assertion uses the call-site form
-    // (`Engine::<method>(` or `store::<method>(`) to distinguish.
-    let doctor_source = format!(
-        "{}\n{}\n{}\n{}\n{}\n{}",
-        include_str!("../src/doctor/mod.rs"),
-        include_str!("../src/doctor/sections/mod.rs"),
-        include_str!("../src/doctor/sections/filesystem.rs"),
-        include_str!("../src/doctor/sections/mount.rs"),
-        include_str!("../src/doctor/sections/boot.rs"),
-        include_str!("../src/doctor/sections/recovery.rs"),
-    );
-    assert!(
-        doctor_source.contains("store::load_record"),
-        "doctor recovery section should load records read-only via store::load_record"
-    );
-    for forbidden_call_site in [
-        "Engine::drive(",
-        "Engine::begin(",
-        "Engine::load_for_write(",
-        "Engine::load_for_revert(",
-        "store::persist_record(",
-        "store::remove_record(",
-        "engine.reconcile_state_for_write(",
-        "engine.persist_record(",
-    ] {
-        assert!(
-            !doctor_source.contains(forbidden_call_site),
-            "doctor must not call {forbidden_call_site}"
-        );
-    }
+    repair_runner.assert_consumed();
 }

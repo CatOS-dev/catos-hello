@@ -215,10 +215,8 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires root and the trusted /run/catos-system mount namespace"]
     fn empty_session_cleanup_never_recurses() {
-        if unsafe { libc::geteuid() } != 0 {
-            return;
-        }
         catos_mount::execute::secure_dir::validate_trusted_root_chain().unwrap();
         let path = scratch_path("empty");
         std::fs::create_dir(&path).unwrap();
@@ -227,10 +225,8 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires root and the trusted /run/catos-system mount namespace"]
     fn nonempty_session_cleanup_is_refused() {
-        if unsafe { libc::geteuid() } != 0 {
-            return;
-        }
         catos_mount::execute::secure_dir::validate_trusted_root_chain().unwrap();
         let path = scratch_path("nonempty");
         std::fs::create_dir(&path).unwrap();

@@ -180,15 +180,9 @@ pub fn show_subvolume(mounted_path: &Path) -> Result<BtrfsSubvolumeIdentity, Sna
         } else if let Some(rest) = trimmed.strip_prefix("Generation:") {
             generation = rest.trim().parse().ok();
         } else if let Some(rest) = trimmed.strip_prefix("UUID:") {
-            let v = rest.trim();
-            if !v.is_empty() && !v.eq_ignore_ascii_case("none") {
-                uuid = Some(v.to_string());
-            }
+            uuid = non_dash_value(rest);
         } else if let Some(rest) = trimmed.strip_prefix("Parent UUID:") {
-            let v = rest.trim();
-            if !v.is_empty() && !v.eq_ignore_ascii_case("none") {
-                parent_uuid = Some(v.to_string());
-            }
+            parent_uuid = non_dash_value(rest);
         } else if let Some(rest) = trimmed.strip_prefix("Flags:") {
             // `Flags: readonly` in modern btrfs-progs.
             if rest.contains("readonly") {
@@ -416,7 +410,8 @@ pub fn default_subvolume_path(mounted_top_level: &Path) -> Result<Option<String>
 }
 
 fn non_dash_value(value: &str) -> Option<String> {
-    if value == "-" || value.eq_ignore_ascii_case("none") {
+    let value = value.trim();
+    if value.is_empty() || value == "-" || value.eq_ignore_ascii_case("none") {
         None
     } else {
         Some(value.to_string())
@@ -573,6 +568,17 @@ mod tests {
         assert_eq!(
             found[2],
             (300u64, 11u64, "@/.snapshots/1/snapshot".to_string())
+        );
+    }
+
+    #[test]
+    fn absent_btrfs_uuid_markers_are_not_identity_values() {
+        assert_eq!(non_dash_value("-"), None);
+        assert_eq!(non_dash_value(" none "), None);
+        assert_eq!(non_dash_value(""), None);
+        assert_eq!(
+            non_dash_value(" 3bdc66e2-f30b-4ef1-97f0-c687934e25e2 ").as_deref(),
+            Some("3bdc66e2-f30b-4ef1-97f0-c687934e25e2")
         );
     }
 

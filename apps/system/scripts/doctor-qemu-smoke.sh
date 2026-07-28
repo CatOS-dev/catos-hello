@@ -1,50 +1,24 @@
 #!/usr/bin/env bash
-# doctor-qemu-smoke.sh - real-QEMU acceptance for `catos-doctor`.
+# Real-QEMU acceptance for the catos-doctor multicall entry.
 #
-# Stage-5 Doctor is read-only. The decisive acceptance is: run
-# `catos-doctor` against a real CatOS target image, verify the
-# report content, AND verify by byte-hash that the target image is
-# unchanged before vs. after the run.
-#
-# Scenarios covered:
-#
-#   1. healthy       A correctly-formatted CatOS btrfs target.
-#                    Asserts exit 0 and overall_status = healthy /
-#                    degraded (a fresh image may legitimately report
-#                    missing optional subvols).
-#   2. fs_corrupt    A btrfs image with one corrupted metadata
-#                    mirror. Asserts exit 0 (NOT non-zero — scheme B)
-#                    and that the report flags FS_CORRUPTION_DETECTED
-#                    when btrfs-progs is available; otherwise skips
-#                    that specific assertion.
-#   3. mount_break   fstab deliberately wrong (root UUID swapped for
-#                    a junk UUID). Asserts exit 0 and that the report
-#                    contains a mount issue.
-#   4. ambiguous     Two equally-plausible CatOS images attached.
-#                    Asserts exit 0 and TARGET_AMBIGUOUS.
-#   5. doctor_fail   Force a doctor-internal failure (corrupt
-#                    binary). Asserts exit code != 0.
-#
-# The no-write guarantee is enforced by sha256-hashing the target
-# image before and after each `catos-doctor` run. Any hash mismatch
-# is a hard failure.
-#
-# Exit 77 means a prerequisite is unavailable.
+# Fixtures are built without host mounts. Root filesystems are generated with
+# mkfs.btrfs --rootdir/--subvol and ESP filesystems with mtools. Every guest
+# drive is attached read-only and is also hashed before and after the run.
 
-set -u
+set -euo pipefail
 
 usage() {
-    cat >&2 <<EOF
+    cat >&2 <<USAGE
 usage: $0 [options]
 
 options:
-  --kernel PATH   Kernel image. Default: auto-detect host kernel image.
+  --kernel PATH   Kernel image. Default: auto-detect.
   --busybox PATH  Static busybox. Default: search PATH.
-  --bin PATH      Static catos-system binary.
+  --bin PATH      Static catos-system multicall binary.
   --qemu PATH     qemu-system-x86_64. Default: search PATH.
   --workdir DIR   Work directory. Default: temporary directory.
   --keep          Keep workdir after completion.
-EOF
+USAGE
 }
 
 KERNEL=""
@@ -53,14 +27,13 @@ BIN=""
 QEMU_BIN=""
 WORKDIR=""
 KEEP=0
-
-while [ "$#" -gt 0 ]; do
+while (($#)); do
     case "$1" in
-        --kernel) KERNEL="$2"; shift 2 ;;
-        --busybox) BUSYBOX="$2"; shift 2 ;;
-        --bin) BIN="$2"; shift 2 ;;
-        --qemu) QEMU_BIN="$2"; shift 2 ;;
-        --workdir) WORKDIR="$2"; shift 2 ;;
+        --kernel) KERNEL=$2; shift 2 ;;
+        --busybox) BUSYBOX=$2; shift 2 ;;
+        --bin) BIN=$2; shift 2 ;;
+        --qemu) QEMU_BIN=$2; shift 2 ;;
+        --workdir) WORKDIR=$2; shift 2 ;;
         --keep) KEEP=1; shift ;;
         -h|--help) usage; exit 0 ;;
         *) echo "unknown option: $1" >&2; usage; exit 2 ;;
@@ -68,584 +41,670 @@ while [ "$#" -gt 0 ]; do
 done
 
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
-if [ -z "$BIN" ]; then
+SYSTEM_DIR=$(cd "$SCRIPT_DIR/.." && pwd)
+if [[ -z $BIN ]]; then
     for candidate in \
-        "$SCRIPT_DIR/../../target/x86_64-unknown-linux-musl/release/catos-system" \
-        "$SCRIPT_DIR/../../build/apps/system/cargo-target/x86_64-unknown-linux-musl/release/catos-system"; do
-        if [ -x "$candidate" ]; then BIN="$candidate"; break; fi
+        "$SYSTEM_DIR/target/x86_64-unknown-linux-musl/release/catos-system" \
+        "$SYSTEM_DIR/../../build/apps/system/cargo-target/x86_64-unknown-linux-musl/release/catos-system"; do
+        if [[ -x $candidate ]]; then BIN=$candidate; break; fi
     done
 fi
-if [ -z "$QEMU_BIN" ] && command -v qemu-system-x86_64 >/dev/null 2>&1; then
+if [[ -z $QEMU_BIN ]] && command -v qemu-system-x86_64 >/dev/null 2>&1; then
     QEMU_BIN=$(command -v qemu-system-x86_64)
 fi
-if [ -z "$BUSYBOX" ] && command -v busybox >/dev/null 2>&1; then
+if [[ -z $BUSYBOX ]] && command -v busybox >/dev/null 2>&1; then
     BUSYBOX=$(command -v busybox)
 fi
-if [ -z "$KERNEL" ]; then
+if [[ -z $KERNEL ]]; then
     for candidate in \
         "/usr/lib/modules/$(uname -r)/vmlinuz" \
         /usr/lib/modules/*/vmlinuz \
         /boot/vmlinuz-linux \
         /boot/vmlinuz-linux-lts \
         /boot/vmlinuz-*; do
-        if [ -e "$candidate" ]; then KERNEL="$candidate"; break; fi
+        if [[ -e $candidate ]]; then KERNEL=$candidate; break; fi
     done
 fi
 
 missing=()
-[ -z "$BIN" ] && missing+=("catos-system musl binary")
-[ -z "$QEMU_BIN" ] && missing+=("qemu-system-x86_64")
-[ -z "$BUSYBOX" ] && missing+=("static busybox")
-[ -z "$KERNEL" ] && missing+=("kernel image")
-for tool in cpio gzip timeout mkfs.btrfs sha256sum; do
+[[ -x ${BIN:-} ]] || missing+=("static catos-system binary")
+[[ -x ${QEMU_BIN:-} ]] || missing+=("qemu-system-x86_64")
+[[ -x ${BUSYBOX:-} ]] || missing+=("static busybox")
+[[ -f ${KERNEL:-} ]] || missing+=("kernel image")
+for tool in cpio gzip timeout mkfs.btrfs btrfs btrfs-map-logical \
+            mkfs.fat mcopy mmd mke2fs sha256sum python3 cargo ldd modprobe zstd xz; do
     command -v "$tool" >/dev/null 2>&1 || missing+=("$tool")
 done
-# The fixture construction step needs to loop-mount the btrfs image
-# to populate subvolumes. Unprivileged environments cannot do this;
-# we surface that as a missing prerequisite rather than a hard fail
-# so the test composes correctly with the other QEMU smoke tests
-# that have the same requirement.
-if ! mount -o loop,subvolid=0 /dev/null /tmp 2>/dev/null; then
-    if [ "$(id -u)" != "0" ] && ! sudo -n true 2>/dev/null; then
-        missing+=("root or sudo for loop-mount fixture construction")
-    fi
-fi
-if [ "${#missing[@]}" -gt 0 ]; then
-    echo "skip: doctor QEMU smoke test missing prerequisites:" >&2
+if ((${#missing[@]})); then
+    echo "skip: doctor QEMU acceptance missing prerequisites:" >&2
     printf '  - %s\n' "${missing[@]}" >&2
     exit 77
 fi
-
-if [ -x "$SCRIPT_DIR/verify-static.sh" ]; then
+if [[ -x $SCRIPT_DIR/verify-static.sh ]]; then
     "$SCRIPT_DIR/verify-static.sh" "$BIN" >/dev/null || {
         echo "fail: catos-system is not fully static" >&2
         exit 1
     }
 fi
 
-KVER=$(basename "$(dirname "$KERNEL")")
-if [ "$KVER" = "modules" ] || [ ! -d "/usr/lib/modules/$KVER" ]; then
-    KVER=$(uname -r)
-fi
-
-# Optional btrfs-progs in the guest. We copy them in if present so
-# the fs section can actually run `btrfs check --readonly`. When
-# btrfs-progs is unavailable, the fs section reports
-# FS_TOOL_MISSING (still a valid diagnosis) rather than fabricating
-# a corruption verdict.
-HAVE_BTRFS_TOOLS=0
-if command -v btrfs >/dev/null 2>&1; then
-    HAVE_BTRFS_TOOLS=1
-fi
-
-WORKDIR="${WORKDIR:-$(mktemp -d -t catos-doctor-qemu-XXXXXX)}"
-INITRAMFS="$WORKDIR/initramfs"
-INITRAMFS_IMG="$WORKDIR/initramfs.cpio.gz"
-SERIAL_LOG="$WORKDIR/serial.log"
-GUEST_LOG="$WORKDIR/guest.log"
-
-HEALTHY_IMG="$WORKDIR/healthy.img"
-CORRUPT_IMG="$WORKDIR/corrupt.img"
-AMBIG_A_IMG="$WORKDIR/ambig-a.img"
-AMBIG_B_IMG="$WORKDIR/ambig-b.img"
-BROKEN_FSTAB_IMG="$WORKDIR/broken-fstab.img"
-BAD_BIN="$WORKDIR/catos-system-broken"
-
+WORKDIR=${WORKDIR:-$(mktemp -d -t catos-doctor-qemu-XXXXXX)}
+INITRAMFS=$WORKDIR/initramfs
+INITRAMFS_IMG=$WORKDIR/initramfs.cpio.gz
+KEEP_ON_FAILURE=0
 cleanup() {
-    if [ "$KEEP" -eq 1 ]; then
-        echo "info: keeping workdir $WORKDIR"
+    if ((KEEP || KEEP_ON_FAILURE)); then
+        echo "info: keeping workdir $WORKDIR" >&2
     else
         rm -rf "$WORKDIR"
     fi
 }
 trap cleanup EXIT
 
-# ---------------------------------------------------------------------------
-# Image construction.
-# ---------------------------------------------------------------------------
+ESP_UUID=C0DE-0001
+ESP_VOLUME_ID=C0DE0001
+UUID_GRUB=11111111-1111-4111-8111-111111111111
+UUID_LIMINE=22222222-2222-4222-8222-222222222222
+UUID_SYSTEMD=33333333-3333-4333-8333-333333333333
+UUID_UKI=44444444-4444-4444-8444-444444444444
+UUID_BROKEN=55555555-5555-4555-8555-555555555555
+UUID_CORRUPT=66666666-6666-4666-8666-666666666666
+UUID_INTERRUPTED=77777777-7777-4777-8777-777777777777
+UUID_AMBIG_A=88888888-8888-4888-8888-888888888888
+UUID_AMBIG_B=99999999-9999-4999-8999-999999999999
 
-# Builds a minimal CatOS btrfs target image with the standard @ and
-# @home subvolumes, an os-release marker, and a verifiable fstab.
-# Argument 1: image path. Argument 2: root UUID to embed in fstab
-# (use "auto" to embed the actual mkfs.btrfs-generated UUID).
-build_healthy_image() {
-    local img="$1"
-    local fstab_uuid="$2"
-    truncate -s 256M "$img"
-    mkfs.btrfs -q -f -L catos-doctor "$img" >/dev/null
-    local mount_root="$WORKDIR/mnt-$(basename "$img")"
-    mkdir -p "$mount_root"
-    mount -o subvolid=0 "$img" "$mount_root"
-    btrfs subvolume create "$mount_root/@" >/dev/null
-    btrfs subvolume create "$mount_root/@home" >/dev/null
-    mkdir -p "$mount_root/@/etc" "$mount_root/@/etc/default/grub.d"
-    mkdir -p "$mount_root/@/home"
-    cat > "$mount_root/@/etc/os-release" <<'EOF'
+ROOT_GRUB=$WORKDIR/root-grub.img
+ROOT_LIMINE=$WORKDIR/root-limine.img
+ROOT_SYSTEMD=$WORKDIR/root-systemd.img
+ROOT_UKI=$WORKDIR/root-uki.img
+ROOT_BROKEN=$WORKDIR/root-broken.img
+ROOT_CORRUPT=$WORKDIR/root-corrupt.img
+ROOT_INTERRUPTED=$WORKDIR/root-interrupted.img
+ROOT_AMBIG_A=$WORKDIR/root-ambiguous-a.img
+ROOT_AMBIG_B=$WORKDIR/root-ambiguous-b.img
+ESP_GRUB=$WORKDIR/esp-grub.img
+ESP_LIMINE=$WORKDIR/esp-limine.img
+ESP_SYSTEMD=$WORKDIR/esp-systemd.img
+ESP_UKI=$WORKDIR/esp-uki.img
+
+write_provider_root() {
+    local tree=$1 provider=$2 root_uuid=$3
+    case "$provider" in
+        grub)
+            mkdir -p "$tree/@/etc/default/grub.d" "$tree/@/boot/grub"
+            cat > "$tree/@/etc/default/grub.d/00-catos.cfg" <<'CFG'
+GRUB_DISTRIBUTOR=CatOS
+GRUB_CMDLINE_LINUX_DEFAULT="quiet rw"
+CFG
+            cat > "$tree/@/boot/grub/grub.cfg" <<CFG
+menuentry 'CatOS' {
+    linux /vmlinuz-linux root=UUID=$root_uuid rw
+    initrd /initramfs-linux.img
+}
+CFG
+            ;;
+        limine)
+            mkdir -p "$tree/@/etc/default"
+            cat > "$tree/@/etc/default/limine" <<'CFG'
+ESP_PATH="/boot/efi"
+KERNEL_CMDLINE[default]=quiet rw
+ENABLE_UKI=no
+CFG
+            ;;
+        systemd_boot)
+            mkdir -p "$tree/@/etc/kernel/install.conf.d"
+            cat > "$tree/@/etc/kernel/install.conf.d/20-catos-bootloadu.conf" <<'CFG'
+BOOT_ROOT=/boot/efi
+layout=bls
+CFG
+            ;;
+        uki)
+            mkdir -p "$tree/@/etc/catos"
+            cat > "$tree/@/etc/catos/firmware-boot.conf" <<'CFG'
+method=uki
+esp_path=/boot/efi
+CFG
+            ;;
+        *) echo "unsupported provider $provider" >&2; return 1 ;;
+    esac
+}
+
+build_root_image() {
+    local image=$1 root_uuid=$2 provider=$3 fstab_uuid=$4 interrupted=$5 metadata_dup=$6
+    local tree=$WORKDIR/tree-$(basename "$image" .img)
+    rm -rf "$tree"
+    mkdir -p \
+        "$tree/@/etc" \
+        "$tree/@/etc/kernel" \
+        "$tree/@/home" \
+        "$tree/@/root" \
+        "$tree/@/srv" \
+        "$tree/@/var/cache" \
+        "$tree/@/var/tmp" \
+        "$tree/@/var/log" \
+        "$tree/@/.snapshots" \
+        "$tree/@/boot/efi" \
+        "$tree/@/var/lib/pacman/local/catos-base-1" \
+        "$tree/@/usr/lib/modules/6.12.0-catos" \
+        "$tree/@home" "$tree/@root" "$tree/@srv" "$tree/@cache" \
+        "$tree/@tmp" "$tree/@log" "$tree/@snapshots" "$tree/@snapshot-source" \
+        "$tree/.catos-recovery/transactions"
+    cat > "$tree/@/etc/os-release" <<'OS_RELEASE'
 NAME="CatOS"
 ID=catos
 ID_LIKE=arch
-PRETTY_NAME="CatOS"
-EOF
-    if [ "$fstab_uuid" = "auto" ]; then
-        fstab_uuid=$(btrfs filesystem show "$img" 2>/dev/null \
-            | awk '/uuid:/ { print $4; exit }')
+PRETTY_NAME="CatOS QEMU Fixture"
+OS_RELEASE
+    cat > "$tree/@/etc/fstab" <<FSTAB
+UUID=$fstab_uuid / btrfs defaults,subvol=/@ 0 0
+UUID=$root_uuid /home btrfs defaults,subvol=/@home 0 0
+UUID=$root_uuid /root btrfs defaults,subvol=/@root 0 0
+UUID=$root_uuid /srv btrfs defaults,subvol=/@srv 0 0
+UUID=$root_uuid /var/cache btrfs defaults,subvol=/@cache 0 0
+UUID=$root_uuid /var/tmp btrfs defaults,subvol=/@tmp 0 0
+UUID=$root_uuid /var/log btrfs defaults,subvol=/@log 0 0
+UUID=$root_uuid /.snapshots btrfs defaults,subvol=/@snapshots 0 0
+UUID=$ESP_UUID /boot/efi vfat umask=0077 0 2
+FSTAB
+    cat > "$tree/@/var/lib/pacman/local/catos-base-1/desc" <<'DESC'
+%NAME%
+catos-base
+
+%VERSION%
+1-1
+DESC
+    printf '%s\n' linux-catos > "$tree/@/usr/lib/modules/6.12.0-catos/pkgbase"
+    printf 'fixture kernel\n' > "$tree/@/usr/lib/modules/6.12.0-catos/vmlinuz"
+    printf 'quiet rw\n' > "$tree/@/etc/kernel/cmdline"
+    write_provider_root "$tree" "$provider" "$root_uuid"
+
+    truncate -s 384M "$image"
+    local args=(-q -f -U "$root_uuid" -L "catos-$provider")
+    if [[ $metadata_dup == yes ]]; then
+        args+=(-m dup -d single)
     fi
-    cat > "$mount_root/@/etc/fstab" <<EOF
-UUID=$fstab_uuid  /      btrfs  defaults,subvol=/@      0 0
-UUID=$fstab_uuid  /home  btrfs  defaults,subvol=/@home  0 0
-EOF
-    cat > "$mount_root/@/etc/default/grub.d/00-catos.cfg" <<'EOF'
-GRUB_DISTRIBUTOR=CatOS
-GRUB_CMDLINE_LINUX_DEFAULT="quiet rw"
-EOF
-    umount "$mount_root"
-    rmdir "$mount_root" 2>/dev/null || true
+    args+=(-r "$tree"
+        --subvol default:@
+        --subvol rw:@home
+        --subvol rw:@root
+        --subvol rw:@srv
+        --subvol rw:@cache
+        --subvol rw:@tmp
+        --subvol rw:@log
+        --subvol rw:@snapshots
+        --subvol ro:@snapshot-source)
+    mkfs.btrfs "${args[@]}" "$image" >/dev/null
+    rm -rf "$tree"
 }
 
-echo "info: building healthy CatOS target image"
-build_healthy_image "$HEALTHY_IMG" auto
-HEALTHY_HASH_BEFORE=$(sha256sum "$HEALTHY_IMG" | awk '{print $1}')
+build_ext4_root_image() {
+    local image=$1 root_uuid=$2
+    local tree=$WORKDIR/tree-$(basename "$image" .img)
+    rm -rf "$tree"
+    mkdir -p \
+        "$tree/etc/default/grub.d" \
+        "$tree/etc/kernel" \
+        "$tree/boot/grub" \
+        "$tree/boot/efi" \
+        "$tree/var/lib/pacman/local/catos-base-1" \
+        "$tree/usr/lib/modules/6.12.0-catos"
+    cat > "$tree/etc/os-release" <<'OS_RELEASE'
+NAME="CatOS"
+ID=catos
+ID_LIKE=arch
+PRETTY_NAME="CatOS QEMU Fixture"
+OS_RELEASE
+    cat > "$tree/etc/fstab" <<FSTAB
+UUID=$root_uuid / ext4 defaults 0 1
+UUID=$ESP_UUID /boot/efi vfat umask=0077 0 2
+FSTAB
+    cat > "$tree/etc/default/grub.d/00-catos.cfg" <<'CFG'
+GRUB_DISTRIBUTOR=CatOS
+GRUB_CMDLINE_LINUX_DEFAULT="quiet rw"
+CFG
+    cat > "$tree/boot/grub/grub.cfg" <<CFG
+menuentry 'CatOS ext4 fixture' {
+    linux /vmlinuz-linux root=UUID=$root_uuid rw
+    initrd /initramfs-linux.img
+}
+CFG
+    cat > "$tree/var/lib/pacman/local/catos-base-1/desc" <<'DESC'
+%NAME%
+catos-base
 
-echo "info: building ambiguous-target images"
-build_healthy_image "$AMBIG_A_IMG" auto
-build_healthy_image "$AMBIG_B_IMG" auto
-AMBIG_A_HASH_BEFORE=$(sha256sum "$AMBIG_A_IMG" | awk '{print $1}')
-AMBIG_B_HASH_BEFORE=$(sha256sum "$AMBIG_B_IMG" | awk '{print $1}')
+%VERSION%
+1-1
+DESC
+    printf '%s\n' linux-catos > "$tree/usr/lib/modules/6.12.0-catos/pkgbase"
+    printf 'fixture kernel\n' > "$tree/usr/lib/modules/6.12.0-catos/vmlinuz"
+    printf 'quiet rw\n' > "$tree/etc/kernel/cmdline"
+    truncate -s 256M "$image"
+    mke2fs -q -F -t ext4 -U "$root_uuid" -L catos-ambig \
+        -d "$tree" "$image"
+    rm -rf "$tree"
+}
 
-echo "info: building broken-fstab image"
-build_healthy_image "$BROKEN_FSTAB_IMG" "definitely-not-a-real-uuid"
-BROKEN_HASH_BEFORE=$(sha256sum "$BROKEN_FSTAB_IMG" | awk '{print $1}')
+build_esp_image() {
+    local image=$1 provider=$2
+    local tree=$WORKDIR/esp-tree-$provider
+    rm -rf "$tree"
+    mkdir -p "$tree"
+    case "$provider" in
+        grub)
+            mkdir -p "$tree/EFI/GRUB"
+            printf 'grub efi fixture\n' > "$tree/EFI/GRUB/grubx64.efi"
+            ;;
+        limine)
+            mkdir -p "$tree/EFI/BOOT"
+            cat > "$tree/limine.conf" <<'CFG'
+:CatOS
+KERNEL_PATH=boot():/vmlinuz-linux
+MODULE_PATH=boot():/initramfs-linux.img
+CFG
+            printf 'limine efi fixture\n' > "$tree/EFI/BOOT/liminex64.efi"
+            ;;
+        systemd_boot)
+            mkdir -p "$tree/loader/entries" "$tree/EFI/systemd"
+            printf 'default catos.conf\n' > "$tree/loader/loader.conf"
+            cat > "$tree/loader/entries/catos.conf" <<'CFG'
+title CatOS
+linux /vmlinuz-linux
+initrd /initramfs-linux.img
+options quiet rw
+CFG
+            printf 'systemd boot efi fixture\n' > "$tree/EFI/systemd/systemd-bootx64.efi"
+            ;;
+        uki)
+            mkdir -p "$tree/EFI/Linux"
+            printf 'uki fixture\n' > "$tree/EFI/Linux/catos-test.efi"
+            ;;
+        *) echo "unsupported provider $provider" >&2; return 1 ;;
+    esac
+    truncate -s 64M "$image"
+    mkfs.fat -F 32 -i "$ESP_VOLUME_ID" -n CATOS_ESP "$image" >/dev/null
+    MTOOLS_SKIP_CHECK=1 mcopy -s -i "$image" "$tree"/* ::/
+    rm -rf "$tree"
+}
 
-# Optional fs_corrupt scenario: copy healthy image then poke a
-# single byte in the root-tree region to force a checksum verify
-# failure. Skipped (with explicit note) when btrfs-progs is absent
-# because we cannot pre-verify the fixture.
-CORRUPT_HASH_BEFORE=""
-if [ "$HAVE_BTRFS_TOOLS" -eq 1 ]; then
-    echo "info: building btrfs-corruption image"
-    cp "$HEALTHY_IMG" "$CORRUPT_IMG"
-    CORRUPT_HASH_BEFORE=$(sha256sum "$CORRUPT_IMG" | awk '{print $1}')
-    ROOT_LOGICAL=$(btrfs inspect-internal dump-tree -t root "$CORRUPT_IMG" 2>/dev/null \
-        | awk '/^leaf [0-9]+/ { print $2; exit }')
-    if [ -n "$ROOT_LOGICAL" ]; then
-        PHYS=$(btrfs-map-logical -l "$ROOT_LOGICAL" -c 1 -b 16384 \
-            -o "$WORKDIR/corrupt-copy.bin" "$CORRUPT_IMG" 2>/dev/null \
-            | awk '/^mirror 1 logical / { print $6; exit }')
-        if [ -n "$PHYS" ]; then
-            OFFSET=$((PHYS + 1024))
-            python3 - "$CORRUPT_IMG" "$OFFSET" <<'PY' 2>/dev/null || true
+corrupt_btrfs_metadata_mirror() {
+    local image=$1
+    local logical map_output physical
+    logical=$(btrfs inspect-internal dump-tree -t root "$image" 2>/dev/null \
+        | awk '/^leaf [0-9]+/ && !found { print $2; found=1 }')
+    [[ -n $logical ]] || { echo "fail: cannot identify Btrfs root-tree block" >&2; return 1; }
+    map_output=$(btrfs-map-logical -l "$logical" -c 1 -b 16384 \
+        -o "$WORKDIR/btrfs-root-copy.bin" "$image" 2>&1)
+    physical=$(awk '/^mirror 1 logical / { print $6; exit }' <<<"$map_output")
+    [[ -n $physical ]] || {
+        echo "fail: cannot map Btrfs metadata mirror" >&2
+        echo "$map_output" >&2
+        return 1
+    }
+    python3 - "$image" "$((physical + 1024))" <<'PY'
 import sys
 path, offset = sys.argv[1], int(sys.argv[2])
-with open(path, "r+b", buffering=0) as f:
-    f.seek(offset)
-    b = f.read(1)
-    if b:
-        f.seek(offset)
-        f.write(bytes([b[0] ^ 0x5A]))
+with open(path, "r+b", buffering=0) as image:
+    image.seek(offset)
+    original = image.read(1)
+    if len(original) != 1:
+        raise SystemExit("cannot read Btrfs corruption byte")
+    image.seek(offset)
+    image.write(bytes([original[0] ^ 0x5A]))
 PY
-            CORRUPT_HASH_AFTER_CORRUPT=$(sha256sum "$CORRUPT_IMG" | awk '{print $1}')
-            if [ "$CORRUPT_HASH_BEFORE" = "$CORRUPT_HASH_AFTER_CORRUPT" ]; then
-                echo "info: corruption attempt did not change image; skipping corrupt scenario"
-                CORRUPT_HASH_BEFORE=""
-            fi
-        fi
+    set +e
+    btrfs check --readonly "$image" > "$WORKDIR/corrupt-precheck.log" 2>&1
+    local rc=$?
+    set -e
+    if ! grep -q 'checksum verify failed' "$WORKDIR/corrupt-precheck.log"; then
+        echo "fail: corruption fixture did not expose checksum failure (rc=$rc)" >&2
+        cat "$WORKDIR/corrupt-precheck.log" >&2
+        return 1
     fi
-    if ! command -v btrfs-map-logical >/dev/null 2>&1; then
-        echo "info: btrfs-map-logical not present; skipping corrupt scenario"
-        CORRUPT_HASH_BEFORE=""
-    fi
-else
-    echo "info: btrfs-progs absent on host; skipping corrupt scenario"
+}
+
+echo "info: building unprivileged Doctor fixtures"
+build_esp_image "$ESP_GRUB" grub
+build_esp_image "$ESP_LIMINE" limine
+build_esp_image "$ESP_SYSTEMD" systemd_boot
+build_esp_image "$ESP_UKI" uki
+build_root_image "$ROOT_GRUB" "$UUID_GRUB" grub "$UUID_GRUB" no no
+build_root_image "$ROOT_LIMINE" "$UUID_LIMINE" limine "$UUID_LIMINE" no no
+build_root_image "$ROOT_SYSTEMD" "$UUID_SYSTEMD" systemd_boot "$UUID_SYSTEMD" no no
+build_root_image "$ROOT_UKI" "$UUID_UKI" uki "$UUID_UKI" no no
+build_root_image "$ROOT_BROKEN" "$UUID_BROKEN" grub deadbeef-dead-4bad-8bad-deadbeefdead no no
+build_root_image "$ROOT_CORRUPT" "$UUID_CORRUPT" grub "$UUID_CORRUPT" no yes
+corrupt_btrfs_metadata_mirror "$ROOT_CORRUPT"
+build_root_image "$ROOT_INTERRUPTED" "$UUID_INTERRUPTED" grub "$UUID_INTERRUPTED" yes no
+build_root_image "$ROOT_AMBIG_A" "$UUID_AMBIG_A" grub "$UUID_AMBIG_A" no no
+build_ext4_root_image "$ROOT_AMBIG_B" "$UUID_AMBIG_B"
+
+KVER=$(basename "$(dirname "$KERNEL")")
+if [[ $KVER == modules || ! -d /usr/lib/modules/$KVER ]]; then
+    KVER=$(uname -r)
 fi
 
-# A deliberately broken catos-system binary to verify that an
-# internal Doctor failure surfaces as a non-zero exit code.
-cp "$BIN" "$BAD_BIN"
-python3 - "$BAD_BIN" <<'PY' 2>/dev/null || true
-import sys
-# Flip one byte deep in the binary so the program crashes or
-# refuses to start. The byte we pick is far from the ELF header
-# so the kernel still exec()s it.
-path = sys.argv[1]
-with open(path, "r+b", buffering=0) as f:
-    f.seek(0x10000)
-    b = f.read(1)
-    if b:
-        f.seek(0x10000)
-        f.write(bytes([b[0] ^ 0xFF]))
-PY
+(
+    cd "$SYSTEM_DIR"
+    cargo build --quiet --release --target x86_64-unknown-linux-musl \
+        --example doctor_transaction_fixture
+)
+FIXTURE_HELPER=$SYSTEM_DIR/target/x86_64-unknown-linux-musl/release/examples/doctor_transaction_fixture
+[[ -x $FIXTURE_HELPER ]] || {
+    echo "fail: Doctor transaction fixture helper was not built" >&2
+    exit 1
+}
 
-# ---------------------------------------------------------------------------
-# Initramfs.
-# ---------------------------------------------------------------------------
-
-echo "info: building initramfs"
 rm -rf "$INITRAMFS"
-mkdir -p "$INITRAMFS"/{bin,sbin,proc,sys,dev,etc,run,usr/bin,usr/sbin}
+mkdir -p "$INITRAMFS"/{bin,sbin,proc,sys,dev,run,tmp,etc,usr/bin,usr/sbin,lib/modules/load}
 cp "$BUSYBOX" "$INITRAMFS/bin/busybox"
 cp "$BIN" "$INITRAMFS/bin/catos-system"
-chmod +x "$INITRAMFS/bin/busybox" "$INITRAMFS/bin/catos-system"
-for applet in sh mount cat echo sleep modprobe poweroff mkdir grep awk find dd sync ls; do
+cp "$FIXTURE_HELPER" "$INITRAMFS/bin/doctor-transaction-fixture"
+chmod +x \
+    "$INITRAMFS/bin/busybox" \
+    "$INITRAMFS/bin/catos-system" \
+    "$INITRAMFS/bin/doctor-transaction-fixture"
+ln -s catos-system "$INITRAMFS/bin/catos-doctor"
+ln -s catos-system "$INITRAMFS/bin/catos-chroot"
+for applet in sh mount umount cat echo printf sleep poweroff mkdir grep awk find \
+              sync sed head tr insmod script timeout sha256sum chmod ln readlink basename dirname; do
     ln -sf /bin/busybox "$INITRAMFS/bin/$applet"
 done
 ln -sf /bin/busybox "$INITRAMFS/sbin/poweroff"
 
 copy_tool_with_deps() {
-    local tool="$1"
-    [ -f "/usr/bin/$tool" ] || [ -f "/usr/sbin/$tool" ] || return 0
-    local src
-    src=$(command -v "$tool")
-    mkdir -p "$INITRAMFS/usr/bin" "$INITRAMFS/usr/sbin"
-    local dest="$INITRAMFS$src"
+    local name=$1 src dest library
+    src=$(command -v "$name")
+    dest=$INITRAMFS$src
     mkdir -p "$(dirname "$dest")"
     cp -L "$src" "$dest"
-    if command -v ldd >/dev/null 2>&1; then
-        ldd "$src" 2>/dev/null | awk '
-            /=> \/[^ ]+/ { print $3 }
-            $1 ~ /^\// { print $1 }
-        ' | while read -r library; do
-            [ -f "$library" ] || continue
-            mkdir -p "$INITRAMFS$(dirname "$library")"
-            cp -L "$library" "$INITRAMFS$library"
-        done
-    fi
+    while read -r library; do
+        [[ -f $library ]] || continue
+        mkdir -p "$INITRAMFS$(dirname "$library")"
+        cp -L "$library" "$INITRAMFS$library"
+    done < <(ldd "$src" 2>/dev/null | awk '/=> \/[^ ]+/ {print $3} $1 ~ /^\// {print $1}')
 }
+copy_tool_with_deps btrfs
+copy_tool_with_deps blkid
+copy_tool_with_deps e2fsck
 
-for tool in btrfs btrfs-map-logical; do
-    copy_tool_with_deps "$tool"
+MODULE_LIST=$INITRAMFS/etc/modules.load
+: > "$MODULE_LIST"
+module_index=0
+copy_module() {
+    local source=$1 target
+    [[ -f $source ]] || return 0
+    module_index=$((module_index + 1))
+    target=$(printf '/lib/modules/load/%03d-%s' "$module_index" "$(basename "$source")")
+    target=${target%.zst}
+    target=${target%.xz}
+    target=${target%.gz}
+    case "$source" in
+        *.zst) zstd -q -d -c "$source" > "$INITRAMFS$target" ;;
+        *.xz) xz -d -c "$source" > "$INITRAMFS$target" ;;
+        *.gz) gzip -d -c "$source" > "$INITRAMFS$target" ;;
+        *) cp "$source" "$INITRAMFS$target" ;;
+    esac
+    echo "$target" >> "$MODULE_LIST"
+}
+for module in btrfs vfat; do
+    while read -r action module_path _; do
+        [[ $action == insmod ]] || continue
+        copy_module "$module_path"
+    done < <(modprobe --show-depends -S "$KVER" "$module" 2>/dev/null || true)
 done
 
-mkdir -p "$INITRAMFS/lib/modules/$KVER/kernel/fs/btrfs"
-BTRFS_MODULE=$(modinfo -k "$KVER" -n btrfs 2>/dev/null || true)
-if [ -n "$BTRFS_MODULE" ] && [ -f "$BTRFS_MODULE" ]; then
-    case "$BTRFS_MODULE" in
-        *.zst) zstd -q -d -c "$BTRFS_MODULE" > "$INITRAMFS/lib/modules/$KVER/kernel/fs/btrfs/btrfs.ko" 2>/dev/null || cp "$BTRFS_MODULE" "$INITRAMFS/lib/modules/$KVER/kernel/fs/btrfs/btrfs.ko" ;;
-        *) cp "$BTRFS_MODULE" "$INITRAMFS/lib/modules/$KVER/kernel/fs/btrfs/btrfs.ko" ;;
-    esac
-fi
-
-# Copy the corrupt binary in alongside the working one so the
-# doctor_fail scenario can invoke it.
-cp "$BAD_BIN" "$INITRAMFS/bin/catos-system-broken"
-chmod +x "$INITRAMFS/bin/catos-system-broken"
-
-(
-    cd "$INITRAMFS"
-    find . | cpio -o -H newc 2>/dev/null | gzip -q -1 > "$INITRAMFS_IMG"
-)
-
-# ---------------------------------------------------------------------------
-# Guest driver script.
-# ---------------------------------------------------------------------------
-#
-# The guest receives the scenario name on the kernel cmdline
-# (`catos_doctor_scenario=...`) and the target image as /dev/vda.
-# It writes its structured result to /dev/vdb, which the host reads
-# back after QEMU exits.
-
-RESULT_DISK="$WORKDIR/result.img"
-truncate -s 8M "$RESULT_DISK"
-
-GUEST_SCRIPT="$WORKDIR/guest.sh"
-cat > "$GUEST_SCRIPT" <<'GUEST'
+cat > "$INITRAMFS/bin/doctor-child" <<'CHILD'
 #!/bin/sh
-# Guest driver: run catos-doctor against the scenario-specific
-# target and write a structured result line to /dev/vdb.
-set -u
-SCENARIO=""
-ROOT_DEV="/dev/vda"
-for arg in $(cat /proc/cmdline); do
-    case "$arg" in
-        catos_doctor_scenario=*) SCENARIO="${arg#catos_doctor_scenario=}" ;;
-        catos_doctor_root=*) ROOT_DEV="${arg#catos_doctor_root=}" ;;
-    esac
-done
+/bin/catos-doctor
+echo $? > /tmp/doctor.rc
+CHILD
+chmod +x "$INITRAMFS/bin/doctor-child"
 
+cat > "$INITRAMFS/init" <<'GUEST'
+#!/bin/sh
 PATH=/bin:/sbin:/usr/bin:/usr/sbin
 export PATH
+mount -t proc proc /proc
+mount -t sysfs sysfs /sys
+mount -t devtmpfs devtmpfs /dev
+mkdir -p /dev/pts /run /tmp
+mount -t devpts devpts /dev/pts
+mount -t tmpfs tmpfs /run
+chmod 1777 /tmp
+while read -r module; do
+    [ -n "$module" ] && insmod "$module" 2>/dev/null || true
+done < /etc/modules.load
+for device in /dev/vda /dev/vdb; do
+    i=0
+    while [ ! -b "$device" ] && [ "$i" -lt 100 ]; do
+        sleep 0.05
+        i=$((i + 1))
+    done
+done
+SCENARIO=""
+for arg in $(cat /proc/cmdline); do
+    case "$arg" in catos_doctor_scenario=*) SCENARIO=${arg#catos_doctor_scenario=} ;; esac
+done
 
-# Load btrfs module if available.
-[ -f /lib/modules/*/kernel/fs/btrfs/btrfs.ko ] && insmod /lib/modules/*/kernel/fs/btrfs/btrfs.ko 2>/dev/null
+if [ "$SCENARIO" = prepare_interrupted ]; then
+    mkdir -p /tmp/prepare-root
+    if ! mount -t btrfs -o rw,subvolid=5 /dev/vda /tmp/prepare-root; then
+        echo __FIXTURE_PREPARE_FAILED__=mount
+        poweroff -f
+    fi
+    fsid=$(btrfs filesystem show /dev/vda | awk '/uuid:/ { print $NF; exit }')
+    major_minor=$(cat /sys/class/block/vda/dev)
+    root_info=$(btrfs subvolume show /tmp/prepare-root/@)
+    source_info=$(btrfs subvolume show /tmp/prepare-root/@snapshot-source)
+    root_id=$(printf '%s\n' "$root_info" | awk '$1 == "Subvolume" && $2 == "ID:" { print $3; exit }')
+    root_generation=$(printf '%s\n' "$root_info" | awk '$1 == "Generation:" { print $2; exit }')
+    root_uuid=$(printf '%s\n' "$root_info" | awk '$1 == "UUID:" { print $2; exit }')
+    source_id=$(printf '%s\n' "$source_info" | awk '$1 == "Subvolume" && $2 == "ID:" { print $3; exit }')
+    source_generation=$(printf '%s\n' "$source_info" | awk '$1 == "Generation:" { print $2; exit }')
+    source_uuid=$(printf '%s\n' "$source_info" | awk '$1 == "UUID:" { print $2; exit }')
+    if [ -z "$fsid" ] || [ -z "$major_minor" ] || [ -z "$root_id" ] \
+        || [ -z "$root_generation" ] || [ -z "$root_uuid" ] \
+        || [ -z "$source_id" ] || [ -z "$source_generation" ] \
+        || [ -z "$source_uuid" ]; then
+        echo __FIXTURE_PREPARE_FAILED__=facts
+        umount /tmp/prepare-root 2>/dev/null || true
+        poweroff -f
+    fi
+    if /bin/doctor-transaction-fixture \
+        /tmp/prepare-root \
+        "$fsid" \
+        "$major_minor" \
+        "$root_id" \
+        "$root_generation" \
+        "$root_uuid" \
+        "$source_id" \
+        "$source_generation" \
+        "$source_uuid"; then
+        sync
+        umount /tmp/prepare-root
+        echo __FIXTURE_PREPARED__
+    else
+        echo __FIXTURE_PREPARE_FAILED__=helper
+        umount /tmp/prepare-root 2>/dev/null || true
+    fi
+    poweroff -f
+fi
 
-RESULT_FILE=/tmp/result.txt
-: > "$RESULT_FILE"
-
-run_doctor() {
-    BIN="$1"
-    TARGET="$2"
-    HASH_BEFORE=$(sha256sum "$TARGET" | awk '{print $1}')
-    "$BIN" > /tmp/doctor.out 2>/tmp/doctor.err
-    RC=$?
-    HASH_AFTER=$(sha256sum "$TARGET" | awk '{print $1}')
-    {
-        echo "rc=$RC"
-        echo "hash_before=$HASH_BEFORE"
-        echo "hash_after=$HASH_AFTER"
-        echo "hash_unchanged=$([ "$HASH_BEFORE" = "$HASH_AFTER" ] && echo yes || echo no)"
-        # Trim doctor output to keep the result disk small.
-        head -c 8192 /tmp/doctor.out | sed 's/$/|/' >> "$RESULT_FILE"
-        echo "-----STDERR-----" >> "$RESULT_FILE"
-        head -c 2048 /tmp/doctor.err >> "$RESULT_FILE"
-    } >> "$RESULT_FILE"
+run_tty() {
+    input=$1
+    rm -f /tmp/doctor.rc /tmp/doctor.out /tmp/doctor.err /tmp/typescript
+    printf '%b' "$input" | timeout -s KILL 30 script -q -c /bin/doctor-child /tmp/typescript \
+        > /tmp/doctor.out 2> /tmp/doctor.err
+    rc=$(cat /tmp/doctor.rc 2>/dev/null || echo 255)
+    echo "__DOCTOR_BEGIN__"
+    cat /tmp/doctor.out
+    echo "__DOCTOR_STDERR__"
+    cat /tmp/doctor.err
+    echo "__DOCTOR_RC__=$rc"
+    echo "__DOCTOR_END__"
 }
 
-case "$SCENARIO" in
-    healthy)
-        run_doctor /bin/catos-system "$ROOT_DEV"
-        ;;
-    fs_corrupt)
-        run_doctor /bin/catos-system "$ROOT_DEV"
-        ;;
-    mount_break)
-        run_doctor /bin/catos-system "$ROOT_DEV"
-        ;;
-    ambiguous)
-        # Two images attached as vda + vdb is awkward because vdb is
-        # our result disk. We re-attach the second image as vdc.
-        run_doctor /bin/catos-system "$ROOT_DEV"
-        ;;
-    doctor_fail)
-        HASH_BEFORE=$(sha256sum "$ROOT_DEV" | awk '{print $1}')
-        /bin/catos-system-broken > /tmp/doctor.out 2>/tmp/doctor.err
-        RC=$?
-        HASH_AFTER=$(sha256sum "$ROOT_DEV" | awk '{print $1}')
-        {
-            echo "rc=$RC"
-            echo "hash_before=$HASH_BEFORE"
-            echo "hash_after=$HASH_AFTER"
-            echo "hash_unchanged=$([ "$HASH_BEFORE" = "$HASH_AFTER" ] && echo yes || echo no)"
-            echo "-----STDERR-----" >> "$RESULT_FILE"
-            head -c 2048 /tmp/doctor.err >> "$RESULT_FILE"
-        } >> "$RESULT_FILE"
-        ;;
-    *)
-        echo "unknown_scenario=$SCENARIO" > "$RESULT_FILE"
-        ;;
-esac
-
-# Write the result to the result disk.
-cat "$RESULT_FILE" > /dev/vdb
+if [ "$SCENARIO" = ambiguous ]; then
+    timeout -s KILL 30 /bin/catos-doctor \
+        </dev/null > /tmp/non-tty.out 2> /tmp/non-tty.err
+    non_tty_rc=$?
+    echo "__NONTTY_BEGIN__"
+    cat /tmp/non-tty.out
+    cat /tmp/non-tty.err
+    echo "__NONTTY_RC__=$non_tty_rc"
+    echo "__NONTTY_END__"
+    run_tty '0\n'
+else
+    run_tty 'y\n'
+fi
 sync
-sleep 1
 poweroff -f
 GUEST
-chmod +x "$GUEST_SCRIPT"
-cp "$GUEST_SCRIPT" "$INITRAMFS/init"
-
-# Rebuild the initramfs with the guest init.
+chmod +x "$INITRAMFS/init"
 (
     cd "$INITRAMFS"
-    find . | cpio -o -H newc 2>/dev/null | gzip -q -1 > "$INITRAMFS_IMG"
+    find . -print0 | cpio --null -o -H newc 2>/dev/null | gzip -q -1 > "$INITRAMFS_IMG"
 )
 
-# ---------------------------------------------------------------------------
-# Run a scenario in QEMU.
-# ---------------------------------------------------------------------------
+hash_image() { sha256sum "$1" | awk '{print $1}'; }
+fail() { echo "fail: $*" >&2; KEEP_ON_FAILURE=1; exit 1; }
+assert_contains() {
+    local body=$1 needle=$2 context=$3
+    grep -Fq -- "$needle" <<<"$body" || fail "$context: missing '$needle'"
+}
+assert_not_contains() {
+    local body=$1 needle=$2 context=$3
+    if grep -Fq -- "$needle" <<<"$body"; then fail "$context: unexpectedly contains '$needle'"; fi
+}
 
+LAST_LOG=""
 run_qemu() {
-    local scenario="$1"
-    local target_img="$2"
-    local extra_drive="$3"
-    local extra_args=()
-    if [ -n "$extra_drive" ]; then
-        extra_args+=("-drive" "file=$extra_drive,format=raw,if=virtio")
-    fi
-
-    # Always-fresh result disk.
-    truncate -s 8M "$RESULT_DISK"
-
-    local qemu_args=(
-        -nodefaults -no-reboot -nographic
-        -m 256M
-        -kernel "$KERNEL"
-        -initrd "$INITRAMFS_IMG"
-        -append "console=ttyS0 quiet catos_doctor_scenario=$scenario"
-        -drive "file=$target_img,format=raw,if=virtio"
-        -drive "file=$RESULT_DISK,format=raw,if=virtio"
-        -serial "file:$SERIAL_LOG"
+    local scenario=$1 root_image=$2 esp_image=$3 extra_root=${4:-}
+    local log=$WORKDIR/$scenario.serial.log
+    local root_before esp_before extra_before=""
+    root_before=$(hash_image "$root_image")
+    esp_before=$(hash_image "$esp_image")
+    [[ -z $extra_root ]] || extra_before=$(hash_image "$extra_root")
+    local args=(
+        -nodefaults -no-reboot -nographic -m 512M
+        -kernel "$KERNEL" -initrd "$INITRAMFS_IMG"
+        -append "console=ttyS0 quiet panic=-1 catos_doctor_scenario=$scenario"
+        -drive "file=$root_image,format=raw,if=virtio,readonly=on"
+        -drive "file=$esp_image,format=raw,if=virtio,readonly=on"
+        -serial "file:$log"
     )
-    if [ -n "${extra_args[*]:-}" ]; then
-        qemu_args+=("${extra_args[@]}")
+    [[ -z $extra_root ]] || args+=(
+        -drive "file=$extra_root,format=raw,if=virtio,readonly=on"
+    )
+    if [[ -w /dev/kvm ]]; then args+=(-enable-kvm -cpu host); fi
+    set +e
+    timeout 120 "$QEMU_BIN" "${args[@]}" >/dev/null 2>&1
+    local rc=$?
+    set -e
+    [[ $rc -ne 124 ]] || fail "$scenario: QEMU timed out"
+    [[ -f $log ]] || fail "$scenario: no serial log"
+    tr -d '\r' < "$log" > "$log.normalized"
+    LAST_LOG=$(cat "$log.normalized")
+    assert_contains "$LAST_LOG" "__DOCTOR_END__" "$scenario"
+    [[ $(hash_image "$root_image") == "$root_before" ]] || fail "$scenario: root image changed"
+    [[ $(hash_image "$esp_image") == "$esp_before" ]] || fail "$scenario: ESP image changed"
+    if [[ -n $extra_root ]]; then
+        [[ $(hash_image "$extra_root") == "$extra_before" ]] || fail "$scenario: second root image changed"
     fi
-    if [ -w /dev/kvm ]; then
-        qemu_args+=(-enable-kvm -cpu host)
-    fi
-
-    timeout 90 "$QEMU_BIN" "${qemu_args[@]}" >/dev/null 2>&1 || true
 }
 
-read_result() {
-    # The guest writes a small text result to /dev/vdb. Strip
-    # trailing NUL bytes.
-    tr -d '\000' < "$RESULT_DISK" | sed -n '1,200p'
+prepare_interrupted_fixture() {
+    local log=$WORKDIR/prepare_interrupted.serial.log
+    local esp_before
+    esp_before=$(hash_image "$ESP_GRUB")
+    local args=(
+        -nodefaults -no-reboot -nographic -m 512M
+        -kernel "$KERNEL" -initrd "$INITRAMFS_IMG"
+        -append "console=ttyS0 quiet panic=-1 catos_doctor_scenario=prepare_interrupted"
+        -drive "file=$ROOT_INTERRUPTED,format=raw,if=virtio"
+        -drive "file=$ESP_GRUB,format=raw,if=virtio,readonly=on"
+        -serial "file:$log"
+    )
+    if [[ -w /dev/kvm ]]; then args+=(-enable-kvm -cpu host); fi
+    set +e
+    timeout 120 "$QEMU_BIN" "${args[@]}" >/dev/null 2>&1
+    local rc=$?
+    set -e
+    [[ $rc -ne 124 ]] || fail "prepare_interrupted: QEMU timed out"
+    [[ -f $log ]] || fail "prepare_interrupted: no serial log"
+    tr -d '\r' < "$log" > "$log.normalized"
+    local body
+    body=$(cat "$log.normalized")
+    assert_contains "$body" "__FIXTURE_PREPARED__" prepare_interrupted
+    assert_not_contains "$body" "__FIXTURE_PREPARE_FAILED__" prepare_interrupted
+    [[ $(hash_image "$ESP_GRUB") == "$esp_before" ]] \
+        || fail "prepare_interrupted: ESP image changed"
 }
 
-# ---------------------------------------------------------------------------
-# Scenario 1: healthy target.
-# ---------------------------------------------------------------------------
+assert_doctor_success() {
+    local body=$1 scenario=$2
+    assert_contains "$body" "__DOCTOR_RC__=0" "$scenario"
+    assert_contains "$body" "all_clean: true" "$scenario"
+}
 
-echo "=== scenario: healthy ==="
-run_qemu healthy "$HEALTHY_IMG" ""
-RESULT=$(read_result)
-echo "$RESULT" | head -10
-RC=$(echo "$RESULT" | sed -n 's/^rc=\([0-9]*\).*/\1/p' | head -1)
-HASH_UNCHANGED=$(echo "$RESULT" | sed -n 's/^hash_unchanged=\(.*\)/\1/p' | head -1)
-HEALTHY_HASH_AFTER=$(sha256sum "$HEALTHY_IMG" | awk '{print $1}')
-if [ -z "$RC" ]; then
-    echo "fail: healthy scenario produced no result"; KEEP=1; exit 1
-fi
-# Doctor must succeed (exit 0) regardless of target health per scheme B.
-if [ "$RC" != "0" ]; then
-    echo "fail: healthy scenario exit code $RC (expected 0)"
-    KEEP=1
-    exit 1
-fi
-if [ "$HASH_UNCHANGED" != "yes" ]; then
-    echo "fail: healthy target image changed during diagnosis"
-    KEEP=1
-    exit 1
-fi
-if [ "$HEALTHY_HASH_BEFORE" != "$HEALTHY_HASH_AFTER" ]; then
-    echo "fail: healthy target host-hash changed (Doctor wrote to target)"
-    KEEP=1
-    exit 1
-fi
-echo "ok: healthy — exit 0, image byte-identical before/after"
+assert_provider() {
+    local scenario=$1 root=$2 esp=$3 uuid=$4 provider=$5
+    echo "=== scenario: provider-$provider ==="
+    run_qemu "$scenario" "$root" "$esp"
+    local out=$LAST_LOG
+    assert_doctor_success "$out" "$scenario"
+    assert_contains "$out" "Selected target: CatOS QEMU Fixture" "$scenario"
+    assert_contains "$out" "root device:   /dev/vda" "$scenario"
+    assert_contains "$out" "root fstype:   btrfs" "$scenario"
+    assert_contains "$out" "root subvol:   /@" "$scenario"
+    assert_contains "$out" "ROOT_UUID: root UUID: $uuid" "$scenario"
+    assert_contains "$out" "FSTAB_LOADED: read" "$scenario"
+    assert_contains "$out" "PROVIDER_DETECTED: provider=$provider" "$scenario"
+    assert_not_contains "$out" "BOOT_ASSET_MISSING" "$scenario"
+    assert_not_contains "$out" "STANDARD_SUBVOLUME_MISSING" "$scenario"
+}
 
-# ---------------------------------------------------------------------------
-# Scenario 2: fs_corrupt (only when btrfs-progs fixtures succeeded).
-# ---------------------------------------------------------------------------
+echo "=== scenario: prepare-interrupted-transaction ==="
+prepare_interrupted_fixture
 
-if [ -n "$CORRUPT_HASH_BEFORE" ]; then
-    echo "=== scenario: fs_corrupt ==="
-    run_qemu fs_corrupt "$CORRUPT_IMG" ""
-    RESULT=$(read_result)
-    echo "$RESULT" | head -10
-    RC=$(echo "$RESULT" | sed -n 's/^rc=\([0-9]*\).*/\1/p' | head -1)
-    HASH_UNCHANGED=$(echo "$RESULT" | sed -n 's/^hash_unchanged=\(.*\)/\1/p' | head -1)
-    CORRUPT_HASH_AFTER=$(sha256sum "$CORRUPT_IMG" | awk '{print $1}')
-    if [ "$RC" != "0" ]; then
-        echo "fail: fs_corrupt exit code $RC (expected 0 per scheme B)"
-        KEEP=1
-        exit 1
-    fi
-    if [ "$HASH_UNCHANGED" != "yes" ]; then
-        echo "fail: corrupt target image changed during diagnosis"
-        KEEP=1
-        exit 1
-    fi
-    if [ "$CORRUPT_HASH_BEFORE" != "$CORRUPT_HASH_AFTER" ]; then
-        echo "fail: corrupt target host-hash changed (Doctor wrote to target)"
-        KEEP=1
-        exit 1
-    fi
-    # We do NOT hard-assert the FS_CORRUPTION_DETECTED issue code in
-    # the report because the btrfs-progs version + fixture may
-    # legitimately produce either corruption-detected or
-    # tool-missing; both are valid scheme-B diagnoses.
-    echo "ok: fs_corrupt — exit 0, image byte-identical before/after"
-else
-    echo "ok: fs_corrupt — skipped (host lacks btrfs-map-logical or btrfs-progs)"
-fi
+assert_provider provider_grub "$ROOT_GRUB" "$ESP_GRUB" "$UUID_GRUB" grub
+assert_contains "$LAST_LOG" "RECOVERY_RECORDS: no in-flight recovery transactions on target" "healthy"
 
-# ---------------------------------------------------------------------------
-# Scenario 3: mount_break.
-# ---------------------------------------------------------------------------
+assert_provider provider_limine "$ROOT_LIMINE" "$ESP_LIMINE" "$UUID_LIMINE" limine
+assert_provider provider_systemd "$ROOT_SYSTEMD" "$ESP_SYSTEMD" "$UUID_SYSTEMD" systemd-boot
+assert_provider provider_uki "$ROOT_UKI" "$ESP_UKI" "$UUID_UKI" uki
 
-echo "=== scenario: mount_break ==="
-run_qemu mount_break "$BROKEN_FSTAB_IMG" ""
-RESULT=$(read_result)
-echo "$RESULT" | head -10
-RC=$(echo "$RESULT" | sed -n 's/^rc=\([0-9]*\).*/\1/p' | head -1)
-HASH_UNCHANGED=$(echo "$RESULT" | sed -n 's/^hash_unchanged=\(.*\)/\1/p' | head -1)
-BROKEN_HASH_AFTER=$(sha256sum "$BROKEN_FSTAB_IMG" | awk '{print $1}')
-if [ "$RC" != "0" ]; then
-    echo "fail: mount_break exit code $RC (expected 0)"
-    KEEP=1
-    exit 1
-fi
-if [ "$HASH_UNCHANGED" != "yes" ]; then
-    echo "fail: broken-fstab target image changed during diagnosis"
-    KEEP=1
-    exit 1
-fi
-if [ "$BROKEN_HASH_BEFORE" != "$BROKEN_HASH_AFTER" ]; then
-    echo "fail: broken-fstab host-hash changed (Doctor wrote to target)"
-    KEEP=1
-    exit 1
-fi
-echo "ok: mount_break — exit 0, image byte-identical before/after"
+echo "=== scenario: broken-fstab ==="
+run_qemu broken_fstab "$ROOT_BROKEN" "$ESP_GRUB"
+assert_doctor_success "$LAST_LOG" broken_fstab
+assert_contains "$LAST_LOG" "FSTAB_ROOT_SOURCE_MISMATCH" broken_fstab
+assert_contains "$LAST_LOG" "root UUID mismatch (expected $UUID_BROKEN" broken_fstab
 
-# ---------------------------------------------------------------------------
-# Scenario 4: ambiguous (two equally-plausible targets).
-# ---------------------------------------------------------------------------
+echo "=== scenario: filesystem-corruption ==="
+run_qemu filesystem_corruption "$ROOT_CORRUPT" "$ESP_GRUB"
+assert_doctor_success "$LAST_LOG" filesystem_corruption
+assert_contains "$LAST_LOG" "FS_CORRUPTION_DETECTED" filesystem_corruption
+assert_contains "$LAST_LOG" "Filesystem" filesystem_corruption
+assert_contains "$LAST_LOG" "status: critical" filesystem_corruption
 
-echo "=== scenario: ambiguous ==="
-# Attach vda = AMBIG_A, vdb = result disk, vdc = AMBIG_B. The guest
-# reads its target from /dev/vda; Doctor's discovery sees both
-# vda and vdc and must report TARGET_AMBIGUOUS (or
-# TARGET_NOT_FOUND — either is acceptable since we did not
-# uniquely confirm CatOS identity from inside the guest).
-truncate -s 8M "$RESULT_DISK"
-qemu_args=(
-    -nodefaults -no-reboot -nographic -m 256M
-    -kernel "$KERNEL"
-    -initrd "$INITRAMFS_IMG"
-    -append "console=ttyS0 quiet catos_doctor_scenario=ambiguous"
-    -drive "file=$AMBIG_A_IMG,format=raw,if=virtio"
-    -drive "file=$RESULT_DISK,format=raw,if=virtio"
-    -drive "file=$AMBIG_B_IMG,format=raw,if=virtio"
-    -serial "file:$SERIAL_LOG"
-)
-if [ -w /dev/kvm ]; then
-    qemu_args+=(-enable-kvm -cpu host)
-fi
-timeout 90 "$QEMU_BIN" "${qemu_args[@]}" >/dev/null 2>&1 || true
-RESULT=$(read_result)
-echo "$RESULT" | head -10
-RC=$(echo "$RESULT" | sed -n 's/^rc=\([0-9]*\).*/\1/p' | head -1)
-AMBIG_A_HASH_AFTER=$(sha256sum "$AMBIG_A_IMG" | awk '{print $1}')
-AMBIG_B_HASH_AFTER=$(sha256sum "$AMBIG_B_IMG" | awk '{print $1}')
-if [ "$RC" != "0" ]; then
-    echo "fail: ambiguous exit code $RC (expected 0)"
-    KEEP=1
-    exit 1
-fi
-if [ "$AMBIG_A_HASH_BEFORE" != "$AMBIG_A_HASH_AFTER" ]; then
-    echo "fail: ambiguous target A changed"
-    KEEP=1
-    exit 1
-fi
-if [ "$AMBIG_B_HASH_BEFORE" != "$AMBIG_B_HASH_AFTER" ]; then
-    echo "fail: ambiguous target B changed"
-    KEEP=1
-    exit 1
-fi
-echo "ok: ambiguous — exit 0, both images byte-identical before/after"
+echo "=== scenario: ambiguous-targets ==="
+run_qemu ambiguous "$ROOT_AMBIG_A" "$ESP_GRUB" "$ROOT_AMBIG_B"
+assert_contains "$LAST_LOG" "__NONTTY_RC__=" ambiguous
+non_tty_rc=$(sed -n 's/^__NONTTY_RC__=//p' <<<"$LAST_LOG" | tail -1)
+[[ -n $non_tty_rc && $non_tty_rc != 0 ]] || fail "ambiguous: non-TTY call did not fail"
+assert_contains "$LAST_LOG" "multiple target candidates require an interactive terminal" ambiguous
+assert_contains "$LAST_LOG" "  [0] CatOS QEMU Fixture" ambiguous
+assert_contains "$LAST_LOG" "  [1] CatOS QEMU Fixture" ambiguous
+assert_contains "$LAST_LOG" "__DOCTOR_RC__=0" ambiguous
+index_zero=$(sed -n 's/^  \[0\] //p' <<<"$LAST_LOG" | head -1)
+selected=$(sed -n 's/.*Selected target: //p' <<<"$LAST_LOG" | tail -1)
+[[ -n $index_zero && $selected == "$index_zero" ]] \
+    || fail "ambiguous: selected target does not match displayed index 0 (index='$index_zero', selected='$selected')"
 
-# ---------------------------------------------------------------------------
-# Scenario 5: doctor_fail.
-# ---------------------------------------------------------------------------
+echo "=== scenario: interrupted-transaction ==="
+run_qemu interrupted_transaction "$ROOT_INTERRUPTED" "$ESP_GRUB"
+assert_doctor_success "$LAST_LOG" interrupted_transaction
+assert_contains "$LAST_LOG" "RECOVERY_TRANSACTION_INTERRUPTED" interrupted_transaction
+assert_contains "$LAST_LOG" "RUN_CATOS_RECOVERY_RESUME" interrupted_transaction
+assert_contains "$LAST_LOG" "tx-00000000000000000000000000000004" interrupted_transaction
 
-echo "=== scenario: doctor_fail ==="
-# Re-use the healthy image as a passive target. The guest invokes
-# the deliberately-broken binary; we expect a non-zero exit code
-# (crash, segfault, or ARG-cascade) — the key contract is that
-# "Doctor itself failed" surfaces as exit != 0.
-run_qemu doctor_fail "$HEALTHY_IMG" ""
-RESULT=$(read_result)
-echo "$RESULT" | head -10
-RC=$(echo "$RESULT" | sed -n 's/^rc=\([0-9]*\).*/\1/p' | head -1)
-if [ -z "$RC" ]; then
-    echo "fail: doctor_fail scenario produced no result"; KEEP=1; exit 1
-fi
-if [ "$RC" = "0" ]; then
-    echo "fail: doctor_fail exit code 0 (expected non-zero)"
-    KEEP=1
-    exit 1
-fi
-echo "ok: doctor_fail — exit $RC (non-zero, scheme B honoured)"
-
-echo
-echo "ALL DOCTOR QEMU SCENARIOS PASSED"
-exit 0
+echo "pass: Doctor QEMU acceptance exercised /bin/catos-doctor, real target selection, provider matrix, corruption, fstab failure, ambiguity, recovery, cleanup and no-write hashes"
