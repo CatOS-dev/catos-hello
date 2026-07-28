@@ -810,7 +810,7 @@ fn choose_snapshot(target: &InteractiveTarget) -> Result<Option<String>, String>
     let report = load_recovery_choices(target)?;
     let choices = snapshot_menu_items(&report);
     if choices.is_empty() {
-        println!("No eligible read-only snapshots were detected.");
+        write_interactive_text("No eligible read-only snapshots were detected.\n")?;
         return menu::prompt("Snapshot subvolume, for example /.snapshots/42/snapshot");
     }
     choose_recovery_item(
@@ -825,7 +825,7 @@ fn choose_transaction(target: &InteractiveTarget) -> Result<Option<String>, Stri
     let report = load_recovery_choices(target)?;
     let choices = transaction_menu_items(&report);
     if choices.is_empty() {
-        println!("No recovery transactions were detected.");
+        write_interactive_text("No recovery transactions were detected.\n")?;
         return menu::prompt("Transaction ID");
     }
     choose_recovery_item(
@@ -886,18 +886,32 @@ fn load_interactive_recovery_plan(
         .map_err(|error| format!("cannot load recovery plan {path:?}: {error}"))
 }
 
-fn print_recovery_plan_summary(plan: &crate::snapshot::model::RecoveryPlan) {
-    println!("Recovery plan:");
-    println!("  Plan ID         : {}", plan.plan_id);
-    println!("  Filesystem      : {}", plan.filesystem.fsid);
-    println!("  Current root    : {}", plan.current_root.path);
-    println!("  Source snapshot : {}", plan.source_snapshot.path);
+fn recovery_plan_summary(plan: &crate::snapshot::model::RecoveryPlan) -> String {
+    use std::fmt::Write as _;
+
+    let mut output = String::new();
+    writeln!(output, "Recovery plan:").expect("writing to String cannot fail");
+    writeln!(output, "  Plan ID         : {}", plan.plan_id)
+        .expect("writing to String cannot fail");
+    writeln!(output, "  Filesystem      : {}", plan.filesystem.fsid)
+        .expect("writing to String cannot fail");
+    writeln!(output, "  Current root    : {}", plan.current_root.path)
+        .expect("writing to String cannot fail");
+    writeln!(output, "  Source snapshot : {}", plan.source_snapshot.path)
+        .expect("writing to String cannot fail");
     if !plan.risks_and_warnings.is_empty() {
-        println!("  Risks and warnings:");
+        writeln!(output, "  Risks and warnings:").expect("writing to String cannot fail");
         for warning in &plan.risks_and_warnings {
-            println!("    - {warning}");
+            writeln!(output, "    - {warning}").expect("writing to String cannot fail");
         }
     }
+    output
+}
+
+fn print_recovery_plan_summary(
+    plan: &crate::snapshot::model::RecoveryPlan,
+) -> Result<(), String> {
+    write_interactive_text(&recovery_plan_summary(plan))
 }
 
 fn run_recovery_menu(context: CommandContext) -> i32 {
@@ -976,7 +990,7 @@ fn interactive_recovery_for_command(
                 return Ok(None);
             };
             let plan = load_interactive_recovery_plan(&plan_file)?;
-            print_recovery_plan_summary(&plan);
+            print_recovery_plan_summary(&plan)?;
             args.extend([
                 "--plan-file".into(),
                 plan_file,
@@ -995,7 +1009,10 @@ fn interactive_recovery_for_command(
             };
             if command == "revert" {
                 let status = load_recovery_status(&target, &transaction)?;
-                println!("Transaction state: {}", status.reconciled_state.code());
+                write_interactive_text(&format!(
+                    "Transaction state: {}\n",
+                    status.reconciled_state.code()
+                ))?;
                 let Some(token) = status.revert_confirmation_token else {
                     return Err(format!(
                         "transaction {transaction:?} cannot be reverted from state {}",
@@ -1073,6 +1090,13 @@ fn write_stdout_text(program: &str, text: &str) -> i32 {
 fn write_stdout_text_with<W: std::io::Write>(output: &mut W, text: &str) -> std::io::Result<()> {
     output.write_all(text.as_bytes())?;
     output.flush()
+}
+
+fn write_interactive_text(text: &str) -> Result<(), String> {
+    let stdout = std::io::stdout();
+    let mut output = stdout.lock();
+    write_stdout_text_with(&mut output, text)
+        .map_err(|error| format!("interactive output failed: {error}"))
 }
 
 fn print_advanced_help() -> i32 {
@@ -2130,6 +2154,65 @@ mod tests {
         let mut output = Vec::new();
         write_stdout_text_with(&mut output, "help\n").unwrap();
         assert_eq!(output, b"help\n");
+    }
+
+    #[test]
+    fn recovery_plan_summary_contains_confirmation_facts() {
+        let boot_layout = crate::boot::model::BootLayout::default();
+        let plan = crate::snapshot::model::RecoveryPlan {
+            schema_version: crate::snapshot::model::RECOVERY_PLAN_SCHEMA_VERSION,
+            plan_id: "plan-123".into(),
+            generated_at_unix: 1,
+            generated_on_host: None,
+            filesystem: crate::snapshot::model::BtrfsFilesystemIdentity {
+                fsid: "fsid-123".into(),
+                device_major_minor: "259:2".into(),
+                label: None,
+            },
+            current_root: crate::snapshot::model::BtrfsSubvolumeIdentity {
+                path: "/@".into(),
+                subvolume_id: 256,
+                generation: 100,
+                uuid: None,
+                parent_uuid: None,
+                read_only: false,
+                evidence: vec![],
+            },
+            source_snapshot: crate::snapshot::model::BtrfsSubvolumeIdentity {
+                path: "/.snapshots/42/snapshot".into(),
+                subvolume_id: 300,
+                generation: 80,
+                uuid: None,
+                parent_uuid: None,
+                read_only: true,
+                evidence: vec![],
+            },
+            target_catos_identity: Some(crate::snapshot::model::CatosIdentity::default()),
+            boot_consistency:
+                crate::boot::diagnose::layout::evaluate_readonly_consistency(&boot_layout),
+            boot_layout,
+            backup_root_path: "/.catos-recovery/backups/plan-123/root-before".into(),
+            staging_root_path: "/.catos-recovery/staging/plan-123/new-root".into(),
+            fstab_root_definition: crate::snapshot::model::FstabRootDefinition {
+                source: "/dev/nvme0n1p2".into(),
+                fstype: "btrfs".into(),
+                options: vec!["subvol=/@".into()],
+            },
+            predicted_steps: vec![],
+            refusal_conditions: vec![],
+            risks_and_warnings: vec!["review boot state".into()],
+            nonce: "00".repeat(32),
+            plan_digest: "00".repeat(32),
+            confirmation_token: "token".into(),
+            evidence: vec![],
+        };
+
+        let summary = recovery_plan_summary(&plan);
+        assert!(summary.contains("Plan ID         : plan-123"));
+        assert!(summary.contains("Filesystem      : fsid-123"));
+        assert!(summary.contains("Current root    : /@"));
+        assert!(summary.contains("Source snapshot : /.snapshots/42/snapshot"));
+        assert!(summary.contains("review boot state"));
     }
 
     #[test]
