@@ -338,12 +338,7 @@ impl BootRepairOutcome {
 
     /// `true` iff the outcome represents a successful end state.
     pub fn is_success(self) -> bool {
-        matches!(
-            self,
-            BootRepairOutcome::Clean
-                | BootRepairOutcome::Repaired
-                | BootRepairOutcome::PartiallyRepaired
-        )
+        matches!(self, BootRepairOutcome::Clean | BootRepairOutcome::Repaired)
     }
 
     /// `true` iff the orchestrator deliberately refused to act.
@@ -720,6 +715,15 @@ mod tests {
         assert!(!json.contains("\"enrollment_password\""));
         assert!(json.contains("enrollment_password_generated"));
         assert!(json.contains("enrollment_password_path"));
+    }
+
+    #[test]
+    fn only_complete_boot_outcomes_are_successful() {
+        assert!(BootRepairOutcome::Clean.is_success());
+        assert!(BootRepairOutcome::Repaired.is_success());
+        assert!(!BootRepairOutcome::PartiallyRepaired.is_success());
+        assert!(!BootRepairOutcome::VerificationFailed.is_success());
+        assert!(!BootRepairOutcome::ManualInterventionRequired.is_success());
     }
 
     #[test]

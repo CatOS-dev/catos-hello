@@ -451,12 +451,7 @@ impl MountRepairOutcome {
     }
 
     pub fn is_success(self) -> bool {
-        matches!(
-            self,
-            MountRepairOutcome::Clean
-                | MountRepairOutcome::Repaired
-                | MountRepairOutcome::PartiallyRepaired
-        )
+        matches!(self, MountRepairOutcome::Clean | MountRepairOutcome::Repaired)
     }
 
     pub fn is_refusal(self) -> bool {
@@ -873,6 +868,15 @@ mod tests {
     #[test]
     fn mount_session_state_default_is_ready() {
         assert_eq!(MountSessionState::default(), MountSessionState::Ready);
+    }
+
+    #[test]
+    fn only_complete_mount_outcomes_are_successful() {
+        assert!(MountRepairOutcome::Clean.is_success());
+        assert!(MountRepairOutcome::Repaired.is_success());
+        assert!(!MountRepairOutcome::PartiallyRepaired.is_success());
+        assert!(!MountRepairOutcome::VerificationFailed.is_success());
+        assert!(!MountRepairOutcome::CleanupIncomplete.is_success());
     }
 
     #[test]
