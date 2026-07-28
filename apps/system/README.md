@@ -410,6 +410,7 @@ The following surfaces are wired into CTest when `-DBUILD_TESTS=ON`:
 | `catos-system-repair-qemu-smoke` | Real-filesystem repair acceptance in QEMU. It repairs deliberately damaged ext4 and FAT images, damages one metadata-DUP root-tree mirror and proves Btrfs escalates from the checksum diagnostic to `--repair` and a clean recheck, exercises normal XFS repair, and creates a real unclean XFS journal by killing a writer VM before proving `xfs_repair -L` reports `repaired_with_risk`. |
 | `catos-system-mount-repair-qemu-smoke` | State-changing mount-repair acceptance in QEMU. It exercises all six `/boot`/ESP layouts, a Btrfs `@boot`, an independent ext4 `/boot`, a plain ext4 target, the currently-running ext4 root without unmounting it, complete fstab mount verification, and empty-subvolume rollback after an induced verification failure. |
 | `catos-system-doctor-qemu-smoke` | Read-only Doctor acceptance in QEMU. Covers offline CatOS targets, provider detection, corruption, broken fstab, ambiguity, interrupted recovery, and a real running-root case that mounts the CatOS `@` subvolume as `/` and enters it with `switch_root` before executing `catos-doctor`. It asserts the correct `offline`/`running` target kind, cleanup, exit semantics, and byte-for-byte `sha256` no-write guarantees. Once QEMU starts, skipped assertions are hard failures. |
+| `catos-system-doctor-encrypted-root-qemu-smoke` | Real LUKS2 + Btrfs running-root acceptance. The guest unlocks `/dev/vda` as `/dev/mapper/cryptroot`, creates the CatOS subvolume layout, enters `/@` with `switch_root`, and proves Doctor associates `/dev/dm-0` with the mapper mount despite Btrfs `0:NN` mountinfo identity. It must select `target=running`, skip offline fsck on the RW root, and leave no session mounts. |
 
 The two minimal initramfs tests are opt-in through
 `-DCATOS_SYSTEM_INITRAMFS_SMOKE=ON`. The real storage test is enabled with
@@ -802,7 +803,10 @@ are mounts it created itself inside its private mount namespace
 each target image before and after a `catos-doctor` run; any hash
 mismatch is a hard failure. The same matrix boots one fixture by mounting its
 CatOS `@` subvolume as `/` and using `switch_root`, so running-root acceptance
-is not inferred from an offline-target test.
+is not inferred from an offline-target test. The separate encrypted-root matrix
+(`scripts/doctor-encrypted-root-qemu-smoke.sh`) performs a real LUKS2 unlock,
+enters the mapper-backed Btrfs root, and verifies both `/dev/dm-*` versus
+`/dev/mapper/*` aliasing and the prohibition on offline fsck of a RW root.
 
 ### Issue codes
 

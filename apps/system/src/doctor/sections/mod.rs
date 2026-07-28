@@ -60,6 +60,27 @@ pub(in crate::doctor) fn target_root_path(
     target.root.clone()
 }
 
+pub(in crate::doctor) fn target_bound_repair_command(
+    program: &str,
+    target: &crate::target::model::TargetIdentity,
+    esp_device: Option<&Path>,
+) -> Option<String> {
+    let root_device = target.root_device.as_deref()?;
+    let mut command = format!(
+        "{program} --root-device {}",
+        root_device.display()
+    );
+    if let Some(subvolume) = target.root_subvol.as_deref() {
+        command.push_str(" --root-subvolume ");
+        command.push_str(subvolume);
+    }
+    if let Some(esp_device) = esp_device {
+        command.push_str(" --esp-device ");
+        command.push_str(&esp_device.display().to_string());
+    }
+    Some(command)
+}
+
 pub(in crate::doctor) fn read_target_file(
     root: &Path,
     relative: &str,
@@ -86,7 +107,10 @@ pub(in crate::doctor) fn device_mount_state(device: &Path, body: &str) -> Result
     let mut found = false;
     for line in body.lines().filter(|line| !line.trim().is_empty()) {
         let mount = crate::mount::diagnose::mountinfo::parse_line(line).ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidData, "malformed mountinfo line"))?;
-        if mount.source == dev_str {
+        let source = Path::new(&mount.source);
+        if mount.source == dev_str
+            || crate::mount::diagnose::target::same_block_device(device, source)
+        {
             found = true;
             if !mount.is_read_only() {
                 return Ok(MountState::MountedRw);
@@ -103,7 +127,10 @@ pub(in crate::doctor) fn is_device_mounted_rw(device: &Path) -> Result<MountStat
 
 #[cfg(test)]
 mod tests {
-    use super::{device_mount_state, read_target_file, target_root_path, MountState};
+    use super::{
+        device_mount_state, read_target_file, target_bound_repair_command, target_root_path,
+        MountState,
+    };
     use crate::target::model::TargetIdentity;
     use std::path::PathBuf;
 
@@ -117,6 +144,26 @@ mod tests {
         assert_eq!(
             target_root_path(&target),
             PathBuf::from("/run/catos-target-session/root")
+        );
+    }
+
+    #[test]
+    fn repair_command_preserves_selected_root_subvolume_and_esp() {
+        let target = TargetIdentity {
+            root_device: Some(PathBuf::from("/dev/dm-0")),
+            root_subvol: Some("/@root".into()),
+            ..TargetIdentity::default()
+        };
+        assert_eq!(
+            target_bound_repair_command(
+                "catos-repair mount",
+                &target,
+                Some(std::path::Path::new("/dev/nvme0n1p1")),
+            )
+            .as_deref(),
+            Some(
+                "catos-repair mount --root-device /dev/dm-0 --root-subvolume /@root --esp-device /dev/nvme0n1p1"
+            )
         );
     }
 

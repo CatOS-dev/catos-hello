@@ -9,7 +9,9 @@ use crate::doctor::model::{
 };
 use crate::target::Evidence;
 
-use super::{push_evidence, read_target_file, set_section, target_root_path};
+use super::{
+    push_evidence, read_target_file, set_section, target_bound_repair_command, target_root_path,
+};
 use crate::doctor::DoctorTargetContext;
 
 pub(in crate::doctor) fn run_boot_section(
@@ -128,6 +130,29 @@ pub(in crate::doctor) fn run_boot_section(
                     )
                     .with_recommendation(recommendation_code::RUN_CATOS_REPAIR_BOOT),
                 );
+                let esp_device = context
+                    .esp
+                    .as_ref()
+                    .ok()
+                    .and_then(|esp| esp.as_ref())
+                    .map(|esp| esp.device.as_path());
+                let recommendation = DoctorRecommendation::new(
+                    recommendation_code::RUN_CATOS_REPAIR_BOOT,
+                    format!(
+                        "provider {} is missing required assets; re-apply the selected target's boot recipe",
+                        provider.as_str()
+                    ),
+                );
+                report.recommendations.push(
+                    match target_bound_repair_command(
+                        "catos-repair boot",
+                        &context.target,
+                        esp_device,
+                    ) {
+                        Some(command) => recommendation.with_command(command),
+                        None => recommendation,
+                    },
+                );
             }
         }
         DetectionVerdict::Conflict {
@@ -186,7 +211,7 @@ fn collect_detection_inputs(context: &DoctorTargetContext) -> Result<DetectionIn
         has_boot_grub: boot_asset_exists(context, "grub")?,
         has_esp_limine_conf: esp.map_or(Ok(false), |esp| target_path_exists(esp.root.root(), "limine.conf"))?,
         has_systemd_boot_loader: esp.map_or(Ok(false), |esp| target_path_exists(esp.root.root(), "loader/loader.conf"))?,
-        has_catos_uki_deployed: esp.map_or(Ok(false), |esp| target_path_exists(esp.root.root(), "EFI/CatOS"))?,
+        has_catos_uki_deployed: esp.map_or(Ok(false), |esp| target_path_exists(esp.root.root(), "EFI/Linux"))?,
         has_efistub_deployed: esp.map_or(Ok(false), |esp| target_path_exists(esp.root.root(), "EFI/CatOS"))?,
         installed_packages: installed_packages(&root)?,
     })
@@ -508,15 +533,19 @@ fn provider_firmware_asset_present(
     let Some(firmware_boot_conf) = firmware_boot_conf else {
         return Ok(false);
     };
+    let method =
+        crate::boot::diagnose::provider::parse_firmware_boot_method(firmware_boot_conf);
     match provider {
-        crate::boot::model::ProviderId::Uki => Ok(firmware_boot_conf.contains("method=uki")
-            && target_path_exists(esp_root, "EFI/Linux")?
-            && has_efi_file(esp_root, "EFI/Linux")?),
-        crate::boot::model::ProviderId::Efistub => {
-            Ok(firmware_boot_conf.contains("method=efistub")
+        crate::boot::model::ProviderId::Uki => Ok(
+            method == Some(crate::boot::model::FirmwareMethod::Uki)
+                && target_path_exists(esp_root, "EFI/Linux")?
+                && has_efi_file(esp_root, "EFI/Linux")?,
+        ),
+        crate::boot::model::ProviderId::Efistub => Ok(
+            method == Some(crate::boot::model::FirmwareMethod::Efistub)
                 && target_path_exists(esp_root, "EFI/CatOS")?
-                && has_efi_file(esp_root, "EFI/CatOS")?)
-        }
+                && has_efi_file(esp_root, "EFI/CatOS")?,
+        ),
         _ => Ok(false),
     }
 }
@@ -767,10 +796,26 @@ pub(in crate::doctor) fn run_secure_boot_section(
             id,
             "Secure Boot policy is inconsistent across firmware runtime, target marker, and firmware-boot configuration",
         ));
-        report.recommendations.push(DoctorRecommendation::new(
+        let recommendation = DoctorRecommendation::new(
             recommendation_code::RUN_CATOS_REPAIR_BOOT,
             "Secure Boot policy is inconsistent; catos-repair boot can re-apply the target's existing policy",
-        ));
+        );
+        let esp_device = context
+            .esp
+            .as_ref()
+            .ok()
+            .and_then(|esp| esp.as_ref())
+            .map(|esp| esp.device.as_path());
+        report.recommendations.push(
+            match target_bound_repair_command(
+                "catos-repair boot",
+                &context.target,
+                esp_device,
+            ) {
+                Some(command) => recommendation.with_command(command),
+                None => recommendation,
+            },
+        );
     } else {
         set_section(sections, id, DoctorSectionStatus::Healthy);
     }
@@ -793,8 +838,19 @@ mod tests {
         std::fs::create_dir_all(root.join("EFI/Linux")).unwrap();
         std::fs::write(root.join("EFI/Linux/catos.efi"), b"efi").unwrap();
 
-        assert!(provider_firmware_asset_present(&root, ProviderId::Uki, Some("method=uki")).unwrap());
-        assert!(!provider_firmware_asset_present(&root, ProviderId::Efistub, Some("method=uki")).unwrap());
+        let writer_config = "[boot]\nmethod = uki\nesp_path = /boot/efi\n";
+        assert!(provider_firmware_asset_present(
+            &root,
+            ProviderId::Uki,
+            Some(writer_config),
+        )
+        .unwrap());
+        assert!(!provider_firmware_asset_present(
+            &root,
+            ProviderId::Efistub,
+            Some(writer_config),
+        )
+        .unwrap());
         std::fs::remove_dir_all(root).unwrap();
     }
 

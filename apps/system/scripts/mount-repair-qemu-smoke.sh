@@ -214,7 +214,7 @@ boot_mm=$(cat /sys/class/block/vdc/dev)
 plain_mm=$(cat /sys/class/block/vdd/dev)
 cat > "/run/udev/data/b${root_mm}" <<'EOF_UDEV_ROOT'
 E:ID_FS_TYPE=btrfs
-E:ID_FS_UUID=target
+E:ID_FS_UUID=11111111-2222-3333-4444-555555555555
 E:ID_FS_USAGE=filesystem
 E:ID_FS_LABEL=catos-target
 EOF_UDEV_ROOT
@@ -244,39 +244,39 @@ write_case_fstab() {
     case "$case_name" in
         esp_at_boot_efi)
             cat > /target/etc/fstab <<'EOF_CASE'
-UUID=target / btrfs defaults,compress=zstd:3,subvol=/wrong 0 1
+UUID=11111111-2222-3333-4444-555555555555 / btrfs defaults,compress=zstd:3,subvol=/wrong 0 1
 UUID=old-esp /boot/efi vfat defaults,umask=0077 0 2
 EOF_CASE
             ;;
         esp_at_efi)
             cat > /target/etc/fstab <<'EOF_CASE'
-UUID=target / btrfs defaults,compress=zstd:3,subvol=/wrong 0 1
+UUID=11111111-2222-3333-4444-555555555555 / btrfs defaults,compress=zstd:3,subvol=/wrong 0 1
 UUID=old-esp /efi vfat defaults,umask=0077 0 2
 EOF_CASE
             ;;
         esp_at_boot)
             cat > /target/etc/fstab <<'EOF_CASE'
-UUID=target / btrfs defaults,compress=zstd:3,subvol=/wrong 0 1
+UUID=11111111-2222-3333-4444-555555555555 / btrfs defaults,compress=zstd:3,subvol=/wrong 0 1
 UUID=old-esp /boot vfat defaults,umask=0077 0 2
 EOF_CASE
             ;;
         separate_boot_and_esp)
             cat > /target/etc/fstab <<'EOF_CASE'
-UUID=target / btrfs defaults,compress=zstd:3,subvol=/wrong 0 1
+UUID=11111111-2222-3333-4444-555555555555 / btrfs defaults,compress=zstd:3,subvol=/wrong 0 1
 UUID=66666666-7777-8888-9999-aaaaaaaaaaaa /boot ext4 defaults,noatime 0 2
 UUID=old-esp /boot/efi vfat defaults,umask=0077 0 2
 EOF_CASE
             ;;
         boot_btrfs_subvolume)
             cat > /target/etc/fstab <<'EOF_CASE'
-UUID=target / btrfs defaults,compress=zstd:3,subvol=/wrong 0 1
-UUID=target /boot btrfs defaults,noatime,subvol=/@boot 0 0
+UUID=11111111-2222-3333-4444-555555555555 / btrfs defaults,compress=zstd:3,subvol=/wrong 0 1
+UUID=11111111-2222-3333-4444-555555555555 /boot btrfs defaults,noatime,subvol=/@boot 0 0
 UUID=old-esp /efi vfat defaults,umask=0077 0 2
 EOF_CASE
             ;;
         boot_inside_root)
             cat > /target/etc/fstab <<'EOF_CASE'
-UUID=target / btrfs defaults,compress=zstd:3,subvol=/wrong 0 1
+UUID=11111111-2222-3333-4444-555555555555 / btrfs defaults,compress=zstd:3,subvol=/wrong 0 1
 EOF_CASE
             ;;
         *) umount /target; return 1 ;;
@@ -317,9 +317,9 @@ btrfs subvolume delete /mnt/@home /mnt/@log >/dev/null || {
 umount /mnt
 mount -o subvol=/@ /dev/vda1 /target || { echo '===MOUNT_REPAIR_FATAL=== rollback mount root'; poweroff -f; }
 cat > /target/etc/fstab <<'EOF_ROLLBACK_FSTAB'
-UUID=target / btrfs defaults,subvol=/@ 0 0
-UUID=target /home btrfs defaults,subvol=/@home 0 0
-UUID=target /var/log btrfs defaults,subvol=/@log 0 0
+UUID=11111111-2222-3333-4444-555555555555 / btrfs defaults,subvol=/@ 0 0
+UUID=11111111-2222-3333-4444-555555555555 /home btrfs defaults,subvol=/@home 0 0
+UUID=11111111-2222-3333-4444-555555555555 /var/log btrfs defaults,subvol=/@log 0 0
 UUID=does-not-exist /mnt/broken ext4 defaults 0 2
 EOF_ROLLBACK_FSTAB
 mkdir -p /target/mnt/broken

@@ -253,6 +253,7 @@ impl From<CleanupReport> for CleanupSummary {
         if let Some(error) = report.directory_cleanup_error {
             residual.push(error);
         }
+        let all_clean = report.all_clean && residual.is_empty();
         Self {
             unmounted: report
                 .unmounted
@@ -260,7 +261,7 @@ impl From<CleanupReport> for CleanupSummary {
                 .map(|resource| resource.target.display().to_string())
                 .collect(),
             residual,
-            all_clean: report.all_clean,
+            all_clean,
         }
     }
 }
@@ -836,6 +837,29 @@ mod tests {
             let s = j.trim_matches('"');
             assert_eq!(kind.code(), s, "serde/code drift for {kind:?}");
         }
+    }
+
+    #[test]
+    fn cleanup_summary_never_reports_clean_with_residual_entries() {
+        let report = CleanupReport {
+            residual: vec![ResidualMount {
+                resource: MountedResource {
+                    order: 0,
+                    source: "/dev/root".into(),
+                    target: PathBuf::from("/run/catos-system/sessions/test"),
+                    fstype: "btrfs".into(),
+                    options: String::new(),
+                },
+                reason: "detached lazily".into(),
+                error_code: "busy".into(),
+            }],
+            all_clean: true,
+            ..CleanupReport::default()
+        };
+
+        let summary = CleanupSummary::from(report);
+        assert!(!summary.all_clean);
+        assert_eq!(summary.residual.len(), 1);
     }
 
     #[test]

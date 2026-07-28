@@ -142,9 +142,10 @@ fn doctor_selection_policy(
         PrimaryRuntimeMode::RunningSystem | PrimaryRuntimeMode::Chroot => {
             TargetSelectionPolicy::PreferRunningRoot
         }
-        PrimaryRuntimeMode::LiveEnvironment
-        | PrimaryRuntimeMode::Initramfs
-        | PrimaryRuntimeMode::Unknown => TargetSelectionPolicy::OfflineOnly,
+        PrimaryRuntimeMode::LiveEnvironment | PrimaryRuntimeMode::Initramfs => {
+            TargetSelectionPolicy::OfflineOnly
+        }
+        PrimaryRuntimeMode::Unknown => TargetSelectionPolicy::PreferRunningRoot,
     }
 }
 
@@ -263,6 +264,10 @@ mod tests {
         );
         assert_eq!(
             doctor_selection_policy(PrimaryRuntimeMode::Chroot),
+            crate::selection_ui::TargetSelectionPolicy::PreferRunningRoot
+        );
+        assert_eq!(
+            doctor_selection_policy(PrimaryRuntimeMode::Unknown),
             crate::selection_ui::TargetSelectionPolicy::PreferRunningRoot
         );
         assert_eq!(

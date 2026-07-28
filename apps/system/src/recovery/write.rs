@@ -129,7 +129,7 @@ pub(super) fn run_apply(
     // the session directory was removed. We persist it to the
     // transaction record AFTER the teardown via a brief remount, so
     // later `status` reads the truth instead of a pre-teardown guess.
-    let (mut engine, final_state) = match drive_outcome {
+    let (engine, final_state) = match drive_outcome {
         Ok(pair) => pair,
         Err(mut error) => {
             let cleanup_summary = mount_session.cleanup().into();
@@ -137,13 +137,15 @@ pub(super) fn run_apply(
             return Err(error);
         }
     };
-    let real_cleanup: CleanupSummary = mount_session.cleanup().into();
-    // Keep the in-memory record consistent with the renderer output.
-    engine.record_mut().last_cleanup = Some(real_cleanup.clone());
     let transaction_id = engine.record().transaction_id.clone();
-    let returned_record = engine.record().clone();
+    let mut returned_record = engine.record().clone();
+    // Engine owns the transaction lock file inside the mounted filesystem.
+    // Drop it before umount, otherwise the happy path deterministically
+    // reaches EBUSY and falls back to lazy detach.
     drop(engine);
+    let real_cleanup: CleanupSummary = mount_session.cleanup().into();
     drop(mount_session);
+    returned_record.last_cleanup = Some(real_cleanup.clone());
 
     persist_real_cleanup_after_teardown(
         &device,
@@ -203,7 +205,7 @@ pub(super) fn run_resume(
 
     // See run_apply: tear down first, persist the real summary via a
     // brief remount so later `status` reads the truth.
-    let (mut engine, final_state) = match drive_outcome {
+    let (engine, final_state) = match drive_outcome {
         Ok(pair) => pair,
         Err(mut error) => {
             let cleanup_summary = mount_session.cleanup().into();
@@ -211,12 +213,12 @@ pub(super) fn run_resume(
             return Err(error);
         }
     };
-    let real_cleanup: CleanupSummary = mount_session.cleanup().into();
-    engine.record_mut().last_cleanup = Some(real_cleanup.clone());
     let transaction_id = engine.record().transaction_id.clone();
-    let returned_record = engine.record().clone();
+    let mut returned_record = engine.record().clone();
     drop(engine);
+    let real_cleanup: CleanupSummary = mount_session.cleanup().into();
     drop(mount_session);
+    returned_record.last_cleanup = Some(real_cleanup.clone());
 
     persist_real_cleanup_after_teardown(
         &device,
@@ -283,7 +285,7 @@ pub(super) fn run_revert(
 
     // See run_apply: tear down first, persist the real summary via a
     // brief remount so later `status` reads the truth.
-    let (mut engine, final_state) = match revert_outcome {
+    let (engine, final_state) = match revert_outcome {
         Ok(pair) => pair,
         Err(mut error) => {
             let cleanup_summary = mount_session.cleanup().into();
@@ -291,12 +293,12 @@ pub(super) fn run_revert(
             return Err(error);
         }
     };
-    let real_cleanup: CleanupSummary = mount_session.cleanup().into();
-    engine.record_mut().last_cleanup = Some(real_cleanup.clone());
     let transaction_id = engine.record().transaction_id.clone();
-    let returned_record = engine.record().clone();
+    let mut returned_record = engine.record().clone();
     drop(engine);
+    let real_cleanup: CleanupSummary = mount_session.cleanup().into();
     drop(mount_session);
+    returned_record.last_cleanup = Some(real_cleanup.clone());
 
     persist_real_cleanup_after_teardown(
         &device,

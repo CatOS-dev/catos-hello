@@ -295,6 +295,7 @@ fn device_from_sysfs(
             .ok()
             .map(|value| value.trim().to_string()),
     };
+    let source_aliases = block_device_source_aliases(fs, &base, &dev_path, &uevent);
     let matching_mounts: Vec<&mountinfo::MountInfo> = mounts
         .iter()
         .filter(|entry| {
@@ -302,7 +303,9 @@ fn device_from_sysfs(
                 && (major_minor
                     .as_ref()
                     .is_some_and(|value| entry.major_minor == *value)
-                    || entry.source == dev_path.to_string_lossy())
+                    || source_aliases
+                        .iter()
+                        .any(|alias| entry.source == alias.to_string_lossy()))
         })
         .collect();
     let mount = matching_mounts.first().copied();
@@ -390,6 +393,30 @@ fn device_from_sysfs(
         mounted_before_session: !matching_mounts.is_empty(),
         evidence,
     }
+}
+
+fn block_device_source_aliases(
+    fs: &dyn FilesystemProbe,
+    base: &Path,
+    dev_path: &Path,
+    uevent: &HashMap<String, String>,
+) -> Vec<PathBuf> {
+    let mut aliases = vec![dev_path.to_path_buf()];
+    let dm_name = fs
+        .read_to_string(&base.join("dm/name"))
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .or_else(|| uevent.get("DM_NAME").cloned());
+    if let Some(name) = dm_name {
+        let path = Path::new(&name);
+        if path.components().count() == 1
+            && matches!(path.components().next(), Some(std::path::Component::Normal(_)))
+        {
+            aliases.push(Path::new("/dev/mapper").join(name));
+        }
+    }
+    aliases
 }
 
 fn apply_relationships(fs: &dyn FilesystemProbe, devices: &mut [BlockDevice]) {
@@ -585,4 +612,37 @@ fn read_bool(
 
 fn read_relation_names(fs: &dyn FilesystemProbe, path: &Path) -> Vec<String> {
     fs.read_dir_names(path).unwrap_or_default()
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::diagnose::filesystem::FixtureFilesystem;
+
+    #[test]
+    fn device_mapper_alias_associates_anonymous_btrfs_root_mount() {
+        let fs = FixtureFilesystem::new()
+            .dir("/sys")
+            .dir("/sys/class")
+            .dir("/sys/class/block")
+            .dir("/sys/class/block/dm-0")
+            .dir("/sys/class/block/dm-0/dm")
+            .file(
+                "/sys/class/block/dm-0/uevent",
+                b"MAJOR=253\nMINOR=0\nDEVNAME=dm-0\n".to_vec(),
+            )
+            .file("/sys/class/block/dm-0/dm/name", b"cryptroot\n".to_vec());
+        let mounts = mountinfo::parse_all(
+            "36 25 0:29 /@ / rw,relatime - btrfs /dev/mapper/cryptroot rw,subvol=/@\n",
+        );
+
+        let device = device_from_sysfs(&fs, "dm-0", &mounts);
+
+        assert_eq!(device.dev_path.as_deref(), Some(Path::new("/dev/dm-0")));
+        assert_eq!(device.filesystem.as_deref(), Some("btrfs"));
+        assert_eq!(device.mount_point.as_deref(), Some(Path::new("/")));
+        assert_eq!(device.mounts.len(), 1);
+        assert_eq!(device.mounts[0].root, Path::new("/@"));
+    }
 }

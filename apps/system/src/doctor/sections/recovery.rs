@@ -306,10 +306,18 @@ fn inspect_single_record(
             ),
         );
         let recommendation = match report.target.root_device.as_deref() {
-            Some(root_device) => recommendation.with_command(format!(
-                "catos-recovery resume --root-device {root_device} --transaction {}",
-                record.transaction_id
-            )),
+            Some(root_device) => {
+                let mut command = format!(
+                    "catos-recovery resume --root-device {root_device}"
+                );
+                if let Some(subvolume) = report.target.root_subvolume.as_deref() {
+                    command.push_str(" --root-subvolume ");
+                    command.push_str(subvolume);
+                }
+                command.push_str(" --transaction ");
+                command.push_str(&record.transaction_id);
+                recommendation.with_command(command)
+            }
             None => recommendation,
         };
         report.recommendations.push(recommendation);
@@ -413,6 +421,7 @@ mod tests {
             .collect();
         let mut report = DoctorReport::default();
         report.target.root_device = Some("/dev/vda".into());
+        report.target.root_subvolume = Some("/@root".into());
         let mut status = DoctorSectionStatus::Healthy;
 
         inspect_single_record(
@@ -427,7 +436,7 @@ mod tests {
         assert_eq!(
             report.recommendations[0].command.as_deref(),
             Some(
-                "catos-recovery resume --root-device /dev/vda --transaction tx-00000000000000000000000000000004"
+                "catos-recovery resume --root-device /dev/vda --root-subvolume /@root --transaction tx-00000000000000000000000000000004"
             )
         );
     }

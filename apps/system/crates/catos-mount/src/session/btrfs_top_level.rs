@@ -106,8 +106,7 @@ impl BtrfsTopLevelRwSession {
         }
         let mut report = CleanupReport::default();
         let label = self.session_dir.display().to_string();
-
-        match syscall::umount2(&self.session_dir, 0) {
+        let mount_detached = match syscall::umount2(&self.session_dir, 0) {
             Ok(()) => {
                 report.unmounted.push(MountedResource {
                     order: 0,
@@ -116,14 +115,15 @@ impl BtrfsTopLevelRwSession {
                     fstype: "btrfs".into(),
                     options: String::new(),
                 });
+                true
             }
             Err(plain) => match syscall::umount2(&self.session_dir, mnt_flags::MNT_DETACH) {
                 Ok(()) => {
-                    // Lazy-detach inside a private namespace is
-                    // operationally clean: the mount is removed from
-                    // this namespace immediately. The diagnostic is
-                    // preserved as a residual so the operator sees the
-                    // umount path was non-trivial.
+                    // The mount is gone from this namespace, so the session
+                    // directory can be removed, but lazy detach is still an
+                    // incomplete cleanup result and must never be reported as
+                    // all_clean.
+                    report.all_clean = false;
                     report.residual.push(ResidualMount {
                         resource: MountedResource {
                             order: 0,
@@ -139,6 +139,7 @@ impl BtrfsTopLevelRwSession {
                         ),
                         error_code: plain.classify().code().to_string(),
                     });
+                    true
                 }
                 Err(detach_err) => {
                     report.all_clean = false;
@@ -158,11 +159,12 @@ impl BtrfsTopLevelRwSession {
                         ),
                         error_code: detach_err.classify().code().to_string(),
                     });
+                    false
                 }
             },
-        }
+        };
 
-        if report.all_clean {
+        if mount_detached {
             if let Err(err) = remove_session_dir(Path::new(SESSION_ROOT_PARENT), &self.session_dir)
             {
                 report.all_clean = false;

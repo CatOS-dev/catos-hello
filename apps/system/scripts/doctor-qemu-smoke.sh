@@ -162,8 +162,8 @@ CFG
         uki)
             mkdir -p "$tree/@/etc/catos"
             cat > "$tree/@/etc/catos/firmware-boot.conf" <<'CFG'
-method=uki
-esp_path=/boot/efi
+method = uki
+esp_path = /boot/efi
 CFG
             ;;
         *) echo "unsupported provider $provider" >&2; return 1 ;;

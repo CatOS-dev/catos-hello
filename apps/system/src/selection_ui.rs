@@ -24,6 +24,15 @@ pub enum TargetSelectionPolicy {
 }
 
 pub fn select_target_with_policy(report: &DiscoveryReport, program: &str, policy: TargetSelectionPolicy) -> Selection {
+    select_target_with_policy_for_terminal(report, program, policy, io::stdin().is_terminal())
+}
+
+fn select_target_with_policy_for_terminal(
+    report: &DiscoveryReport,
+    program: &str,
+    policy: TargetSelectionPolicy,
+    interactive: bool,
+) -> Selection {
     if policy == TargetSelectionPolicy::PreferRunningRoot {
         let running = report.candidates.iter().filter(|candidate| candidate.running_environment_member).collect::<Vec<_>>();
         match running.as_slice() {
@@ -48,11 +57,15 @@ pub fn select_target_with_policy(report: &DiscoveryReport, program: &str, policy
         let reason = if policy == TargetSelectionPolicy::OfflineOnly { "no offline CatOS candidate" } else { "no CatOS candidate" };
         return Selection::Unavailable(reason.into());
     }
-    select_from_candidates(&candidates, program)
+    select_from_candidates(&candidates, program, interactive)
 }
 
-fn select_from_candidates(candidates: &[&TargetCandidate], program: &str) -> Selection {
-    if !io::stdin().is_terminal() {
+fn select_from_candidates(
+    candidates: &[&TargetCandidate],
+    program: &str,
+    interactive: bool,
+) -> Selection {
+    if !interactive {
         return match candidates {
             [candidate] if candidate.confidence == RootCandidateConfidence::High => Selection::Selected(Box::new((*candidate).clone())),
             _ => Selection::Unavailable("multiple target candidates require an interactive terminal".into()),
@@ -152,7 +165,12 @@ mod tests {
     #[test]
     fn offline_only_policy_never_returns_the_running_root() {
         let report = DiscoveryReport { candidates: vec![candidate("/dev/running", true), candidate("/dev/offline", false)], ..Default::default() };
-        match select_target_with_policy(&report, "catos-chroot", TargetSelectionPolicy::OfflineOnly) {
+        match select_target_with_policy_for_terminal(
+            &report,
+            "catos-chroot",
+            TargetSelectionPolicy::OfflineOnly,
+            false,
+        ) {
             Selection::Selected(selected) => { assert_eq!(selected.root_device, PathBuf::from("/dev/offline")); assert!(!selected.running_environment_member); }
             other => panic!("expected offline selection, got {other:?}"),
         }

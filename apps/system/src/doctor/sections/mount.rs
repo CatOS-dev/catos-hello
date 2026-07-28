@@ -15,7 +15,9 @@ use crate::mount::model::{MountProblem, MountTargetIdentity as RepairTargetIdent
 use crate::target::model::TargetIdentity;
 use crate::target::Evidence;
 
-use super::{push_evidence, push_issue, set_section, target_root_path};
+use super::{
+    push_evidence, push_issue, set_section, target_bound_repair_command, target_root_path,
+};
 use crate::doctor::DoctorTargetContext;
 
 pub(in crate::doctor) fn run_mount_section(
@@ -60,6 +62,14 @@ pub(in crate::doctor) fn run_mount_section(
         push_issue(sections, issue);
     }
 
+    let esp_device = context
+        .esp
+        .as_ref()
+        .ok()
+        .and_then(|esp| esp.as_ref())
+        .map(|esp| esp.device.as_path());
+    let repair_command =
+        target_bound_repair_command("catos-repair mount", &context.target, esp_device);
     if problems.iter().any(|p| {
         matches!(
             p,
@@ -68,22 +78,27 @@ pub(in crate::doctor) fn run_mount_section(
                 | MountProblem::MissingStandardEntry { .. }
         )
     }) {
-        report.recommendations.push(DoctorRecommendation::new(
+        let recommendation = DoctorRecommendation::new(
             recommendation_code::RUN_CATOS_REPAIR_MOUNT,
             "mount layout is missing standard entries or subvolumes; catos-repair mount can recreate them when authorised",
-        ).with_command("catos-repair mount"));
+        );
+        report.recommendations.push(match repair_command.as_ref() {
+            Some(command) => recommendation.with_command(command.clone()),
+            None => recommendation,
+        });
     }
     if problems
         .iter()
         .any(|p| matches!(p, MountProblem::RootUuidMismatch { .. }))
     {
-        report.recommendations.push(
-            DoctorRecommendation::new(
-                recommendation_code::RUN_CATOS_REPAIR_MOUNT,
-                "root UUID in fstab does not match the discovered device",
-            )
-            .with_command("catos-repair mount"),
+        let recommendation = DoctorRecommendation::new(
+            recommendation_code::RUN_CATOS_REPAIR_MOUNT,
+            "root UUID in fstab does not match the discovered device",
         );
+        report.recommendations.push(match repair_command {
+            Some(command) => recommendation.with_command(command),
+            None => recommendation,
+        });
     }
     Ok(())
 }
@@ -104,8 +119,15 @@ fn build_mount_inputs(context: &DoctorTargetContext) -> Result<MountRepairInputs
     } else {
         CatosConfirmation::NotConfirmed
     };
+    let mount_point_observations = collect_mount_point_observations(target)?;
     let subvol_facts = if root_fstype == "btrfs" {
-        collect_subvolume_facts(&target.root)?
+        let top_level = context
+            .top_level
+            .as_ref()
+            .map_err(Clone::clone)?
+            .as_ref()
+            .ok_or_else(|| "selected Btrfs top-level session is unavailable".to_string())?;
+        collect_subvolume_facts(top_level.root(), &mount_point_observations)?
     } else {
         SubvolFacts::not_applicable()
     };
@@ -127,17 +149,20 @@ fn build_mount_inputs(context: &DoctorTargetContext) -> Result<MountRepairInputs
         },
         catos_confirmation,
         subvol_facts,
-        mount_point_observations: collect_mount_point_observations(target)?,
+        mount_point_observations,
     })
 }
 
-fn collect_subvolume_facts(root: &Path) -> Result<SubvolFacts, String> {
-    let root = root
+fn collect_subvolume_facts(
+    top_level: &Path,
+    mount_points: &std::collections::HashMap<String, MountPointObservation>,
+) -> Result<SubvolFacts, String> {
+    let top_level_text = top_level
         .to_str()
-        .ok_or_else(|| "target root path is not UTF-8".to_string())?;
+        .ok_or_else(|| "target Btrfs top-level path is not UTF-8".to_string())?;
     let output = catos_process::run_trusted_tool(
         "btrfs",
-        &["subvolume", "list", "-a", root],
+        &["subvolume", "list", "-a", top_level_text],
         Duration::from_secs(10),
         64 * 1024,
     )?;
@@ -157,18 +182,49 @@ fn collect_subvolume_facts(root: &Path) -> Result<SubvolFacts, String> {
     if listed.is_empty() {
         return Err("target Btrfs subvolume enumeration returned no entries".to_string());
     }
-    Ok(SubvolFacts {
-        observations: crate::mount::model::CATOS_STANDARD_SUBVOLS
-            .iter()
-            .map(|spec| SubvolObservation {
-                subvol: spec.subvol.to_string(),
-                exists_as_subvol: listed.iter().any(|path| path == spec.subvol),
-                exists_as_directory: false,
-                exists_as_other: false,
-                mount_point_entry_count: None,
-            })
-            .collect(),
-    })
+    assemble_subvolume_facts(top_level, &listed, mount_points)
+}
+
+fn assemble_subvolume_facts(
+    top_level: &Path,
+    listed: &[String],
+    mount_points: &std::collections::HashMap<String, MountPointObservation>,
+) -> Result<SubvolFacts, String> {
+    use crate::target::execute::confined::{rooted_path_kind, RootedPathKind};
+
+    let mut observations = Vec::new();
+    for spec in crate::mount::model::CATOS_STANDARD_SUBVOLS {
+        let exists_as_subvol = listed.iter().any(|path| path == spec.subvol);
+        let (exists_as_directory, exists_as_other) = if exists_as_subvol {
+            (false, false)
+        } else {
+            match rooted_path_kind(top_level, spec.subvol) {
+                Ok(None) | Err(crate::target::error::FsError::NotFound) => (false, false),
+                Ok(Some(RootedPathKind::Directory)) => (true, false),
+                Ok(Some(
+                    RootedPathKind::Symlink
+                    | RootedPathKind::RegularFile
+                    | RootedPathKind::Other,
+                )) => (false, true),
+                Err(error) => {
+                    return Err(format!(
+                        "cannot safely inspect Btrfs path {}: {error}",
+                        spec.subvol
+                    ));
+                }
+            }
+        };
+        observations.push(SubvolObservation {
+            subvol: spec.subvol.to_string(),
+            exists_as_subvol,
+            exists_as_directory,
+            exists_as_other,
+            mount_point_entry_count: mount_points
+                .get(spec.mount_point)
+                .and_then(|observation| observation.entry_count),
+        });
+    }
+    Ok(SubvolFacts { observations })
 }
 
 fn collect_mount_point_observations(
@@ -445,6 +501,33 @@ mod tests {
 
         std::fs::remove_dir_all(root).unwrap();
         std::fs::remove_dir_all(outside).unwrap();
+    }
+
+    #[test]
+    fn subvolume_facts_preserve_occupied_paths_and_mountpoint_data() {
+        let top = std::env::temp_dir().join(format!(
+            "catos-doctor-subvol-facts-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&top);
+        std::fs::create_dir_all(top.join("@home")).unwrap();
+        std::fs::write(top.join("@log"), b"occupied").unwrap();
+        let mount_points = std::collections::HashMap::from([
+            ("/home".to_string(), MountPointObservation::directory(3)),
+            ("/var/log".to_string(), MountPointObservation::directory(1)),
+        ]);
+
+        let facts = assemble_subvolume_facts(&top, &["/@".into()], &mount_points).unwrap();
+        let home = facts.find("/@home").unwrap();
+        assert!(home.exists_as_directory);
+        assert!(!home.exists_as_other);
+        assert_eq!(home.mount_point_entry_count, Some(3));
+        let log = facts.find("/@log").unwrap();
+        assert!(!log.exists_as_directory);
+        assert!(log.exists_as_other);
+        assert_eq!(log.mount_point_entry_count, Some(1));
+
+        std::fs::remove_dir_all(top).unwrap();
     }
 
     #[test]

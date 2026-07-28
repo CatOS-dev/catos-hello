@@ -88,10 +88,7 @@ pub fn execute_mount_repair(
         );
     }
 
-    let mut actions = Vec::new();
-    let mut created_subvolumes = Vec::new();
-    let mut created_directories = Vec::new();
-    let mut nested_esp_directory_created = false;
+    let mut created = CreatedResources::default();
 
     for subvolume in &plan.subvolumes {
         if let Err(message) = create_subvolume(top, &subvolume.subvol) {
@@ -100,19 +97,18 @@ pub fn execute_mount_repair(
                 plan.clone(),
                 top,
                 devices,
-                actions,
-                &created_subvolumes,
-                &created_directories,
-                nested_esp_directory_created,
-                MountRepairOutcome::SubvolumeConflict,
-                "SUBVOLUME_CREATE_FAILED",
-                format!("cannot create {}: {}", subvolume.subvol, message),
-                None,
-                None,
+                created,
+                RepairFailure {
+                    requested_outcome: MountRepairOutcome::SubvolumeConflict,
+                    evidence_code: "SUBVOLUME_CREATE_FAILED",
+                    message: format!("cannot create {}: {}", subvolume.subvol, message),
+                    fstab_transaction: None,
+                    verification: None,
+                },
             );
         }
-        created_subvolumes.push(subvolume.subvol.clone());
-        actions.push(AppliedAction::SubvolumeCreated {
+        created.subvolumes.push(subvolume.subvol.clone());
+        created.actions.push(AppliedAction::SubvolumeCreated {
             subvol: subvolume.subvol.clone(),
         });
     }
@@ -138,15 +134,14 @@ pub fn execute_mount_repair(
                 plan.clone(),
                 top,
                 devices,
-                actions,
-                &created_subvolumes,
-                &created_directories,
-                nested_esp_directory_created,
-                MountRepairOutcome::UnsafePath,
-                "UNSAFE_MOUNTPOINT",
-                format!("{}: {error:?}", directory.mount_point),
-                None,
-                None,
+                created,
+                RepairFailure {
+                    requested_outcome: MountRepairOutcome::UnsafePath,
+                    evidence_code: "UNSAFE_MOUNTPOINT",
+                    message: format!("{}: {error:?}", directory.mount_point),
+                    fstab_transaction: None,
+                    verification: None,
+                },
             );
         }
         let target_path = target_rooted_path(&inputs.target, &directory.mount_point);
@@ -156,27 +151,28 @@ pub fn execute_mount_repair(
                 plan.clone(),
                 top,
                 devices,
-                actions,
-                &created_subvolumes,
-                &created_directories,
-                nested_esp_directory_created,
-                MountRepairOutcome::UnsafePath,
-                "MOUNTPOINT_CREATE_FAILED",
-                format!("{}: {error}", directory.mount_point),
-                None,
-                None,
+                created,
+                RepairFailure {
+                    requested_outcome: MountRepairOutcome::UnsafePath,
+                    evidence_code: "MOUNTPOINT_CREATE_FAILED",
+                    message: format!("{}: {error}", directory.mount_point),
+                    fstab_transaction: None,
+                    verification: None,
+                },
             );
         }
-        created_directories.push(directory.mount_point.clone());
-        actions.push(AppliedAction::DirectoryCreated {
+        created.directories.push(directory.mount_point.clone());
+        created.actions.push(AppliedAction::DirectoryCreated {
             mount_point: directory.mount_point.clone(),
         });
     }
 
     match ensure_nested_esp_mountpoint(top, &inputs.target, devices) {
         Ok(Some(mount_point)) => {
-            nested_esp_directory_created = true;
-            actions.push(AppliedAction::DirectoryCreated { mount_point });
+            created.nested_esp_directory_created = true;
+            created
+                .actions
+                .push(AppliedAction::DirectoryCreated { mount_point });
         }
         Ok(None) => {}
         Err(reason) => {
@@ -185,15 +181,14 @@ pub fn execute_mount_repair(
                 plan.clone(),
                 top,
                 devices,
-                actions,
-                &created_subvolumes,
-                &created_directories,
-                nested_esp_directory_created,
-                MountRepairOutcome::UnsafePath,
-                "NESTED_ESP_MOUNTPOINT_FAILED",
-                reason,
-                None,
-                None,
+                created,
+                RepairFailure {
+                    requested_outcome: MountRepairOutcome::UnsafePath,
+                    evidence_code: "NESTED_ESP_MOUNTPOINT_FAILED",
+                    message: reason,
+                    fstab_transaction: None,
+                    verification: None,
+                },
             );
         }
     }
@@ -207,15 +202,14 @@ pub fn execute_mount_repair(
             plan.clone(),
             top,
             devices,
-            actions,
-            &created_subvolumes,
-            &created_directories,
-            nested_esp_directory_created,
-            MountRepairOutcome::RollbackFailed,
-            "FSTAB_BACKUP_FAILED",
-            error.to_string(),
-            None,
-            None,
+            created,
+            RepairFailure {
+                requested_outcome: MountRepairOutcome::RollbackFailed,
+                evidence_code: "FSTAB_BACKUP_FAILED",
+                message: error.to_string(),
+                fstab_transaction: None,
+                verification: None,
+            },
         );
     }
 
@@ -239,22 +233,21 @@ pub fn execute_mount_repair(
             plan.clone(),
             top,
             devices,
-            actions,
-            &created_subvolumes,
-            &created_directories,
-            nested_esp_directory_created,
-            if rollback_succeeded {
-                MountRepairOutcome::VerificationFailed
-            } else {
-                MountRepairOutcome::RollbackFailed
+            created,
+            RepairFailure {
+                requested_outcome: if rollback_succeeded {
+                    MountRepairOutcome::VerificationFailed
+                } else {
+                    MountRepairOutcome::RollbackFailed
+                },
+                evidence_code: "FSTAB_WRITE_FAILED",
+                message: error.to_string(),
+                fstab_transaction: Some(transaction),
+                verification: None,
             },
-            "FSTAB_WRITE_FAILED",
-            error.to_string(),
-            Some(transaction),
-            None,
         );
     }
-    actions.extend(
+    created.actions.extend(
         plan.fstab_edits
             .iter()
             .cloned()
@@ -280,19 +273,18 @@ pub fn execute_mount_repair(
             plan.clone(),
             top,
             devices,
-            actions,
-            &created_subvolumes,
-            &created_directories,
-            nested_esp_directory_created,
-            if rollback_succeeded {
-                MountRepairOutcome::VerificationFailed
-            } else {
-                MountRepairOutcome::RollbackFailed
+            created,
+            RepairFailure {
+                requested_outcome: if rollback_succeeded {
+                    MountRepairOutcome::VerificationFailed
+                } else {
+                    MountRepairOutcome::RollbackFailed
+                },
+                evidence_code: "VERIFICATION_ROLLBACK",
+                message: "verification failed; original fstab restoration was attempted".into(),
+                fstab_transaction: Some(transaction),
+                verification: Some(verification),
             },
-            "VERIFICATION_ROLLBACK",
-            "verification failed; original fstab restoration was attempted".into(),
-            Some(transaction),
-            Some(verification),
         );
     }
 
@@ -315,7 +307,7 @@ pub fn execute_mount_repair(
             rollback_attempted: false,
             rollback_succeeded: false,
         }),
-        actions,
+        actions: created.actions,
         verification: Some(verification),
         cleanup: MountRepairCleanup::default(),
         final_outcome: if data_conflict {
@@ -338,59 +330,73 @@ pub fn execute_mount_repair(
 /// assemble the failure report. The pure-mount side (directories +
 /// nested ESP) is undone here; the pending btrfs subvolume rollbacks
 /// are returned to the caller for snapshot-engine-driven deletion.
-pub fn failure_after_created_resources(
+#[derive(Default)]
+struct CreatedResources {
+    actions: Vec<AppliedAction>,
+    subvolumes: Vec<String>,
+    directories: Vec<String>,
+    nested_esp_directory_created: bool,
+}
+
+struct RepairFailure {
+    requested_outcome: MountRepairOutcome,
+    evidence_code: &'static str,
+    message: String,
+    fstab_transaction: Option<FstabTransaction>,
+    verification: Option<MountVerification>,
+}
+
+fn failure_after_created_resources(
     inputs: &MountRepairInputs,
     plan: MountRepairPlan,
     top: &Path,
     devices: &[catos_target::model::BlockDevice],
-    mut actions: Vec<AppliedAction>,
-    created_subvolumes: &[String],
-    created_directories: &[String],
-    nested_esp_directory_created: bool,
-    requested_outcome: MountRepairOutcome,
-    evidence_code: &str,
-    message: String,
-    fstab_transaction: Option<FstabTransaction>,
-    verification: Option<MountVerification>,
+    mut created: CreatedResources,
+    failure: RepairFailure,
 ) -> MountRepairReport {
     let (mount_residuals, pending_subvolumes) = rollback_mount_resources(
         top,
         &inputs.target,
         devices,
-        created_subvolumes,
-        created_directories,
-        nested_esp_directory_created,
-        &mut actions,
+        &created.subvolumes,
+        &created.directories,
+        created.nested_esp_directory_created,
+        &mut created.actions,
     );
-    // The btrfs subvolume rollbacks are the caller's responsibility;
-    // surface them as pending evidence so the orchestration layer can
-    // drive the snapshot-engine deletion and append its own residuals.
-    let mut residuals = mount_residuals;
-    for pending in &pending_subvolumes {
-        residuals.push(format!(
-            "{}: pending btrfs subvolume rollback",
-            pending.subvol
-        ));
-    }
-    let final_outcome = if residuals.is_empty() {
-        requested_outcome
+    // The btrfs subvolume rollbacks are the caller's responsibility.
+    // Pending work is not itself a rollback failure: the orchestration
+    // layer still has to drive the snapshot-engine deletion. Only real
+    // pure-mount residuals force RollbackFailed at this stage.
+    let final_outcome = if mount_residuals.is_empty() {
+        failure.requested_outcome
     } else {
         MountRepairOutcome::RollbackFailed
     };
-    let mut evidence = vec![Evidence::new(evidence_code, "repair::mount", message)];
-    for residual in &residuals {
+    let mut evidence = vec![Evidence::new(
+        failure.evidence_code,
+        "repair::mount",
+        failure.message,
+    )];
+    for residual in &mount_residuals {
         evidence.push(Evidence::new(
             "ROLLBACK_RESIDUAL",
             "repair::mount",
             residual.clone(),
         ));
     }
+    for pending in &pending_subvolumes {
+        evidence.push(Evidence::new(
+            "ROLLBACK_RESIDUAL",
+            "repair::mount",
+            format!("{}: pending btrfs subvolume rollback", pending.subvol),
+        ));
+    }
     MountRepairReport {
         target: Some(inputs.target.clone()),
         plan: Some(plan),
-        fstab_transaction,
-        actions,
-        verification,
+        fstab_transaction: failure.fstab_transaction,
+        actions: created.actions,
+        verification: failure.verification,
         cleanup: MountRepairCleanup::default(),
         final_outcome,
         requires_human_action: true,

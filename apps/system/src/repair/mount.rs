@@ -242,77 +242,24 @@ pub fn observe_target_inputs(
     let mut mount_point_observations = HashMap::new();
     if target.root_fstype == "btrfs" {
         for spec in crate::mount::model::CATOS_STANDARD_SUBVOLS {
-            let exists_as_subvol = listed.iter().any(|item| item.path == spec.subvol);
-            let top_path = top.join(spec.subvol.trim_start_matches('/'));
-            let (exists_as_directory, exists_as_other) = match std::fs::symlink_metadata(&top_path)
-            {
-                Ok(metadata) if metadata.file_type().is_symlink() => (false, true),
-                Ok(metadata) if metadata.is_dir() => (true, false),
-                Ok(_) => (false, true),
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => (false, false),
-                Err(_) => (false, true),
+            let mount_point_observation = if spec.mount_point == "/" {
+                None
+            } else {
+                let observation = observe_mount_point(fs, root, spec.mount_point)?;
+                mount_point_observations
+                    .insert(spec.mount_point.to_string(), observation);
+                Some(observation)
             };
-            subvol_facts
-                .observations
-                .push(crate::mount::diagnose::subvolume::SubvolObservation {
-                    subvol: spec.subvol.to_string(),
-                    exists_as_subvol,
-                    exists_as_directory,
-                    exists_as_other,
-                    mount_point_entry_count: None,
-                });
-            if spec.mount_point == "/" {
-                continue;
-            }
-            let relative = Path::new(spec.mount_point.trim_start_matches('/'));
-            let observation = match fs.rooted_metadata(root, relative) {
-                Ok(metadata) => MountPointObservation {
-                    exists: true,
-                    is_symlink: metadata.is_symlink,
-                    is_directory: metadata.is_dir,
-                    is_other_object: !metadata.is_dir,
-                    entry_count: if metadata.is_dir {
-                        fs.read_dir_names(&root.join(relative))
-                            .ok()
-                            .map(|entries| entries.len())
-                    } else {
-                        None
-                    },
-                },
-                Err(crate::error::FsError::NotFound) => MountPointObservation::missing(),
-                Err(error) => {
-                    return Err(format!(
-                        "cannot safely inspect target mount point {}: {error}",
-                        spec.mount_point
-                    ));
-                }
-            };
-            mount_point_observations.insert(spec.mount_point.to_string(), observation);
+            subvol_facts.observations.push(observe_subvolume_path(
+                top,
+                spec.subvol,
+                listed.iter().any(|item| item.path == spec.subvol),
+                mount_point_observation.and_then(|observation| observation.entry_count),
+            ));
         }
     }
     for mount_point in ["/boot", "/boot/efi", "/efi"] {
-        let relative = Path::new(mount_point.trim_start_matches('/'));
-        let observation = match fs.rooted_metadata(root, relative) {
-            Ok(metadata) => MountPointObservation {
-                exists: true,
-                is_symlink: metadata.is_symlink,
-                is_directory: metadata.is_dir,
-                is_other_object: !metadata.is_dir,
-                entry_count: if metadata.is_dir {
-                    fs.read_dir_names(&root.join(relative))
-                        .ok()
-                        .map(|entries| entries.len())
-                } else {
-                    None
-                },
-            },
-            Err(crate::error::FsError::NotFound) => MountPointObservation::missing(),
-            Err(error) => {
-                return Err(format!(
-                    "cannot safely inspect target mount point {mount_point}: {error}"
-                ));
-            }
-        };
+        let observation = observe_mount_point(fs, root, mount_point)?;
         mount_point_observations.insert(mount_point.to_string(), observation);
     }
 
@@ -323,6 +270,60 @@ pub fn observe_target_inputs(
         subvol_facts,
         mount_point_observations,
     })
+}
+
+fn observe_mount_point(
+    fs: &RealFilesystem,
+    root: &Path,
+    mount_point: &str,
+) -> Result<MountPointObservation, String> {
+    let relative = Path::new(mount_point.trim_start_matches('/'));
+    match fs.rooted_metadata(root, relative) {
+        Ok(metadata) => Ok(MountPointObservation {
+            exists: true,
+            is_symlink: metadata.is_symlink,
+            is_directory: metadata.is_dir,
+            is_other_object: !metadata.is_dir,
+            entry_count: if metadata.is_dir {
+                fs.read_dir_names(&root.join(relative))
+                    .ok()
+                    .map(|entries| entries.len())
+            } else {
+                None
+            },
+        }),
+        Err(crate::error::FsError::NotFound) => Ok(MountPointObservation::missing()),
+        Err(error) => Err(format!(
+            "cannot safely inspect target mount point {mount_point}: {error}"
+        )),
+    }
+}
+
+fn observe_subvolume_path(
+    top: &Path,
+    subvol: &str,
+    exists_as_subvol: bool,
+    mount_point_entry_count: Option<usize>,
+) -> crate::mount::diagnose::subvolume::SubvolObservation {
+    let (exists_as_directory, exists_as_other) = if exists_as_subvol {
+        (false, false)
+    } else {
+        let path = top.join(subvol.trim_start_matches('/'));
+        match std::fs::symlink_metadata(path) {
+            Ok(metadata) if metadata.file_type().is_symlink() => (false, true),
+            Ok(metadata) if metadata.is_dir() => (true, false),
+            Ok(_) => (false, true),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => (false, false),
+            Err(_) => (false, true),
+        }
+    };
+    crate::mount::diagnose::subvolume::SubvolObservation {
+        subvol: subvol.to_string(),
+        exists_as_subvol,
+        exists_as_directory,
+        exists_as_other,
+        mount_point_entry_count,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -518,10 +519,13 @@ pub fn run_mount_repair_via_cli(
         });
 
     // Drive any pending btrfs subvolume rollbacks the pure-mount
-    // rollback left for us. execute_mount_repair already recorded the
-    // pending list as evidence; here we attempt the actual deletion
-    // and merge residuals into the report.
-    if report.final_outcome == MountRepairOutcome::RollbackFailed {
+    // rollback left for us. Pending work is identified explicitly by
+    // evidence; it is not treated as a failure until deletion actually
+    // fails.
+    if report.evidence.iter().any(|item| {
+        item.code == "ROLLBACK_RESIDUAL"
+            && item.message.contains("pending btrfs subvolume rollback")
+    }) {
         rollback_pending_subvolumes(&mut report, &top);
     }
 
@@ -547,33 +551,74 @@ fn cleanup_into_mount_repair(cleanup: CleanupSummary) -> MountRepairCleanup {
     }
 }
 
-/// Attempt to delete the pending btrfs subvolumes listed in the
-/// report's evidence. The pure-mount rollback recorded each pending
-/// subvolume as a `ROLLBACK_RESIDUAL` evidence entry; we re-derive
-/// them from the plan's subvolumes in reverse order.
+/// Attempt to delete only the btrfs subvolumes this execution actually
+/// created. The exact set comes from `SubvolumeCreated` actions rather
+/// than the complete plan, because a failure may occur part-way through
+/// creation.
 fn rollback_pending_subvolumes(report: &mut MountRepairReport, top: &Path) {
-    let Some(plan) = report.plan.as_ref() else {
-        return;
-    };
-    let pending: Vec<String> = plan
-        .subvolumes
+    rollback_pending_subvolumes_with(report, |subvol| {
+        crate::snapshot::execute::btrfs::delete_empty_btrfs_subvolume(top, subvol)
+            .map_err(|error| format!("{error}"))
+    });
+}
+
+fn rollback_pending_subvolumes_with<F>(report: &mut MountRepairReport, mut delete: F)
+where
+    F: FnMut(&str) -> Result<(), String>,
+{
+    let mut completed = std::collections::HashSet::new();
+    for action in &report.actions {
+        match action {
+            AppliedAction::SubvolumeRolledBack { subvol } => {
+                completed.insert(subvol.clone());
+            }
+            AppliedAction::RollbackResidual { resource, .. } => {
+                completed.insert(resource.clone());
+            }
+            _ => {}
+        }
+    }
+    let pending = report
+        .actions
         .iter()
-        .map(|s| s.subvol.clone())
+        .filter_map(|action| match action {
+            AppliedAction::SubvolumeCreated { subvol } if !completed.contains(subvol) => {
+                Some(subvol.clone())
+            }
+            _ => None,
+        })
         .rev()
-        .collect();
+        .collect::<Vec<_>>();
+
+    report.evidence.retain(|item| {
+        !(item.code == "ROLLBACK_RESIDUAL"
+            && item.message.contains("pending btrfs subvolume rollback"))
+    });
+
+    let mut failed = false;
     for subvol in pending {
-        match crate::snapshot::execute::btrfs::delete_empty_btrfs_subvolume(top, &subvol) {
+        match delete(&subvol) {
             Ok(()) => report
                 .actions
                 .push(AppliedAction::SubvolumeRolledBack { subvol }),
-            Err(error) => {
-                let reason = format!("{error}");
+            Err(reason) => {
+                failed = true;
                 report.actions.push(AppliedAction::RollbackResidual {
                     resource: subvol.clone(),
                     reason: reason.clone(),
                 });
+                report.evidence.push(crate::target::Evidence::new(
+                    "ROLLBACK_RESIDUAL",
+                    "repair::mount",
+                    format!("{subvol}: {reason}"),
+                ));
             }
         }
+    }
+    if failed {
+        report.final_outcome = MountRepairOutcome::RollbackFailed;
+        report.requires_human_action = true;
+        report.fully_complete = false;
     }
 }
 
@@ -879,7 +924,13 @@ fn compare_mounted_identity(
     fresh: &BlockDevice,
 ) -> Result<(), String> {
     if let Some(expected) = sealed.major_minor.as_deref() {
-        if mounted.major_minor != expected {
+        // Btrfs mountinfo reports an anonymous superblock device number
+        // (commonly 0:NN), not the backing block device's rdev. The fresh
+        // block inventory below still has to match the sealed rdev, and the
+        // caller additionally validates the mounted Btrfs FSID and root
+        // subvolume, so comparing mountinfo's anonymous number would reject
+        // every legitimate Btrfs write session.
+        if !mounted.fstype.eq_ignore_ascii_case("btrfs") && mounted.major_minor != expected {
             return Err(format!(
                 "mounted target major:minor {} differs from sealed {}",
                 mounted.major_minor, expected
@@ -1343,6 +1394,111 @@ mod boot_session_tests {
                 .unwrap_err()
                 .contains("filesystem")
         );
+    }
+
+    #[test]
+    fn repair_subvolume_observation_carries_mountpoint_entry_count() {
+        let top = TempRoot::new();
+        std::fs::create_dir_all(top.0.join("@home")).unwrap();
+        let observation = observe_subvolume_path(&top.0, "/@home", false, Some(4));
+        assert!(observation.exists_as_directory);
+        assert!(!observation.exists_as_other);
+        assert_eq!(observation.mount_point_entry_count, Some(4));
+    }
+
+    #[test]
+    fn btrfs_mountinfo_anonymous_device_number_does_not_fake_identity_drift() {
+        let mut sealed = device("root", "/dev/root", "btrfs");
+        sealed.major_minor = Some("254:1".into());
+        sealed.uuid = Some("root-fsid".into());
+        let fresh = sealed.clone();
+
+        assert!(compare_mounted_identity(&sealed, &mount_info("0:25", "btrfs"), &fresh,).is_ok());
+    }
+
+    #[test]
+    fn non_btrfs_mountinfo_device_number_must_still_match() {
+        let mut sealed = device("root", "/dev/root", "ext4");
+        sealed.major_minor = Some("254:1".into());
+        let fresh = sealed.clone();
+
+        assert!(
+            compare_mounted_identity(&sealed, &mount_info("0:25", "ext4"), &fresh,)
+                .unwrap_err()
+                .contains("major:minor")
+        );
+    }
+
+    #[test]
+    fn successful_pending_subvolume_rollback_preserves_original_failure() {
+        let mut report = MountRepairReport {
+            final_outcome: MountRepairOutcome::VerificationFailed,
+            actions: vec![
+                AppliedAction::SubvolumeCreated { subvol: "/@home".into() },
+                AppliedAction::SubvolumeCreated { subvol: "/@log".into() },
+            ],
+            evidence: vec![
+                crate::target::Evidence::new(
+                    "ROLLBACK_RESIDUAL",
+                    "repair::mount",
+                    "/@home: pending btrfs subvolume rollback",
+                ),
+                crate::target::Evidence::new(
+                    "ROLLBACK_RESIDUAL",
+                    "repair::mount",
+                    "/@log: pending btrfs subvolume rollback",
+                ),
+            ],
+            ..MountRepairReport::default()
+        };
+        let mut deleted = Vec::new();
+
+        rollback_pending_subvolumes_with(&mut report, |subvol| {
+            deleted.push(subvol.to_string());
+            Ok(())
+        });
+
+        assert_eq!(deleted, vec!["/@log", "/@home"]);
+        assert_eq!(report.final_outcome, MountRepairOutcome::VerificationFailed);
+        assert!(report.evidence.iter().all(|item| {
+            !(item.code == "ROLLBACK_RESIDUAL"
+                && item.message.contains("pending btrfs subvolume rollback"))
+        }));
+        assert_eq!(
+            report
+                .actions
+                .iter()
+                .filter(|action| matches!(action, AppliedAction::SubvolumeRolledBack { .. }))
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn failed_pending_subvolume_rollback_reports_only_real_residual() {
+        let mut report = MountRepairReport {
+            final_outcome: MountRepairOutcome::VerificationFailed,
+            actions: vec![AppliedAction::SubvolumeCreated {
+                subvol: "/@home".into(),
+            }],
+            evidence: vec![crate::target::Evidence::new(
+                "ROLLBACK_RESIDUAL",
+                "repair::mount",
+                "/@home: pending btrfs subvolume rollback",
+            )],
+            ..MountRepairReport::default()
+        };
+
+        rollback_pending_subvolumes_with(&mut report, |_| Err("still busy".into()));
+
+        assert_eq!(report.final_outcome, MountRepairOutcome::RollbackFailed);
+        assert!(report.evidence.iter().any(|item| {
+            item.code == "ROLLBACK_RESIDUAL"
+                && item.message.contains("/@home: still busy")
+        }));
+        assert!(report.evidence.iter().all(|item| {
+            !item.message.contains("pending btrfs subvolume rollback")
+        }));
     }
 
     #[test]

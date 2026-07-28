@@ -48,10 +48,15 @@ set(CATOS_SYSTEM_BIN
 # ---- source dependencies ----------------------------------------------------
 file(GLOB_RECURSE CATOS_SYSTEM_SOURCES CONFIGURE_DEPENDS
     "${CMAKE_CURRENT_SOURCE_DIR}/src/*.rs"
+    "${CMAKE_CURRENT_SOURCE_DIR}/crates/*/src/*.rs"
+)
+file(GLOB CATOS_SYSTEM_CRATE_MANIFESTS CONFIGURE_DEPENDS
+    "${CMAKE_CURRENT_SOURCE_DIR}/crates/*/Cargo.toml"
 )
 set(CATOS_SYSTEM_MANIFESTS
     "${CMAKE_CURRENT_SOURCE_DIR}/Cargo.toml"
     "${CMAKE_CURRENT_SOURCE_DIR}/Cargo.lock"
+    ${CATOS_SYSTEM_CRATE_MANIFESTS}
 )
 
 # ---- cargo invocation -------------------------------------------------------
@@ -329,6 +334,17 @@ if(BUILD_TESTS)
             TIMEOUT 480
             SKIP_RETURN_CODE 77
             LABELS "rust;integration;qemu;doctor"
+        )
+        add_test(
+            NAME catos-system-doctor-encrypted-root-qemu-smoke
+            COMMAND "${BASH_CMD}"
+                    "${CMAKE_CURRENT_SOURCE_DIR}/scripts/doctor-encrypted-root-qemu-smoke.sh"
+                    --bin "${CATOS_SYSTEM_BIN}"
+        )
+        set_tests_properties(catos-system-doctor-encrypted-root-qemu-smoke PROPERTIES
+            TIMEOUT 300
+            SKIP_RETURN_CODE 77
+            LABELS "rust;integration;qemu;doctor;encrypted-root"
         )
     endif()
 endif()
