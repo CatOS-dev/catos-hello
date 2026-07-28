@@ -30,70 +30,162 @@ pub enum TargetSelectionPolicy {
     PreferRunningRoot,
 }
 
-pub fn select_target_with_policy(report: &DiscoveryReport, program: &str, policy: TargetSelectionPolicy) -> Selection {
-    select_target_with_policy_for_terminal(report, program, policy, io::stdin().is_terminal())
+pub fn select_target_with_policy(
+    report: &DiscoveryReport,
+    program: &str,
+    policy: TargetSelectionPolicy,
+) -> Selection {
+    let stdin = io::stdin();
+    let stdout = io::stdout();
+    let interactive = stdin.is_terminal();
+    let mut input = stdin.lock();
+    let mut output = stdout.lock();
+    select_target_with_policy_with(
+        report,
+        program,
+        policy,
+        interactive,
+        &mut input,
+        &mut output,
+    )
 }
 
+#[cfg(test)]
 fn select_target_with_policy_for_terminal(
     report: &DiscoveryReport,
     program: &str,
     policy: TargetSelectionPolicy,
     interactive: bool,
 ) -> Selection {
+    let mut input = io::Cursor::new(Vec::<u8>::new());
+    let mut output = Vec::new();
+    select_target_with_policy_with(
+        report,
+        program,
+        policy,
+        interactive,
+        &mut input,
+        &mut output,
+    )
+}
+
+fn select_target_with_policy_with<R: BufRead, W: Write>(
+    report: &DiscoveryReport,
+    program: &str,
+    policy: TargetSelectionPolicy,
+    interactive: bool,
+    input: &mut R,
+    output: &mut W,
+) -> Selection {
     if policy == TargetSelectionPolicy::PreferRunningRoot {
-        let running = report.candidates.iter().filter(|candidate| candidate.running_environment_member).collect::<Vec<_>>();
+        let running = report
+            .candidates
+            .iter()
+            .filter(|candidate| candidate.running_environment_member)
+            .collect::<Vec<_>>();
         match running.as_slice() {
-            [candidate] => { print_summary(candidate); return Selection::Selected(Box::new((*candidate).clone())); }
+            [candidate] => {
+                if interactive {
+                    if let Err(error) = write_summary(output, candidate) {
+                        return Selection::Unavailable(error);
+                    }
+                }
+                return Selection::Selected(Box::new((*candidate).clone()));
+            }
             [] => {}
-            _ => return Selection::Unavailable("multiple candidates claim to be the current running root".into()),
+            _ => {
+                return Selection::Unavailable(
+                    "multiple candidates claim to be the current running root".into(),
+                )
+            }
         }
     }
-    let candidates = report.candidates.iter()
-        .filter(|candidate| policy != TargetSelectionPolicy::OfflineOnly || !candidate.running_environment_member)
+    let candidates = report
+        .candidates
+        .iter()
+        .filter(|candidate| {
+            policy != TargetSelectionPolicy::OfflineOnly
+                || !candidate.running_environment_member
+        })
         .collect::<Vec<_>>();
     if candidates.is_empty() {
         eprintln!("{program}: no diagnosable CatOS system was found");
         if policy == TargetSelectionPolicy::OfflineOnly
-            && report.candidates.iter().any(|candidate| candidate.running_environment_member)
+            && report
+                .candidates
+                .iter()
+                .any(|candidate| candidate.running_environment_member)
         {
-            eprintln!("{program}: the current running root is CatOS but is not eligible for this offline operation");
+            eprintln!(
+                "{program}: the current running root is CatOS but is not eligible for this offline operation"
+            );
         }
         for item in report.excluded.iter().chain(&report.rejected) {
             eprintln!("{program}: {}: {}", item.source, item.reason);
         }
-        let reason = if policy == TargetSelectionPolicy::OfflineOnly { "no offline CatOS candidate" } else { "no CatOS candidate" };
+        let reason = if policy == TargetSelectionPolicy::OfflineOnly {
+            "no offline CatOS candidate"
+        } else {
+            "no CatOS candidate"
+        };
         return Selection::Unavailable(reason.into());
     }
-    select_from_candidates(&candidates, program, interactive)
+    select_from_candidates(&candidates, program, interactive, input, output)
 }
 
-fn select_from_candidates(
+fn select_from_candidates<R: BufRead, W: Write>(
     candidates: &[&TargetCandidate],
     program: &str,
     interactive: bool,
+    input: &mut R,
+    output: &mut W,
 ) -> Selection {
     if !interactive {
         return match candidates {
-            [candidate] if candidate.confidence == RootCandidateConfidence::High => Selection::Selected(Box::new((*candidate).clone())),
-            _ => Selection::Unavailable("multiple target candidates require an interactive terminal".into()),
+            [candidate] if candidate.confidence == RootCandidateConfidence::High => {
+                Selection::Selected(Box::new((*candidate).clone()))
+            }
+            _ => Selection::Unavailable(
+                "multiple target candidates require an interactive terminal".into(),
+            ),
         };
     }
     if candidates.len() == 1 && candidates[0].confidence == RootCandidateConfidence::High {
         let candidate = candidates[0];
-        print_summary(candidate);
-        return match read_confirm(program, "Use this target?") {
+        if let Err(error) = write_summary(output, candidate) {
+            return Selection::Unavailable(error);
+        }
+        return match read_confirm_with(input, output, program, "Use this target?") {
             Ok(true) => Selection::Selected(Box::new(candidate.clone())),
             Ok(false) => Selection::Declined,
             Err(error) => Selection::Unavailable(error),
         };
     }
-    println!("Available CatOS targets:");
-    for (index, candidate) in candidates.iter().enumerate() {
-        println!("  [{}] {}", index + 1, summary(candidate));
+    if let Err(error) = writeln!(output, "Available CatOS targets:")
+        .map_err(|error| format!("stdout write failed: {error}"))
+    {
+        return Selection::Unavailable(error);
     }
-    println!("  [0] Back");
-    match read_index(program, "target", candidates.len()) {
-        Ok(Some(index)) => { let candidate = candidates[index].clone(); print_summary(&candidate); Selection::Selected(Box::new(candidate)) }
+    for (index, candidate) in candidates.iter().enumerate() {
+        if let Err(error) = writeln!(output, "  [{}] {}", index + 1, summary(candidate))
+            .map_err(|error| format!("stdout write failed: {error}"))
+        {
+            return Selection::Unavailable(error);
+        }
+    }
+    if let Err(error) = writeln!(output, "  [0] Back")
+        .map_err(|error| format!("stdout write failed: {error}"))
+    {
+        return Selection::Unavailable(error);
+    }
+    match read_index_with(input, output, program, "target", candidates.len()) {
+        Ok(Some(index)) => {
+            let candidate = candidates[index].clone();
+            match write_summary(output, &candidate) {
+                Ok(()) => Selection::Selected(Box::new(candidate)),
+                Err(error) => Selection::Unavailable(error),
+            }
+        }
         Ok(None) => Selection::Declined,
         Err(error) => Selection::Unavailable(error),
     }
@@ -174,29 +266,43 @@ pub fn summary(candidate: &TargetCandidate) -> String {
     format!("{distro} — {} — {} UUID={uuid}{subvol}", candidate.root_device.display(), candidate.root_fstype)
 }
 
-fn print_summary(candidate: &TargetCandidate) { println!("Selected target: {}", summary(candidate)); }
+fn write_summary<W: Write>(
+    output: &mut W,
+    candidate: &TargetCandidate,
+) -> Result<(), String> {
+    writeln!(output, "Selected target: {}", summary(candidate))
+        .map_err(|error| format!("stdout write failed: {error}"))
+}
 
-fn read_confirm(program: &str, prompt: &str) -> Result<bool, String> {
+fn read_confirm_with<R: BufRead, W: Write>(
+    input: &mut R,
+    output: &mut W,
+    program: &str,
+    prompt: &str,
+) -> Result<bool, String> {
     loop {
-        print!("{program}: {prompt} [y/N] ");
-        io::stdout().flush().map_err(|e| format!("stdout write failed: {e}"))?;
+        write!(output, "{program}: {prompt} [y/N] ")
+            .map_err(|error| format!("stdout write failed: {error}"))?;
+        output
+            .flush()
+            .map_err(|error| format!("stdout write failed: {error}"))?;
         let mut line = String::new();
-        io::stdin().read_line(&mut line).map_err(|e| format!("stdin read failed: {e}"))?;
+        let read = input
+            .read_line(&mut line)
+            .map_err(|error| format!("stdin read failed: {error}"))?;
+        if read == 0 {
+            writeln!(output).map_err(|error| format!("stdout write failed: {error}"))?;
+            return Ok(false);
+        }
         match line.trim().to_ascii_lowercase().as_str() {
             "" | "n" | "no" => return Ok(false),
             "y" | "yes" => return Ok(true),
-            _ => eprintln!("{program}: enter y or n"),
+            _ => writeln!(output, "{program}: enter y or n")
+                .map_err(|error| format!("stdout write failed: {error}"))?,
         }
     }
 }
 
-fn read_index(program: &str, noun: &str, count: usize) -> Result<Option<usize>, String> {
-    let stdin = io::stdin();
-    let stdout = io::stdout();
-    let mut input = stdin.lock();
-    let mut output = stdout.lock();
-    read_index_with(&mut input, &mut output, program, noun, count)
-}
 
 fn read_index_with<R: BufRead, W: Write>(
     input: &mut R,
@@ -232,6 +338,59 @@ mod tests {
     use std::path::PathBuf;
     fn candidate(path: &str, running: bool) -> TargetCandidate {
         TargetCandidate { root_device: PathBuf::from(path), root_fstype: "btrfs".into(), root_uuid: Some(format!("uuid-{path}")), root_subvolume: Some("/@".into()), root_subvolume_id: Some(256), filesystem_id: Some("fsid".into()), label: None, os_release: crate::target::model::OsRelease { pretty_name: Some("CatOS".into()), ..Default::default() }, fstab_identity: None, currently_mounted: running, running_environment_member: running, confidence: RootCandidateConfidence::High, evidence: Vec::new() }
+    }
+
+    struct FailingWriter;
+
+    impl Write for FailingWriter {
+        fn write(&mut self, _buffer: &[u8]) -> io::Result<usize> {
+            Err(io::Error::new(io::ErrorKind::BrokenPipe, "closed output"))
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Err(io::Error::new(io::ErrorKind::BrokenPipe, "closed output"))
+        }
+    }
+
+    #[test]
+    fn noninteractive_running_root_selection_does_not_write_stdout() {
+        let report = DiscoveryReport {
+            candidates: vec![candidate("/dev/running", true)],
+            ..Default::default()
+        };
+        let mut input = io::Cursor::new(Vec::<u8>::new());
+        let mut output = Vec::new();
+        let selection = select_target_with_policy_with(
+            &report,
+            "catos-doctor",
+            TargetSelectionPolicy::PreferRunningRoot,
+            false,
+            &mut input,
+            &mut output,
+        );
+        assert!(matches!(selection, Selection::Selected(_)));
+        assert!(output.is_empty());
+    }
+
+    #[test]
+    fn target_selection_output_failure_is_unavailable_not_a_panic() {
+        let report = DiscoveryReport {
+            candidates: vec![candidate("/dev/root", false)],
+            ..Default::default()
+        };
+        let mut input = io::Cursor::new(b"yes\n".to_vec());
+        let selection = select_target_with_policy_with(
+            &report,
+            "catos-repair",
+            TargetSelectionPolicy::Any,
+            true,
+            &mut input,
+            &mut FailingWriter,
+        );
+        match selection {
+            Selection::Unavailable(error) => assert!(error.contains("stdout write failed")),
+            other => panic!("expected unavailable selection, got {other:?}"),
+        }
     }
 
     #[test]

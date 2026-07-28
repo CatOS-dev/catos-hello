@@ -284,7 +284,7 @@ body=$(cat "$SERIAL_LOG.normalized")
 [[ $body != *'__CRYPT_DOCTOR_FATAL__'* ]] || { cat "$SERIAL_LOG.normalized" >&2; fail "guest setup failed"; }
 [[ $body == *'__CRYPT_DOCTOR_RC__=0'* ]] || { cat "$SERIAL_LOG.normalized" >&2; fail "Doctor returned nonzero"; }
 [[ $body == *'target=running'* ]] || { cat "$SERIAL_LOG.normalized" >&2; fail "encrypted current root was not selected as running"; }
-[[ $body == *'Selected target: CatOS Encrypted Root QEMU — /dev/dm-0 — btrfs UUID='* ]] || { cat "$SERIAL_LOG.normalized" >&2; fail "wrong target or mapper identity selected"; }
+[[ $body == *'catos-repair boot --root-device /dev/dm-0'* ]] || { cat "$SERIAL_LOG.normalized" >&2; fail "Doctor did not bind its repair action to the selected dm inventory identity"; }
 [[ $body == *'subvol=/@'* ]] || { cat "$SERIAL_LOG.normalized" >&2; fail "running root subvolume identity missing"; }
 [[ $body == *'/dev/mapper/cryptroot'* ]] || { cat "$SERIAL_LOG.normalized" >&2; fail "root mountinfo did not retain mapper source"; }
 [[ $body == *'__CRYPT_DOCTOR_NO_RESIDUAL_MOUNTS__'* ]] || { cat "$SERIAL_LOG.normalized" >&2; fail "Doctor left residual mounts"; }
