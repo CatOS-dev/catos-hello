@@ -1393,6 +1393,24 @@ mod tests {
     }
 
     #[test]
+    fn non_regular_secureboot_marker_is_rejected() {
+        let target_root = TempTargetRoot::new();
+        fs::create_dir_all(target_root.path.join("etc/catos/secureboot")).unwrap();
+
+        let error = target_secureboot_marker_present(&target_root.path).unwrap_err();
+        assert!(error.contains("not a regular file"));
+    }
+
+    #[test]
+    fn empty_regular_secureboot_marker_is_still_a_marker() {
+        let target_root = TempTargetRoot::new();
+        fs::create_dir_all(target_root.path.join("etc/catos")).unwrap();
+        fs::write(target_root.path.join("etc/catos/secureboot"), b"").unwrap();
+
+        assert!(target_secureboot_marker_present(&target_root.path).unwrap());
+    }
+
+    #[test]
     fn firmware_boot_configuration_is_not_a_secureboot_marker() {
         let target_root = TempTargetRoot::new();
         fs::create_dir_all(target_root.path.join("etc/catos")).unwrap();

@@ -873,11 +873,35 @@ fn list_optional_target_directory(
 }
 
 pub fn target_secureboot_marker_present(target_root: &Path) -> Result<bool, String> {
-    Ok(
-        has_target_path_checked(target_root, "etc/catos/secureboot")?
-            || has_target_path_checked(target_root, "etc/catos/secureboot.conf")?
-            || has_target_path_checked(target_root, "var/lib/catos/secureboot")?,
-    )
+    for relative in [
+        "etc/catos/secureboot",
+        "etc/catos/secureboot.conf",
+        "var/lib/catos/secureboot",
+    ] {
+        if secureboot_marker_file_present(target_root, relative)? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn secureboot_marker_file_present(target_root: &Path, relative: &str) -> Result<bool, String> {
+    use catos_target::execute::confined::{rooted_path_kind, RootedPathKind};
+
+    let rooted = format!("/{relative}");
+    match rooted_path_kind(target_root, &rooted) {
+        Ok(None) | Err(catos_target::FsError::NotFound) => Ok(false),
+        Ok(Some(RootedPathKind::RegularFile)) => Ok(true),
+        Ok(Some(RootedPathKind::Symlink)) => {
+            Err(format!("target Secure Boot marker {rooted} is a symlink"))
+        }
+        Ok(Some(RootedPathKind::Directory | RootedPathKind::Other)) => Err(format!(
+            "target Secure Boot marker {rooted} is not a regular file"
+        )),
+        Err(error) => Err(format!(
+            "cannot inspect target Secure Boot marker {rooted}: {error}"
+        )),
+    }
 }
 
 pub fn target_signed_catos_efi_present(

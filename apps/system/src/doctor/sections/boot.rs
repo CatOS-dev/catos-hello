@@ -630,14 +630,16 @@ pub(in crate::doctor) fn run_secure_boot_section(
     };
 
     if !context.candidate.running_environment_member {
-        let target_marker = match read_target_file(&root, "etc/catos/secureboot") {
-            Ok(value) => value.is_some(),
+        let target_marker = match crate::boot::diagnose::target::target_secureboot_marker_present(
+            &root,
+        ) {
+            Ok(value) => value,
             Err(error) => {
                 set_section(sections, id, DoctorSectionStatus::Unknown);
                 report.limitations.push(DoctorLimitation::new(
                     id,
                     "SECURE_BOOT_POLICY_INCOMPLETE",
-                    format!("cannot read target Secure Boot marker: {error}"),
+                    format!("cannot inspect target Secure Boot marker: {error}"),
                 ));
                 return Ok(());
             }
@@ -663,7 +665,7 @@ pub(in crate::doctor) fn run_secure_boot_section(
             Evidence::new(
                 "TARGET_POLICY_MARKER",
                 "doctor::secure_boot",
-                format!("/etc/catos/secureboot present: {target_marker}"),
+                format!("target Secure Boot marker present: {target_marker}"),
             ),
         );
         push_evidence(
@@ -703,23 +705,35 @@ pub(in crate::doctor) fn run_secure_boot_section(
         return Ok(());
     }
 
-    let firmware_sb_body = match read_target_file(
+    let firmware_sb_body = match read_optional_target_bytes(
         Path::new("/"),
         "sys/firmware/efi/efivars/SecureBoot-8be4df61-92ca-11d2-b0b3-00a0c91f6dba",
     ) {
         Ok(value) => value,
         Err(error) => {
             set_section(sections, id, DoctorSectionStatus::Unknown);
-            report.limitations.push(DoctorLimitation::new(id, "FIRMWARE_SECURE_BOOT_UNAVAILABLE", format!("cannot read firmware Secure Boot state: {error}")));
+            report.limitations.push(DoctorLimitation::new(
+                id,
+                "FIRMWARE_SECURE_BOOT_UNAVAILABLE",
+                format!("cannot read firmware Secure Boot state: {error}"),
+            ));
             return Ok(());
         }
     };
-    let firmware_sb_on = firmware_sb_body.as_deref().and_then(|body| secure_boot_enabled_from_efivar(body.as_bytes()));
-    let target_marker = match read_target_file(&root, "etc/catos/secureboot") {
-        Ok(value) => value.is_some(),
+    let firmware_sb_on = firmware_sb_body
+        .as_deref()
+        .and_then(secure_boot_enabled_from_efivar);
+    let target_marker = match crate::boot::diagnose::target::target_secureboot_marker_present(
+        &root,
+    ) {
+        Ok(value) => value,
         Err(error) => {
             set_section(sections, id, DoctorSectionStatus::Unknown);
-            report.limitations.push(DoctorLimitation::new(id, "SECURE_BOOT_POLICY_INCOMPLETE", format!("cannot read target Secure Boot marker: {error}")));
+            report.limitations.push(DoctorLimitation::new(
+                id,
+                "SECURE_BOOT_POLICY_INCOMPLETE",
+                format!("cannot inspect target Secure Boot marker: {error}"),
+            ));
             return Ok(());
         }
     };
@@ -801,23 +815,80 @@ pub(in crate::doctor) fn run_secure_boot_section(
     Ok(())
 }
 
+fn read_optional_target_bytes(root: &Path, relative: &str) -> Result<Option<Vec<u8>>, String> {
+    let rooted = format!("/{}", relative.trim_start_matches('/'));
+    match crate::target::execute::confined::read_rooted_file(root, &rooted) {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(crate::target::error::FsError::NotFound) => Ok(None),
+        Err(error) => Err(format!("cannot read target file {rooted}: {error}")),
+    }
+}
+
 fn secure_boot_policy_consistent(firmware_enabled: bool, target_marker: bool) -> bool {
     firmware_enabled == target_marker
 }
 
 fn secure_boot_enabled_from_efivar(body: &[u8]) -> Option<bool> {
-    body.get(4).map(|b| *b != 0)
+    match body.get(4).copied() {
+        Some(0) => Some(false),
+        Some(1) => Some(true),
+        _ => None,
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
         efi_asset, pacman_package_name, provider_firmware_asset_present,
+        read_optional_target_bytes, secure_boot_enabled_from_efivar,
         secure_boot_policy_consistent, valid_grub_config, valid_limine_config,
         valid_systemd_loader,
     };
     use crate::boot::model::ProviderId;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn secure_boot_efivar_reader_preserves_binary_payload() {
+        let root = scratch("secureboot-efivar");
+        let relative = "sys/firmware/efi/efivars/SecureBoot-test";
+        let path = root.join(relative);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let payload = [0xff, 0x00, 0x80, 0x7f, 0x01];
+        std::fs::write(&path, payload).unwrap();
+
+        assert_eq!(
+            read_optional_target_bytes(&root, relative).unwrap(),
+            Some(payload.to_vec())
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn secure_boot_efivar_accepts_only_boolean_values() {
+        assert_eq!(secure_boot_enabled_from_efivar(&[7, 0, 0, 0, 0]), Some(false));
+        assert_eq!(secure_boot_enabled_from_efivar(&[7, 0, 0, 0, 1]), Some(true));
+        assert_eq!(secure_boot_enabled_from_efivar(&[7, 0, 0, 0, 2]), None);
+        assert_eq!(secure_boot_enabled_from_efivar(&[7, 0, 0, 0]), None);
+    }
+
+    #[test]
+    fn secure_boot_marker_probe_accepts_all_supported_marker_locations() {
+        for relative in [
+            "etc/catos/secureboot",
+            "etc/catos/secureboot.conf",
+            "var/lib/catos/secureboot",
+        ] {
+            let root = scratch("secureboot-marker");
+            let path = root.join(relative);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, b"enabled\n").unwrap();
+            assert!(
+                crate::boot::diagnose::target::target_secureboot_marker_present(&root).unwrap(),
+                "marker {relative} was not detected"
+            );
+            std::fs::remove_dir_all(root).unwrap();
+        }
+    }
 
     #[test]
     fn secure_boot_policy_does_not_depend_on_firmware_provider_config() {
