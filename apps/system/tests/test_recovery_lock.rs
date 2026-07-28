@@ -251,6 +251,45 @@ fn time_lock_failure(top: &Path, fsid: &str) -> (SnapshotErrorKind, std::time::D
 }
 
 #[test]
+fn begin_failure_removes_the_already_persisted_plan() {
+    use std::os::unix::fs::symlink;
+
+    let top = scratch_dir("begin-plan-cleanup");
+    let outside = top.with_extension("outside-state");
+    std::fs::write(&outside, b"sentinel").unwrap();
+    let plan = sample_plan_with_fsid("fsid-begin-cleanup", "p-begin-cleanup");
+    let transaction_dir = top
+        .join(TransactionPaths::transactions_dir().trim_start_matches('/'))
+        .join(&plan.plan_id);
+    std::fs::create_dir_all(&transaction_dir).unwrap();
+    let state_path = transaction_dir.join("state.json");
+    let plan_path = transaction_dir.join("plan.json");
+    symlink(&outside, &state_path).unwrap();
+
+    let error = match Engine::begin(
+        EngineOptions {
+            top_level_mount: top.clone(),
+            device_path: PathBuf::from("/dev/null"),
+            validated_filesystem: plan.filesystem.clone(),
+        },
+        plan,
+    ) {
+        Ok(_) => panic!("state symlink must prevent transaction creation"),
+        Err(error) => error,
+    };
+
+    assert_eq!(error.kind, SnapshotErrorKind::UnsafeRecoveryPath);
+    assert!(error
+        .message
+        .contains("additionally failed to clean incomplete transaction metadata"));
+    assert!(!plan_path.exists(), "failed begin left an orphan plan");
+    assert!(state_path.is_symlink());
+    assert_eq!(std::fs::read(&outside).unwrap(), b"sentinel");
+    let _ = std::fs::remove_dir_all(&top);
+    let _ = std::fs::remove_file(&outside);
+}
+
+#[test]
 fn apply_apply_lock_conflict() {
     // Failure mode: two concurrent `recovery apply` invocations
     // against the same btrfs FSID race the backup-snapshot creation

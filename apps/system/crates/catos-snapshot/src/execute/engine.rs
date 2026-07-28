@@ -233,7 +233,18 @@ impl Engine {
             lock: Some(lock),
             _device_lock: device_lock,
         };
-        engine.persist_record("begin")?;
+        if let Err(mut error) = engine.persist_record("begin") {
+            let state_path =
+                top_level_state_path(&engine.opts.top_level_mount, &engine.record.transaction_id);
+            if let Err(cleanup_error) = store::remove_transaction_metadata(&state_path) {
+                error.message = format!(
+                    "{}; additionally failed to clean incomplete transaction metadata: {}",
+                    error.message, cleanup_error.message
+                )
+                .into_boxed_str();
+            }
+            return Err(error);
+        }
         Ok(engine)
     }
 
@@ -859,8 +870,7 @@ impl Engine {
     fn remove_record(&mut self) -> Result<(), SnapshotError> {
         let state_path =
             top_level_state_path(&self.opts.top_level_mount, &self.record.transaction_id);
-        store::remove_record(&state_path)?;
-        Ok(())
+        store::remove_transaction_metadata(&state_path)
     }
 
     fn failure(

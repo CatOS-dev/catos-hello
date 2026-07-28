@@ -32,8 +32,8 @@ use serde::Deserialize;
 use crate::diagnose::identity::validate_recovery_id;
 use crate::model::fs_to_snapshot;
 use crate::model::{
-    SnapshotError, SnapshotErrorKind, TransactionRecord, RECOVERY_PLAN_SCHEMA_VERSION,
-    TX_RECORD_SCHEMA_VERSION,
+    SnapshotError, SnapshotErrorKind, TransactionPaths, TransactionRecord,
+    RECOVERY_PLAN_SCHEMA_VERSION, TX_RECORD_SCHEMA_VERSION,
 };
 use crate::verify::validate_plan_shape;
 use catos_target::execute::confined;
@@ -191,12 +191,87 @@ pub fn list_records(
     (ok, errs)
 }
 
-/// Remove a transaction record. Used by revert when the revert leaves
-/// no persistent writes behind. Does NOT remove backup or staging
-/// subvolumes — those are owned by btrfs-progs and managed by the
-/// engine.
-pub fn remove_record(path: &Path) -> Result<(), SnapshotError> {
-    Ok(confined::remove_file(path)?)
+pub fn remove_transaction_metadata(state_path: &Path) -> Result<(), SnapshotError> {
+    let directory = state_path.parent().ok_or_else(|| {
+        SnapshotError::new(
+            SnapshotErrorKind::UnsafeRecoveryPath,
+            format!(
+                "state path {} has no transaction directory",
+                state_path.display()
+            ),
+        )
+    })?;
+    let transaction_id = directory
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| {
+            SnapshotError::new(
+                SnapshotErrorKind::UnsafeRecoveryPath,
+                format!(
+                    "transaction directory {} has no valid UTF-8 transaction id",
+                    directory.display()
+                ),
+            )
+        })?;
+    validate_recovery_id(transaction_id)?;
+    let transactions_suffix =
+        Path::new(TransactionPaths::transactions_dir().trim_start_matches('/'));
+    let transactions_directory = directory.parent().ok_or_else(|| {
+        SnapshotError::new(
+            SnapshotErrorKind::UnsafeRecoveryPath,
+            format!(
+                "transaction directory {} has no transactions parent",
+                directory.display()
+            ),
+        )
+    })?;
+    if !transactions_directory.ends_with(transactions_suffix) {
+        return Err(SnapshotError::new(
+            SnapshotErrorKind::UnsafeRecoveryPath,
+            format!(
+                "transaction directory {} is outside the canonical {} layout",
+                directory.display(),
+                TransactionPaths::transactions_dir()
+            ),
+        ));
+    }
+    let expected_state = directory.join("state.json");
+    if state_path != expected_state {
+        return Err(SnapshotError::new(
+            SnapshotErrorKind::UnsafeRecoveryPath,
+            format!(
+                "state path {} is not the canonical file {}",
+                state_path.display(),
+                expected_state.display()
+            ),
+        ));
+    }
+    let names = confined::list_directory_names(directory).map_err(fs_to_snapshot)?;
+    for name in &names {
+        if name != "plan.json" && name != "state.json" {
+            return Err(SnapshotError::new(
+                SnapshotErrorKind::UnsafeRecoveryPath,
+                format!(
+                    "refusing to remove transaction directory {} containing unexpected object {}",
+                    directory.display(),
+                    name.to_string_lossy()
+                ),
+            ));
+        }
+    }
+    remove_file_if_present(&directory.join("plan.json"))?;
+    remove_file_if_present(state_path)?;
+    match confined::remove_empty_directory(directory) {
+        Ok(()) | Err(catos_target::FsError::NotFound) => Ok(()),
+        Err(error) => Err(fs_to_snapshot(error)),
+    }
+}
+
+fn remove_file_if_present(path: &Path) -> Result<(), SnapshotError> {
+    match confined::remove_file(path) {
+        Ok(()) | Err(catos_target::FsError::NotFound) => Ok(()),
+        Err(error) => Err(fs_to_snapshot(error)),
+    }
 }
 
 /// Persist a [`RecoveryPlan`] as a standalone file (used by `recovery
@@ -477,13 +552,56 @@ mod tests {
     }
 
     #[test]
-    fn remove_record_is_idempotent() {
-        let root = scratch_root("remove");
+    fn remove_transaction_metadata_removes_plan_state_and_empty_directory() {
+        let root = scratch_root("remove-metadata");
         fs::create_dir_all(&root).unwrap();
-        let path = state_path(&root, ID1);
-        persist_record(&path, &record_for(ID1)).unwrap();
-        remove_record(&path).unwrap();
-        remove_record(&path).unwrap();
+        let state = state_path(&root, ID1);
+        let plan = state.parent().unwrap().join("plan.json");
+        persist_record(&state, &record_for(ID1)).unwrap();
+        persist_plan(&plan, &record_for(ID1).plan).unwrap();
+
+        remove_transaction_metadata(&state).unwrap();
+
+        assert!(!state.exists());
+        assert!(!plan.exists());
+        assert!(!state.parent().unwrap().exists());
+        remove_transaction_metadata(&state).expect("metadata cleanup must be idempotent");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn remove_transaction_metadata_rejects_noncanonical_directory_before_deletion() {
+        let root = scratch_root("remove-metadata-noncanonical");
+        let directory = root.join(ID1);
+        fs::create_dir_all(&directory).unwrap();
+        let state = directory.join("state.json");
+        let plan = directory.join("plan.json");
+        fs::write(&state, b"state").unwrap();
+        fs::write(&plan, b"plan").unwrap();
+
+        let error = remove_transaction_metadata(&state).unwrap_err();
+
+        assert_eq!(error.kind, SnapshotErrorKind::UnsafeRecoveryPath);
+        assert!(state.exists());
+        assert!(plan.exists());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn remove_transaction_metadata_refuses_unexpected_objects_before_deletion() {
+        let root = scratch_root("remove-metadata-unexpected");
+        fs::create_dir_all(&root).unwrap();
+        let state = state_path(&root, ID1);
+        let plan = state.parent().unwrap().join("plan.json");
+        persist_record(&state, &record_for(ID1)).unwrap();
+        persist_plan(&plan, &record_for(ID1).plan).unwrap();
+        fs::write(state.parent().unwrap().join("unexpected"), b"sentinel").unwrap();
+
+        let error = remove_transaction_metadata(&state).unwrap_err();
+
+        assert_eq!(error.kind, SnapshotErrorKind::UnsafeRecoveryPath);
+        assert!(state.exists());
+        assert!(plan.exists());
         let _ = fs::remove_dir_all(root);
     }
 

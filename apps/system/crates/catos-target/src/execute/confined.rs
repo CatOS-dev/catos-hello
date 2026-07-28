@@ -348,6 +348,37 @@ pub fn remove_empty_rooted_directory(top_level: &Path, rooted_path: &str) -> Res
     )
 }
 
+pub fn remove_empty_directory(path: &Path) -> Result<(), FsError> {
+    let confined = ConfinedPath::parse(path)?;
+    let (parent, name) = confined.open_parent(false)?;
+    match entry_type(parent.as_raw_fd(), &name, path)? {
+        None => return Ok(()),
+        Some(kind) if kind == libc::S_IFDIR => {}
+        Some(kind) if kind == libc::S_IFLNK => {
+            return Err(unsafe_path(
+                path,
+                "refusing to remove symlink as recovery directory",
+            ));
+        }
+        Some(_) => {
+            return Err(unsafe_path(
+                path,
+                "recovery cleanup target is not a directory",
+            ));
+        }
+    }
+    let names = list_directory_names(path)?;
+    if !names.is_empty() {
+        return Err(FsError::Io(format!(
+            "refusing to remove non-empty recovery directory {}",
+            path.display()
+        )));
+    }
+    unlinkat_dir_name(parent.as_raw_fd(), &name)
+        .map_err(|error| map_path_error(path, "remove empty recovery directory", error))?;
+    fsync_fd(parent.as_raw_fd(), path, "fsync recovery directory parent")
+}
+
 pub fn remove_file(path: &Path) -> Result<(), FsError> {
     let confined = ConfinedPath::parse(path)?;
     let (parent, name) = confined.open_parent(false)?;
