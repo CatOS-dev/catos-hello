@@ -618,6 +618,53 @@ fn update_help_and_version_are_accepted() {
 }
 
 #[test]
+fn update_full_flow_refuses_noninteractive_stdin_before_listing_updates() {
+    let bin = bin_path();
+    let tmp = TempDir::new("catos-update-noninteractive").unwrap();
+    let link = link_to(&bin, &tmp, "catos-update");
+    let (ok, code, stdout, stderr) = run_via(&link, &[]);
+    assert!(!ok);
+    assert_eq!(code, 2);
+    assert!(stdout.is_empty(), "stdout={stdout:?}");
+    assert!(stderr.contains("interactive terminal"), "stderr={stderr:?}");
+    assert!(stderr.contains("--check"), "stderr={stderr:?}");
+}
+
+#[test]
+fn update_help_does_not_advertise_unsupported_noop_flags() {
+    let bin = bin_path();
+    let tmp = TempDir::new("catos-update-help-surface").unwrap();
+    let link = link_to(&bin, &tmp, "catos-update");
+    let (ok, code, stdout, stderr) = run_via(&link, &["--help"]);
+    assert!(ok, "code={code} stderr={stderr}");
+    assert!(!stdout.contains("--devel"), "stdout={stdout}");
+    assert!(stdout.contains("interactive terminal"), "stdout={stdout}");
+}
+
+#[test]
+fn repair_top_level_help_defers_to_command_specific_options() {
+    let bin = bin_path();
+    let tmp = TempDir::new("catos-repair-help-surface").unwrap();
+    let link = link_to(&bin, &tmp, "catos-repair");
+    let (ok, code, stdout, stderr) = run_via(&link, &["--help"]);
+    assert!(ok, "code={code} stderr={stderr}");
+    assert!(stdout.contains("catos-repair <COMMAND> --help"), "stdout={stdout}");
+    assert!(!stdout.contains("--root-device"), "top-level help must not imply every domain accepts the same options: {stdout}");
+}
+
+#[test]
+fn recovery_top_level_help_explains_the_safe_workflow() {
+    let bin = bin_path();
+    let tmp = TempDir::new("catos-recovery-help-workflow").unwrap();
+    let link = link_to(&bin, &tmp, "catos-recovery");
+    let (ok, code, stdout, stderr) = run_via(&link, &["--help"]);
+    assert!(ok, "code={code} stderr={stderr}");
+    assert!(stdout.contains("WORKFLOW:"), "stdout={stdout}");
+    assert!(stdout.contains("State-changing"), "stdout={stdout}");
+    assert!(stdout.contains("List snapshots and recovery transactions"), "stdout={stdout}");
+}
+
+#[test]
 fn update_does_not_inherit_catos_system_commands() {
     // `catos-update` is recognised as a distinct entry point and MUST
     // NOT expose any `catos-system` subcommand. Each inherited name
@@ -721,6 +768,14 @@ fn recovery_subcommand_help_lists_real_required_options() {
     assert!(
         !stdout.contains("COMMANDS:\n    list"),
         "apply help fell back to top-level help"
+    );
+    let options = stdout
+        .split_once("OPTIONS:\n")
+        .expect("apply help must contain an options section")
+        .1;
+    assert!(
+        options.find("--plan-file").unwrap() < options.find("--root-device").unwrap(),
+        "action-specific options should precede common target options: {stdout}"
     );
 }
 

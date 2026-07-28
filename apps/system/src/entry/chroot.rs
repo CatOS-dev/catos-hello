@@ -1,6 +1,6 @@
 //! `catos-chroot` CLI application orchestration.
 
-use std::io::{IsTerminal, Write};
+use std::io::{self, BufRead, IsTerminal, Write};
 
 use crate::chroot::diagnose::fstab::read_from_device;
 use crate::chroot::execute::{
@@ -462,82 +462,147 @@ fn prompt_select_device(
     devices: &[BlockDevice],
     allow_skip: bool,
 ) -> Option<BlockDevice> {
+    let stdin = io::stdin();
+    let stdout = io::stdout();
+    let mut input = stdin.lock();
+    let mut output = stdout.lock();
+    prompt_select_device_with(
+        &mut input,
+        &mut output,
+        program,
+        role,
+        devices,
+        allow_skip,
+    )
+}
+
+fn prompt_select_device_with<R: BufRead, W: Write>(
+    input: &mut R,
+    output: &mut W,
+    program: &str,
+    role: &str,
+    devices: &[BlockDevice],
+    allow_skip: bool,
+) -> Option<BlockDevice> {
     if devices.is_empty() {
-        eprintln!("{program}: no devices available to pick {role} from");
+        writeln!(output, "{program}: no devices available to pick {role} from").ok()?;
         return None;
     }
-    println!("\nAvailable devices for {role}:");
-    let offset = usize::from(allow_skip);
-    if allow_skip {
-        println!("  0: Skip");
-    }
+    writeln!(output, "\nAvailable devices for {role}:").ok()?;
     for (index, device) in devices.iter().enumerate() {
-        println!("  {}: {device}", index + offset);
+        writeln!(output, "  [{}] {device}", index + 1).ok()?;
     }
-    let upper = devices.len() - 1 + offset;
+    writeln!(output, "  [0] {}", if allow_skip { "Skip" } else { "Back" }).ok()?;
+    let upper = devices.len();
     loop {
-        print!("{program}: pick device [0-{upper}] (default 0): ");
-        std::io::stdout().flush().ok();
+        write!(
+            output,
+            "{program}: pick device [0-{upper}]{}: ",
+            if allow_skip { " (blank to skip)" } else { "" }
+        )
+        .ok()?;
+        output.flush().ok()?;
         let mut line = String::new();
-        if std::io::stdin().read_line(&mut line).is_err() {
+        let read = input.read_line(&mut line).ok()?;
+        if read == 0 {
+            writeln!(output).ok()?;
             return None;
         }
-        let index = if line.trim().is_empty() {
-            0
-        } else {
-            match line.trim().parse::<usize>() {
-                Ok(index) => index,
-                Err(_) => {
-                    eprintln!("{program}: not a number: {:?}", line.trim());
-                    continue;
-                }
-            }
-        };
-        if allow_skip && index == 0 {
+        if line.trim().is_empty() && allow_skip {
             return None;
         }
-        let candidate = if allow_skip {
-            index.saturating_sub(1)
-        } else {
-            index
+        let Ok(index) = line.trim().parse::<usize>() else {
+            writeln!(output, "{program}: enter a number from 0 to {upper}").ok()?;
+            continue;
         };
-        if let Some(device) = devices.get(candidate) {
+        if index == 0 {
+            return None;
+        }
+        if let Some(device) = devices.get(index - 1) {
             return Some(device.clone());
         }
-        eprintln!("{program}: index out of range");
+        writeln!(output, "{program}: enter a number from 0 to {upper}").ok()?;
     }
 }
 
 fn prompt_mount_point(program: &str) -> Option<String> {
-    print!("{program}: mount point (e.g. /boot) or 'skip' to cancel: ");
-    std::io::stdout().flush().ok();
-    let mut line = String::new();
-    if std::io::stdin().read_line(&mut line).is_err() {
-        return None;
+    let stdin = io::stdin();
+    let stdout = io::stdout();
+    let mut input = stdin.lock();
+    let mut output = stdout.lock();
+    prompt_mount_point_with(&mut input, &mut output, program)
+}
+
+fn prompt_mount_point_with<R: BufRead, W: Write>(
+    input: &mut R,
+    output: &mut W,
+    program: &str,
+) -> Option<String> {
+    loop {
+        write!(
+            output,
+            "{program}: mount point (for example /boot; blank to cancel): "
+        )
+        .ok()?;
+        output.flush().ok()?;
+        let mut line = String::new();
+        let read = input.read_line(&mut line).ok()?;
+        if read == 0 {
+            writeln!(output).ok()?;
+            return None;
+        }
+        let value = line.trim().to_string();
+        if value.is_empty() || value.eq_ignore_ascii_case("skip") {
+            return None;
+        }
+        if value.starts_with('/') {
+            return Some(value);
+        }
+        writeln!(output, "{program}: mount point must start with /").ok()?;
     }
-    let value = line.trim().to_string();
-    if value.is_empty() {
-        return None;
-    }
-    if !value.starts_with('/') && !value.eq_ignore_ascii_case("skip") {
-        eprintln!("{program}: mount point must start with /");
-        return None;
-    }
-    Some(value)
 }
 
 fn prompt_yes_no(program: &str, prompt: &str, default: bool) -> bool {
-    print!("{program}: {prompt} [y/N] ");
-    std::io::stdout().flush().ok();
-    let mut line = String::new();
-    if std::io::stdin().read_line(&mut line).is_err() {
-        return false;
+    let stdin = io::stdin();
+    let stdout = io::stdout();
+    let mut input = stdin.lock();
+    let mut output = stdout.lock();
+    prompt_yes_no_with(&mut input, &mut output, program, prompt, default)
+}
+
+fn prompt_yes_no_with<R: BufRead, W: Write>(
+    input: &mut R,
+    output: &mut W,
+    program: &str,
+    prompt: &str,
+    default: bool,
+) -> bool {
+    loop {
+        let choices = if default { "Y/n" } else { "y/N" };
+        if write!(output, "{program}: {prompt} [{choices}] ").is_err()
+            || output.flush().is_err()
+        {
+            return false;
+        }
+        let mut line = String::new();
+        let Ok(read) = input.read_line(&mut line) else {
+            return false;
+        };
+        if read == 0 {
+            let _ = writeln!(output);
+            return false;
+        }
+        match line.trim().to_ascii_lowercase().as_str() {
+            "" => return default,
+            "y" | "yes" => return true,
+            "n" | "no" => return false,
+            _ => {
+                if writeln!(output, "{program}: enter y or n").is_err() {
+                    return false;
+                }
+            }
+        }
     }
-    let value = line.trim().to_ascii_lowercase();
-    if value.is_empty() {
-        return default;
-    }
-    matches!(value.as_str(), "y" | "yes")
 }
 
 #[cfg(test)]
@@ -709,5 +774,71 @@ mod tests {
         assert!(devices.is_empty());
         assert_eq!(warnings.len(), 1);
         assert!(warnings[0].contains("mystery0"));
+    }
+
+    #[test]
+    fn extra_mount_device_picker_is_one_based_and_blank_skips() {
+        let devices = vec![BlockDevice {
+            name: "/dev/sda1".into(),
+            fs_type: Some("ext4".into()),
+            uuid: None,
+            partuuid: None,
+            label: None,
+            partlabel: None,
+        }];
+        let mut selected = io::Cursor::new(b"1\n".to_vec());
+        let mut output = Vec::new();
+        assert_eq!(
+            prompt_select_device_with(
+                &mut selected,
+                &mut output,
+                "catos-chroot",
+                "/boot",
+                &devices,
+                true,
+            ),
+            Some(devices[0].clone())
+        );
+        let rendered = String::from_utf8(output).unwrap();
+        assert!(rendered.contains("[1] /dev/sda1"));
+        assert!(rendered.contains("[0] Skip"));
+
+        let mut blank = io::Cursor::new(b"\n".to_vec());
+        let mut output = Vec::new();
+        assert!(prompt_select_device_with(
+            &mut blank,
+            &mut output,
+            "catos-chroot",
+            "/boot",
+            &devices,
+            true,
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn mount_point_and_yes_no_prompts_reprompt_invalid_input() {
+        let mut mount_input = io::Cursor::new(b"boot\n/boot\n".to_vec());
+        let mut output = Vec::new();
+        assert_eq!(
+            prompt_mount_point_with(&mut mount_input, &mut output, "catos-chroot"),
+            Some("/boot".into())
+        );
+        assert!(String::from_utf8(output)
+            .unwrap()
+            .contains("mount point must start with /"));
+
+        let mut confirm_input = io::Cursor::new(b"maybe\nyes\n".to_vec());
+        let mut output = Vec::new();
+        assert!(prompt_yes_no_with(
+            &mut confirm_input,
+            &mut output,
+            "catos-chroot",
+            "Mount an additional partition?",
+            false,
+        ));
+        assert!(String::from_utf8(output)
+            .unwrap()
+            .contains("enter y or n"));
     }
 }

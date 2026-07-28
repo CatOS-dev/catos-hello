@@ -137,6 +137,10 @@ pub fn build_report(
 /// before work starts. Filesystem and mount repair are implemented; boot
 /// remains a stable reserved domain until its provider stage.
 const REPAIR_DOMAINS: &[&str] = &["fs", "mount", "boot"];
+const RECOVERY_MENU_COMMANDS: &[&str] = &[
+    "list", "inspect", "plan", "apply", "status", "resume", "revert",
+];
+const INTERACTIVE_MENU_MARKER: &str = "--continue-interactive-menu";
 
 /// Run the program. Returns the exit code; `main.rs` forwards it to
 /// `std::process::exit`.
@@ -150,6 +154,51 @@ pub fn run(invocation: Invocation, argv: &[String]) -> i32 {
 
 fn run_context(context: CommandContext, argv: &[String]) -> i32 {
     let invocation = context.role;
+
+    if invocation == Invocation::CatosRepair {
+        match interactive_menu_action(argv, REPAIR_DOMAINS) {
+            Ok(Some(domain)) => {
+                if !menu::is_interactive() {
+                    return usage_error(
+                        context.program,
+                        "the interactive repair continuation requires a terminal",
+                        "Run the repair command normally instead of using internal menu arguments.",
+                    );
+                }
+                return continue_repair_menu(context, &domain);
+            }
+            Ok(None) => {}
+            Err(error) => {
+                return usage_error(
+                    context.program,
+                    &error,
+                    "Run the repair command normally instead of using internal menu arguments.",
+                );
+            }
+        }
+    }
+    if invocation == Invocation::CatosRecovery {
+        match interactive_menu_action(argv, RECOVERY_MENU_COMMANDS) {
+            Ok(Some(command)) => {
+                if !menu::is_interactive() {
+                    return usage_error(
+                        context.program,
+                        "the interactive recovery continuation requires a terminal",
+                        "Run the recovery command normally instead of using internal menu arguments.",
+                    );
+                }
+                return continue_recovery_menu(context, &command);
+            }
+            Ok(None) => {}
+            Err(error) => {
+                return usage_error(
+                    context.program,
+                    &error,
+                    "Run the recovery command normally instead of using internal menu arguments.",
+                );
+            }
+        }
+    }
 
     if invocation == Invocation::CatosRepair && argv.is_empty() {
         if !menu::is_interactive() {
@@ -243,6 +292,33 @@ fn recovery_write_contract_allows_elevation(argv: &[String]) -> bool {
     args.recovery
         .as_ref()
         .is_some_and(crate::recovery::write_cli_contract_is_valid)
+}
+
+fn interactive_menu_action(
+    argv: &[String],
+    allowed_actions: &[&str],
+) -> Result<Option<String>, String> {
+    if argv.first().map(String::as_str) != Some(INTERACTIVE_MENU_MARKER) {
+        return Ok(None);
+    }
+    let [_, action] = argv else {
+        return Err(format!(
+            "{INTERACTIVE_MENU_MARKER} requires exactly one menu action"
+        ));
+    };
+    if allowed_actions.contains(&action.as_str()) {
+        Ok(Some(action.clone()))
+    } else {
+        Err(format!("invalid interactive menu action {action:?}"))
+    }
+}
+
+fn top_level_cancel_label(context: CommandContext) -> &'static str {
+    if context.report_invocation == Invocation::CatosSystem {
+        "Back"
+    } else {
+        "Exit"
+    }
 }
 
 fn run_system(argv: &[String]) -> i32 {
@@ -365,7 +441,7 @@ fn run_system_help(topic: &[String]) -> i32 {
 
 fn run_system_menu() -> i32 {
     loop {
-        let selected = match menu::choose(
+        let selected = match menu::choose_with_cancel_from_terminal(
             "CatOS System Tools",
             &[
                 "Check system health",
@@ -375,6 +451,7 @@ fn run_system_menu() -> i32 {
                 "Update the running system",
                 "Advanced diagnostics",
             ],
+            "Exit",
         ) {
             Ok(selected) => selected,
             Err(error) => {
@@ -429,10 +506,43 @@ fn run_system_menu() -> i32 {
 }
 
 fn run_repair_menu(context: CommandContext) -> i32 {
-    if let Some(exit) = elevation::elevate_interactive_if_needed("repair", &[], context.program) {
+    let domain = match choose_repair_domain(context) {
+        Ok(Some(domain)) => domain,
+        Ok(None) => return exit_code::SUCCESS,
+        Err(error) => {
+            eprintln!("{}: {error}", context.program);
+            return exit_code::PROBE_FAILED;
+        }
+    };
+    continue_repair_menu(context, domain)
+}
+
+fn choose_repair_domain(context: CommandContext) -> Result<Option<&'static str>, String> {
+    let selected = menu::choose_with_cancel_from_terminal(
+        "Repair",
+        &[
+            "Check and repair a filesystem",
+            "Repair fstab and mount layout",
+            "Repair the boot setup",
+        ],
+        top_level_cancel_label(context),
+    )?;
+    Ok(selected.map(|selected| match selected {
+        0 => "fs",
+        1 => "mount",
+        2 => "boot",
+        _ => unreachable!("menu returned an out-of-range repair action"),
+    }))
+}
+
+fn continue_repair_menu(context: CommandContext, domain: &str) -> i32 {
+    let continuation = vec![INTERACTIVE_MENU_MARKER.to_string(), domain.to_string()];
+    if let Some(exit) =
+        elevation::elevate_interactive_if_needed("repair", &continuation, context.program)
+    {
         return exit;
     }
-    match interactive_repair(context) {
+    match interactive_repair_for_domain(context, domain) {
         Ok(Some(exit)) => exit,
         Ok(None) => exit_code::SUCCESS,
         Err(error) => {
@@ -442,37 +552,16 @@ fn run_repair_menu(context: CommandContext) -> i32 {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum InteractiveTarget {
-    Automatic,
-    Explicit {
-        device: String,
-        root_subvolume: Option<String>,
-    },
-}
-
-fn interactive_repair(context: CommandContext) -> Result<Option<i32>, String> {
-    let selected = menu::choose(
-        "Repair",
-        &[
-            "Check and repair a filesystem",
-            "Repair fstab and mount layout",
-            "Repair the boot setup",
-        ],
-    )?;
-    let Some(selected) = selected else {
-        return Ok(None);
+fn interactive_repair_for_domain(
+    context: CommandContext,
+    domain: &str,
+) -> Result<Option<i32>, String> {
+    let description = match domain {
+        "fs" => "Run filesystem repair now?",
+        "mount" => "Repair the selected system's mount configuration now?",
+        "boot" => "Repair the selected system's boot setup now?",
+        _ => return Err(format!("unknown repair domain {domain:?}")),
     };
-    let (domain, description) = match selected {
-        0 => ("fs", "Run filesystem repair now?"),
-        1 => (
-            "mount",
-            "Repair the selected system's mount configuration now?",
-        ),
-        2 => ("boot", "Repair the selected system's boot setup now?"),
-        _ => unreachable!("menu returned an out-of-range repair action"),
-    };
-
     let Some(target) = choose_repair_target(context.program, domain)? else {
         return Ok(None);
     };
@@ -481,6 +570,15 @@ fn interactive_repair(context: CommandContext) -> Result<Option<i32>, String> {
         return Ok(None);
     }
     Ok(Some(run_repair(context, &args)))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum InteractiveTarget {
+    Automatic,
+    Explicit {
+        device: String,
+        root_subvolume: Option<String>,
+    },
 }
 
 fn choose_repair_target(program: &str, domain: &str) -> Result<Option<InteractiveTarget>, String> {
@@ -780,10 +878,51 @@ fn print_recovery_plan_summary(plan: &crate::snapshot::model::RecoveryPlan) {
 }
 
 fn run_recovery_menu(context: CommandContext) -> i32 {
-    if let Some(exit) = elevation::elevate_interactive_if_needed("recovery", &[], context.program) {
+    let command = match choose_recovery_command(context) {
+        Ok(Some(command)) => command,
+        Ok(None) => return exit_code::SUCCESS,
+        Err(error) => {
+            eprintln!("{}: {error}", context.program);
+            return exit_code::PROBE_FAILED;
+        }
+    };
+    continue_recovery_menu(context, command)
+}
+
+fn choose_recovery_command(context: CommandContext) -> Result<Option<&'static str>, String> {
+    let selected = menu::choose_with_cancel_from_terminal(
+        "Btrfs Snapshot Recovery",
+        &[
+            "List snapshots and recovery transactions",
+            "Inspect a snapshot",
+            "Create a recovery plan",
+            "Apply a recovery plan",
+            "Check a transaction",
+            "Resume an interrupted transaction",
+            "Revert a completed transaction",
+        ],
+        top_level_cancel_label(context),
+    )?;
+    Ok(selected.map(|selected| match selected {
+        0 => "list",
+        1 => "inspect",
+        2 => "plan",
+        3 => "apply",
+        4 => "status",
+        5 => "resume",
+        6 => "revert",
+        _ => unreachable!("menu returned an out-of-range recovery action"),
+    }))
+}
+
+fn continue_recovery_menu(context: CommandContext, command: &str) -> i32 {
+    let continuation = vec![INTERACTIVE_MENU_MARKER.to_string(), command.to_string()];
+    if let Some(exit) =
+        elevation::elevate_interactive_if_needed("recovery", &continuation, context.program)
+    {
         return exit;
     }
-    match interactive_recovery(context) {
+    match interactive_recovery_for_command(context, command) {
         Ok(Some(exit)) => exit,
         Ok(None) => exit_code::SUCCESS,
         Err(error) => {
@@ -793,32 +932,10 @@ fn run_recovery_menu(context: CommandContext) -> i32 {
     }
 }
 
-fn interactive_recovery(context: CommandContext) -> Result<Option<i32>, String> {
-    let selected = menu::choose(
-        "Btrfs Snapshot Recovery",
-        &[
-            "List recovery transactions",
-            "Inspect a snapshot",
-            "Create a recovery plan",
-            "Apply a recovery plan",
-            "Check a transaction",
-            "Resume an interrupted transaction",
-            "Revert a completed transaction",
-        ],
-    )?;
-    let Some(selected) = selected else {
-        return Ok(None);
-    };
-    let command = match selected {
-        0 => "list",
-        1 => "inspect",
-        2 => "plan",
-        3 => "apply",
-        4 => "status",
-        5 => "resume",
-        6 => "revert",
-        _ => unreachable!("menu returned an out-of-range recovery action"),
-    };
+fn interactive_recovery_for_command(
+    context: CommandContext,
+    command: &str,
+) -> Result<Option<i32>, String> {
     let Some(target) = choose_recovery_target(context.program)? else {
         return Ok(None);
     };
@@ -1555,7 +1672,7 @@ fn require_repair_root(context: CommandContext, domain: &str, argv: &[String]) -
 
 /// `catos-update` routing. Delegates to the dedicated `update` module
 /// which owns the privilege-elevation + `checkupdates` + `pacman -Syu`
-/// workflow. The module handles `-c/--check`, `-l/--list`, `-d/--devel`;
+/// workflow. The module handles `-c/--check` and `-l/--list`;
 /// any other token is rejected before any external command runs. This
 /// MUST NOT inherit any `catos-system` subcommand (no `catos-update
 /// inspect`, etc.).
@@ -1644,28 +1761,28 @@ fn print_recovery_command_help(context: CommandContext, command: &str) -> i32 {
     use std::io::Write;
     let version = crate::PROGRAM_VERSION;
     let program = context.program;
-    let common_target = "    --root-device /dev/...      Target Btrfs block device (required).\n    --root-subvolume PATH      Current root subvolume (optional; validated against the plan).\n    --json                     Emit stable JSON on stdout.\n    -h, --help                 Show this help message and exit.\n    -V, --version              Print program version and exit.\n";
+    let common_target = "    --root-device /dev/...     Target Btrfs block device (required).\n    --root-subvolume PATH      Current root subvolume (optional; validated against the plan).\n    --json                     Emit stable JSON on stdout.\n    -h, --help                 Show this help message and exit.\n    -V, --version              Print program version and exit.\n";
     let body = match command {
         "list" => format!(
             "{program} {version} - list snapshots and recovery transactions\n\nUSAGE:\n    {program} list --root-device /dev/... [OPTIONS]\n\nOPTIONS:\n{common_target}"
         ),
         "inspect" => format!(
-            "{program} {version} - inspect a recovery source read-only\n\nUSAGE:\n    {program} inspect --root-device /dev/... --snapshot-subvolume PATH [OPTIONS]\n\nOPTIONS:\n{common_target}    --snapshot-subvolume PATH  Read-only snapshot to inspect (required).\n"
+            "{program} {version} - inspect a recovery source read-only\n\nUSAGE:\n    {program} inspect --root-device /dev/... --snapshot-subvolume PATH [OPTIONS]\n\nOPTIONS:\n    --snapshot-subvolume PATH  Read-only snapshot to inspect (required).\n{common_target}"
         ),
         "plan" => format!(
-            "{program} {version} - create an immutable recovery plan\n\nUSAGE:\n    {program} plan --root-device /dev/... --snapshot-subvolume PATH [OPTIONS]\n\nOPTIONS:\n{common_target}    --snapshot-subvolume PATH  Read-only snapshot used as the replacement root (required).\n\nOUTPUT:\n    The plan is written to stdout. Save it verbatim and pass the file to `apply --plan-file`.\n"
+            "{program} {version} - create an immutable recovery plan\n\nUSAGE:\n    {program} plan --root-device /dev/... --snapshot-subvolume PATH [OPTIONS]\n\nOPTIONS:\n    --snapshot-subvolume PATH  Read-only snapshot used as the replacement root (required).\n{common_target}\nOUTPUT:\n    The plan is written to stdout. Save it verbatim and pass the file to `{program} apply --plan-file`.\n"
         ),
         "apply" => format!(
-            "{program} {version} - apply a confirmed recovery plan\n\nUSAGE:\n    {program} apply --root-device /dev/... --plan-file PATH --plan-id ID --confirm TOKEN [OPTIONS]\n\nOPTIONS:\n{common_target}    --plan-file PATH            Plan JSON emitted by `{program} plan` (required).\n    --plan-id ID               Expected immutable plan id (required).\n    --confirm TOKEN            Confirmation token embedded in the plan (required).\n"
+            "{program} {version} - apply a confirmed recovery plan\n\nUSAGE:\n    {program} apply --root-device /dev/... --plan-file PATH --plan-id ID --confirm TOKEN [OPTIONS]\n\nOPTIONS:\n    --plan-file PATH           Plan JSON emitted by `{program} plan` (required).\n    --plan-id ID               Expected immutable plan id (required).\n    --confirm TOKEN            Confirmation token embedded in the plan (required).\n{common_target}"
         ),
         "status" => format!(
-            "{program} {version} - inspect and reconcile one transaction\n\nUSAGE:\n    {program} status --root-device /dev/... --transaction ID [OPTIONS]\n\nOPTIONS:\n{common_target}    --transaction ID            Recovery transaction id (required).\n"
+            "{program} {version} - inspect and reconcile one transaction\n\nUSAGE:\n    {program} status --root-device /dev/... --transaction ID [OPTIONS]\n\nOPTIONS:\n    --transaction ID           Recovery transaction id (required).\n{common_target}"
         ),
         "resume" => format!(
-            "{program} {version} - resume an interrupted transaction\n\nUSAGE:\n    {program} resume --root-device /dev/... --transaction ID [OPTIONS]\n\nOPTIONS:\n{common_target}    --transaction ID            Recovery transaction id (required).\n"
+            "{program} {version} - resume an interrupted transaction\n\nUSAGE:\n    {program} resume --root-device /dev/... --transaction ID [OPTIONS]\n\nOPTIONS:\n    --transaction ID           Recovery transaction id (required).\n{common_target}"
         ),
         "revert" => format!(
-            "{program} {version} - restore the pre-recovery root\n\nUSAGE:\n    {program} revert --root-device /dev/... --transaction ID --confirm TOKEN [OPTIONS]\n\nOPTIONS:\n{common_target}    --transaction ID            Recovery transaction id (required).\n    --confirm TOKEN            Revert token emitted by `status` (required).\n"
+            "{program} {version} - restore the pre-recovery root\n\nUSAGE:\n    {program} revert --root-device /dev/... --transaction ID --confirm TOKEN [OPTIONS]\n\nOPTIONS:\n    --transaction ID           Recovery transaction id (required).\n    --confirm TOKEN            Revert token emitted by `{program} status` (required).\n{common_target}"
         ),
         _ => {
             eprintln!(
@@ -1724,13 +1841,10 @@ COMMANDS:
     boot     Repair the detected boot setup.
 
 OPTIONS:
-    --json           Emit machine-readable JSON.
-    --root-device    Select an offline root device.
-    --root-subvolume Select its Btrfs root subvolume.
-    --esp-device     Select the EFI System Partition.
-    -h, --help       Show this help message.
+    -h, --help    Show this help message.
 
 Run without a command to choose the repair interactively.
+Run `{program} <COMMAND> --help` for command-specific target and output options.
 "#
             );
         }
@@ -1745,15 +1859,21 @@ USAGE:
     {program} <COMMAND> [OPTIONS]
 
 COMMANDS:
-    list      List recovery transactions.
+    list      List snapshots and recovery transactions.
     inspect   Inspect a snapshot and target read-only.
-    plan      Create a recovery plan.
+    plan      Create an immutable recovery plan.
     apply     Apply a confirmed recovery plan.
-    status    Check a transaction.
+    status    Check and reconcile a transaction.
     resume    Resume an interrupted transaction.
     revert    Restore the previous root.
 
+WORKFLOW:
+    1. Use `list` to find a read-only snapshot.
+    2. Use `inspect`, then `plan`, before applying changes.
+    3. State-changing commands are `apply`, `resume`, and `revert`.
+
 Run without a command to choose an action interactively.
+Run `{program} <COMMAND> --help` for required arguments.
 "#
             );
         }
@@ -1976,6 +2096,24 @@ mod tests {
             ..Default::default()
         };
         assert!(snapshot_menu_items(&report).is_empty());
+    }
+
+    #[test]
+    fn interactive_menu_continuation_is_explicit_and_validated() {
+        assert_eq!(
+            interactive_menu_action(
+                &["--continue-interactive-menu".into(), "mount".into()],
+                REPAIR_DOMAINS,
+            )
+            .unwrap(),
+            Some("mount".to_string())
+        );
+        assert!(interactive_menu_action(
+            &["--continue-interactive-menu".into(), "invalid".into()],
+            REPAIR_DOMAINS,
+        )
+        .is_err());
+        assert_eq!(interactive_menu_action(&[], REPAIR_DOMAINS).unwrap(), None);
     }
 
     #[test]

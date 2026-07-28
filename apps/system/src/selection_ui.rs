@@ -3,7 +3,7 @@
 //! Discovery remains in `catos-target`; this module only renders the stable
 //! candidate model and performs bounded, validated terminal input.
 
-use std::io::{self, IsTerminal, Write};
+use std::io::{self, BufRead, IsTerminal, Write};
 
 use crate::target::discovery::{DiscoveryReport, TargetCandidate};
 use crate::target::model::RootCandidateConfidence;
@@ -82,10 +82,12 @@ fn select_from_candidates(
     }
     println!("Available CatOS targets:");
     for (index, candidate) in candidates.iter().enumerate() {
-        println!("  [{index}] {}", summary(candidate));
+        println!("  [{}] {}", index + 1, summary(candidate));
     }
-    match read_index(program, candidates.len()) {
-        Ok(index) => { let candidate = candidates[index].clone(); print_summary(&candidate); Selection::Selected(Box::new(candidate)) }
+    println!("  [0] Back");
+    match read_index(program, "target", candidates.len()) {
+        Ok(Some(index)) => { let candidate = candidates[index].clone(); print_summary(&candidate); Selection::Selected(Box::new(candidate)) }
+        Ok(None) => Selection::Declined,
         Err(error) => Selection::Unavailable(error),
     }
 }
@@ -99,9 +101,12 @@ pub fn select_luks_device(devices: &[BlockDevice], program: &str) -> Result<Opti
     if !io::stdin().is_terminal() { return Err("an encrypted target requires an interactive terminal".into()); }
     println!("Encrypted containers:");
     for (index, device) in candidates.iter().enumerate() {
-        println!("  [{index}] {} UUID={}", device.dev_path.as_ref().map(|p| p.display().to_string()).unwrap_or_else(|| device.name.clone()), device.uuid.as_deref().unwrap_or("unknown"));
+        println!("  [{}] {} UUID={}", index + 1, device.dev_path.as_ref().map(|p| p.display().to_string()).unwrap_or_else(|| device.name.clone()), device.uuid.as_deref().unwrap_or("unknown"));
     }
-    let index = read_index(program, candidates.len())?;
+    println!("  [0] Back");
+    let Some(index) = read_index(program, "encrypted container", candidates.len())? else {
+        return Ok(None);
+    };
     Ok(Some((*candidates[index]).clone()))
 }
 
@@ -132,15 +137,38 @@ fn read_confirm(program: &str, prompt: &str) -> Result<bool, String> {
     }
 }
 
-fn read_index(program: &str, count: usize) -> Result<usize, String> {
+fn read_index(program: &str, noun: &str, count: usize) -> Result<Option<usize>, String> {
+    let stdin = io::stdin();
+    let stdout = io::stdout();
+    let mut input = stdin.lock();
+    let mut output = stdout.lock();
+    read_index_with(&mut input, &mut output, program, noun, count)
+}
+
+fn read_index_with<R: BufRead, W: Write>(
+    input: &mut R,
+    output: &mut W,
+    program: &str,
+    noun: &str,
+    count: usize,
+) -> Result<Option<usize>, String> {
     loop {
-        print!("{program}: pick target number [0-{}]: ", count - 1);
-        io::stdout().flush().map_err(|e| format!("stdout write failed: {e}"))?;
+        write!(output, "{program}: pick {noun} [0-{count}]: ")
+            .map_err(|e| format!("stdout write failed: {e}"))?;
+        output.flush().map_err(|e| format!("stdout write failed: {e}"))?;
         let mut line = String::new();
-        io::stdin().read_line(&mut line).map_err(|e| format!("stdin read failed: {e}"))?;
+        let read = input
+            .read_line(&mut line)
+            .map_err(|e| format!("stdin read failed: {e}"))?;
+        if read == 0 {
+            writeln!(output).map_err(|e| format!("stdout write failed: {e}"))?;
+            return Ok(None);
+        }
         match line.trim().parse::<usize>() {
-            Ok(index) if index < count => return Ok(index),
-            _ => eprintln!("{program}: enter a number from 0 to {}", count - 1),
+            Ok(0) => return Ok(None),
+            Ok(index) if index <= count => return Ok(Some(index - 1)),
+            _ => writeln!(output, "{program}: enter a number from 0 to {count}")
+                .map_err(|e| format!("stdout write failed: {e}"))?,
         }
     }
 }
@@ -199,5 +227,45 @@ mod tests {
         let mut plain = encrypted.clone();
         plain.filesystem = Some("ext4".into());
         assert_eq!(luks_candidates(&[plain, encrypted.clone()]), vec![&encrypted]);
+    }
+
+    #[test]
+    fn target_picker_is_one_based_and_zero_goes_back() {
+        let mut selected = std::io::Cursor::new(b"2\n".to_vec());
+        let mut output = Vec::new();
+        assert_eq!(
+            read_index_with(&mut selected, &mut output, "catos-repair", "target", 2)
+                .unwrap(),
+            Some(1)
+        );
+
+        let mut back = std::io::Cursor::new(b"0\n".to_vec());
+        let mut output = Vec::new();
+        assert_eq!(
+            read_index_with(&mut back, &mut output, "catos-repair", "target", 2)
+                .unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn target_picker_reprompts_invalid_input_and_eof_cancels() {
+        let mut input = std::io::Cursor::new(b"3\n1\n".to_vec());
+        let mut output = Vec::new();
+        assert_eq!(
+            read_index_with(&mut input, &mut output, "catos-repair", "target", 2)
+                .unwrap(),
+            Some(0)
+        );
+        let output = String::from_utf8(output).unwrap();
+        assert!(output.contains("enter a number from 0 to 2"));
+
+        let mut eof = std::io::Cursor::new(Vec::<u8>::new());
+        let mut output = Vec::new();
+        assert_eq!(
+            read_index_with(&mut eof, &mut output, "catos-repair", "target", 2)
+                .unwrap(),
+            None
+        );
     }
 }

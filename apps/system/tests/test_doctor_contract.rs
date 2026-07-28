@@ -73,7 +73,7 @@ fn doctor_noninteractive_unprivileged_fails_before_diagnosis() {
         "stderr={stderr:?}"
     );
     assert!(
-        stderr.contains("sudo catos-system doctor"),
+        stderr.contains("sudo catos-doctor"),
         "stderr={stderr:?}"
     );
 }

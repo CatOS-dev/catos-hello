@@ -3,6 +3,7 @@
 //!
 //! * pick a privilege elevation command (`sudo`, `sudo-rs`, `doas`, `run0`)
 //! * list pending updates via `checkupdates`
+//! * require an interactive terminal before any state-changing flow
 //! * confirm with the user
 //! * run `<su> pacman -Syu` with inherited stdio so pacman's interactive
 //!   prompts work
@@ -19,14 +20,11 @@
 //! catos-update                 List pending updates, confirm, apply.
 //! catos-update -c, --check     Print pending updates only.
 //! catos-update -l, --list      Alias for --check.
-//! catos-update -d, --devel     Pass --devel to the AUR helper (reserved;
-//!                              accepted for flag-compat, no-op without
-//!                              an AUR helper wired up).
 //! catos-update -h, --help      Show help.
 //! catos-update -V, --version   Show version.
 //! ```
 
-use std::io::{self, BufRead, Write};
+use std::io::{self, BufRead, IsTerminal, Write};
 use std::path::Path;
 use std::process::Command;
 
@@ -42,8 +40,6 @@ pub mod su;
 pub struct UpdateOptions {
     /// `-c` / `--check`: only print pending updates, do not apply.
     pub check_only: bool,
-    /// `-d` / `--devel`: reserved flag, currently a no-op.
-    pub devel: bool,
 }
 
 /// Parse `catos-update` argv. Returns the selected options or an
@@ -54,15 +50,28 @@ fn parse_argv(argv: &[String]) -> Result<UpdateOptions, String> {
     for arg in argv {
         match arg.as_str() {
             "-c" | "--check" | "-l" | "--list" => opts.check_only = true,
-            "-d" | "--devel" => opts.devel = true,
+            "-d" | "--devel" => {
+                return Err(
+                    "--devel is not supported; use an AUR helper directly for development-package updates"
+                        .to_string(),
+                )
+            }
             other => {
                 return Err(format!(
-                    "unknown option {other:?}; expected -c/--check, -l/--list, -d/--devel"
+                    "unknown option {other:?}; expected -c/--check or -l/--list"
                 ))
             }
         }
     }
     Ok(opts)
+}
+
+fn validate_interaction(opts: UpdateOptions, stdin_is_terminal: bool) -> Result<(), &'static str> {
+    if opts.check_only || stdin_is_terminal {
+        Ok(())
+    } else {
+        Err("applying updates requires an interactive terminal")
+    }
 }
 
 /// Entry point invoked from `entry::invocation_dispatch`. `--help` /
@@ -75,6 +84,11 @@ pub fn run(argv: &[String], program: &str) -> i32 {
             return exit_code::ARG_ERROR;
         }
     };
+    if let Err(message) = validate_interaction(opts, io::stdin().is_terminal()) {
+        eprintln!("{program}: {message}");
+        eprintln!("Use `{program} --check` for a non-interactive update check.");
+        return exit_code::ARG_ERROR;
+    }
 
     // Discover pending updates. checkupdates is the canonical Arch
     // helper: it performs a temporary pacman DB sync so the host's DB
@@ -204,7 +218,7 @@ fn output_error(program: &str, error: io::Error) -> i32 {
 pub fn print_help(program: &str) {
     let version = crate::PROGRAM_VERSION;
     print!(
-        "{program} {version} - CatOS interactive system updater\n\nUSAGE:\n    {program} [OPTIONS]\n\nOPTIONS:\n    -c, --check       Print pending updates without applying them.\n    -l, --list        Alias for --check.\n    -d, --devel       Reserved for AUR --devel (currently a no-op).\n    -h, --help        Show this help message and exit.\n    -V, --version     Print program version and exit.\n\nEXIT CODES:\n    0   Updates listed, applied, or system up to date.\n    2   An option was not recognised.\n    4   No privilege elevation command available.\n    5   Could not enumerate or apply updates.\n    6   Output could not be written completely.\n"
+        "{program} {version} - CatOS interactive system updater\n\nUSAGE:\n    {program}\n    {program} --check\n\nOPTIONS:\n    -c, --check       Print pending updates without applying them.\n    -l, --list        Alias for --check.\n    -h, --help        Show this help message and exit.\n    -V, --version     Print program version and exit.\n\nRunning without --check requires an interactive terminal. The updater asks\nfor confirmation before pacman starts.\n\nEXIT CODES:\n    0   Updates listed, applied, or system up to date.\n    2   Invalid options or no interactive terminal for applying updates.\n    4   No privilege elevation command available.\n    5   Could not enumerate or apply updates.\n    6   Output could not be written completely.\n"
     );
 }
 
@@ -224,15 +238,22 @@ fn confirm_yes_no_with<R: BufRead, W: Write>(
     prompt: &str,
     default: bool,
 ) -> io::Result<bool> {
-    write!(output, "{prompt}")?;
-    output.flush()?;
-    let mut line = String::new();
-    input.read_line(&mut line)?;
-    let trimmed = line.trim().to_ascii_lowercase();
-    if trimmed.is_empty() {
-        return Ok(default);
+    loop {
+        write!(output, "{prompt}")?;
+        output.flush()?;
+        let mut line = String::new();
+        let read = input.read_line(&mut line)?;
+        if read == 0 {
+            writeln!(output)?;
+            return Ok(default);
+        }
+        match line.trim().to_ascii_lowercase().as_str() {
+            "" => return Ok(default),
+            "y" | "yes" => return Ok(true),
+            "n" | "no" => return Ok(false),
+            _ => writeln!(output, "Please enter y or n.")?,
+        }
     }
-    Ok(matches!(trimmed.as_str(), "y" | "yes"))
 }
 
 #[cfg(test)]
@@ -241,10 +262,21 @@ mod tests {
 
     #[test]
     fn parse_known_flags() {
-        let opts =
-            parse_argv(&["-c".to_string(), "-d".to_string()]).expect("known flags must parse");
+        let opts = parse_argv(&["-c".to_string()]).expect("known flags must parse");
         assert!(opts.check_only);
-        assert!(opts.devel);
+    }
+
+    #[test]
+    fn devel_flag_is_rejected_instead_of_silently_doing_nothing() {
+        let error = parse_argv(&["--devel".to_string()])
+            .expect_err("unsupported flags must not be accepted as no-ops");
+        assert!(error.contains("not supported"), "{error}");
+    }
+
+    #[test]
+    fn applying_updates_requires_interactive_stdin() {
+        assert!(validate_interaction(UpdateOptions::default(), false).is_err());
+        assert!(validate_interaction(UpdateOptions { check_only: true }, false).is_ok());
     }
 
     #[test]
@@ -283,9 +315,11 @@ mod tests {
 
     #[test]
     fn confirmation_prompt_propagates_write_failures() {
-        let mut input = io::Cursor::new(b"y\n".to_vec());
+        let mut input = io::Cursor::new(b"maybe\ny\n".to_vec());
         let mut output = io::Cursor::new(Vec::<u8>::new());
         assert!(confirm_yes_no_with(&mut input, &mut output, "Proceed? ", false).unwrap());
+        let rendered = String::from_utf8(output.into_inner()).unwrap();
+        assert!(rendered.contains("Please enter y or n."));
 
         struct BrokenWriter;
         impl Write for BrokenWriter {

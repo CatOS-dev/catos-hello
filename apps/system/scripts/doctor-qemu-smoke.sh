@@ -611,7 +611,7 @@ if [ "$SCENARIO" = ambiguous ]; then
     cat /tmp/non-tty.err
     echo "__NONTTY_RC__=$non_tty_rc"
     echo "__NONTTY_END__"
-    run_tty '0\n'
+    run_tty '1\n'
 else
     run_tty 'y\n'
 fi
@@ -780,13 +780,14 @@ assert_contains "$LAST_LOG" "__NONTTY_RC__=" ambiguous
 non_tty_rc=$(sed -n 's/^__NONTTY_RC__=//p' <<<"$LAST_LOG" | tail -1)
 [[ -n $non_tty_rc && $non_tty_rc != 0 ]] || fail "ambiguous: non-TTY call did not fail"
 assert_contains "$LAST_LOG" "TARGET_AMBIGUOUS" ambiguous
-assert_contains "$LAST_LOG" "  [0] CatOS QEMU Fixture" ambiguous
 assert_contains "$LAST_LOG" "  [1] CatOS QEMU Fixture" ambiguous
+assert_contains "$LAST_LOG" "  [2] CatOS QEMU Fixture" ambiguous
+assert_contains "$LAST_LOG" "  [0] Back" ambiguous
 assert_contains "$LAST_LOG" "__DOCTOR_RC__=0" ambiguous
-index_zero=$(sed -n 's/^  \[0\] //p' <<<"$LAST_LOG" | head -1)
+index_one=$(sed -n 's/^  \[1\] //p' <<<"$LAST_LOG" | head -1)
 selected=$(sed -n 's/.*Selected target: //p' <<<"$LAST_LOG" | tail -1)
-[[ -n $index_zero && $selected == "$index_zero" ]] \
-    || fail "ambiguous: selected target does not match displayed index 0 (index='$index_zero', selected='$selected')"
+[[ -n $index_one && $selected == "$index_one" ]] \
+    || fail "ambiguous: selected target does not match displayed index 1 (index='$index_one', selected='$selected')"
 
 echo "=== scenario: interrupted-transaction ==="
 run_qemu interrupted_transaction "$ROOT_INTERRUPTED" "$ESP_GRUB"

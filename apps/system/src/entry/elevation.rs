@@ -45,12 +45,13 @@ fn reexec_as_root(role: &str, argv: &[String], program: &str, interactive_only: 
             return exit_code::PERMISSION_DENIED;
         }
         eprintln!("{program}: administrator privileges are required");
-        eprintln!("Run `sudo catos-system {role}` from an interactive terminal.");
+        eprintln!("{}", rerun_as_root_hint(program));
         return exit_code::PERMISSION_DENIED;
     }
     let Some(tool_path) = crate::update::su::pick_su_cmd() else {
         eprintln!("{program}: administrator privileges are required");
-        eprintln!("No supported elevation tool was found. Run `catos-system {role}` as root.");
+        eprintln!("No supported elevation tool was found.");
+        eprintln!("{}", rerun_as_root_hint(program));
         return exit_code::PERMISSION_DENIED;
     };
     let tool = tool_path
@@ -76,6 +77,10 @@ fn reexec_as_root(role: &str, argv: &[String], program: &str, interactive_only: 
             exit_code::PROBE_FAILED
         }
     }
+}
+
+fn rerun_as_root_hint(program: &str) -> String {
+    format!("Rerun the same command as root, for example: sudo {program}")
 }
 
 fn privilege_prompt_available(stdin_is_tty: bool, _stdout_is_tty: bool) -> bool {
@@ -111,6 +116,18 @@ mod tests {
         assert_eq!(
             reexec_arguments(Path::new("/usr/lib/catos/catos-system"), "doctor", &[]),
             ["/usr/lib/catos/catos-system", "doctor"]
+        );
+    }
+
+    #[test]
+    fn root_rerun_hint_preserves_the_command_the_user_invoked() {
+        assert_eq!(
+            rerun_as_root_hint("catos-doctor"),
+            "Rerun the same command as root, for example: sudo catos-doctor"
+        );
+        assert_eq!(
+            rerun_as_root_hint("catos-system chroot"),
+            "Rerun the same command as root, for example: sudo catos-system chroot"
         );
     }
 

@@ -12,26 +12,46 @@ pub fn is_interactive() -> bool {
 }
 
 pub fn choose(title: &str, items: &[&str]) -> Result<Option<usize>, String> {
+    choose_with_cancel_from_terminal(title, items, "Back")
+}
+
+pub fn choose_with_cancel_from_terminal(
+    title: &str,
+    items: &[&str],
+    cancel_label: &str,
+) -> Result<Option<usize>, String> {
     let stdin = io::stdin();
     let stdout = io::stdout();
     let mut input = stdin.lock();
     let mut output = stdout.lock();
-    choose_with(&mut input, &mut output, title, items)
+    choose_with_cancel(&mut input, &mut output, title, items, cancel_label)
 }
 
+#[cfg(test)]
 pub fn choose_with<R: BufRead, W: Write>(
     input: &mut R,
     output: &mut W,
     title: &str,
     items: &[&str],
 ) -> Result<Option<usize>, String> {
+    choose_with_cancel(input, output, title, items, "Back")
+}
+
+pub fn choose_with_cancel<R: BufRead, W: Write>(
+    input: &mut R,
+    output: &mut W,
+    title: &str,
+    items: &[&str],
+    cancel_label: &str,
+) -> Result<Option<usize>, String> {
+    writeln!(output, "{title}").map_err(write_error)?;
+    writeln!(output).map_err(write_error)?;
+    for (index, item) in items.iter().enumerate() {
+        writeln!(output, "  [{}] {item}", index + 1).map_err(write_error)?;
+    }
+    writeln!(output, "  [0] {cancel_label}").map_err(write_error)?;
+
     loop {
-        writeln!(output, "{title}").map_err(write_error)?;
-        writeln!(output).map_err(write_error)?;
-        for (index, item) in items.iter().enumerate() {
-            writeln!(output, "  [{}] {item}", index + 1).map_err(write_error)?;
-        }
-        writeln!(output, "  [0] Exit / Back").map_err(write_error)?;
         write!(output, "\nSelect an action [0-{}]: ", items.len()).map_err(write_error)?;
         output.flush().map_err(write_error)?;
 
@@ -45,7 +65,7 @@ pub fn choose_with<R: BufRead, W: Write>(
             Ok(0) => return Ok(None),
             Ok(value) if value <= items.len() => return Ok(Some(value - 1)),
             _ => {
-                writeln!(output, "Please enter a number from 0 to {}.\n", items.len())
+                writeln!(output, "Please enter a number from 0 to {}.", items.len())
                     .map_err(write_error)?;
             }
         }
@@ -139,6 +159,31 @@ mod tests {
         let output = String::from_utf8(output).unwrap();
         assert!(output.contains("Please enter a number from 0 to 2."));
         assert!(output.contains("Open installed system"));
+        assert_eq!(
+            output.matches("CatOS System Tools").count(),
+            1,
+            "invalid input must not redraw the entire menu"
+        );
+    }
+
+    #[test]
+    fn menu_uses_the_callers_cancel_label() {
+        let mut input = Cursor::new(b"0\n".to_vec());
+        let mut output = Vec::new();
+        assert_eq!(
+            choose_with_cancel(
+                &mut input,
+                &mut output,
+                "Top level",
+                &["Action"],
+                "Exit",
+            )
+            .unwrap(),
+            None
+        );
+        let output = String::from_utf8(output).unwrap();
+        assert!(output.contains("[0] Exit"));
+        assert!(!output.contains("Exit / Back"));
     }
 
     #[test]
