@@ -14,7 +14,12 @@ pub(super) struct ConfigTransaction {
 
 struct ConfigChange {
     target_path: String,
-    original: Option<Vec<u8>>,
+    original: Option<OriginalConfig>,
+}
+
+struct OriginalConfig {
+    bytes: Vec<u8>,
+    mode: u32,
 }
 
 impl ConfigTransaction {
@@ -36,30 +41,46 @@ impl ConfigTransaction {
             .ok_or_else(|| format!("invalid target configuration path {target_path:?}"))?;
         catos_target::execute::confined::create_rooted_directory(&self.root, parent)
             .map_err(|error| format!("cannot create target config parent {parent}: {error}"))?;
-        let existing =
-            catos_target::execute::confined::read_rooted_file(&self.root, target_path).ok();
-        if existing.as_deref() == Some(contents.as_bytes()) {
+        let existing = match catos_target::execute::confined::read_rooted_file_with_mode(
+            &self.root,
+            target_path,
+        ) {
+            Ok((bytes, mode)) => Some(OriginalConfig { bytes, mode }),
+            Err(catos_target::FsError::NotFound) => None,
+            Err(error) => {
+                return Err(format!(
+                    "cannot read existing target config {target_path}: {error}"
+                ))
+            }
+        };
+        if existing.as_ref().map(|original| original.bytes.as_slice())
+            == Some(contents.as_bytes())
+        {
             return Ok(BootAction::ConfigUnchanged {
                 target_path: target_path.to_string(),
             });
         }
-        let backup_path = existing.as_ref().map(|bytes| {
+        let backup_path = existing.as_ref().map(|original| {
             let backup_path = format!("{target_path}.catos-repair.backup");
             catos_target::execute::confined::atomic_write_rooted(
                 &self.root,
                 &backup_path,
-                bytes,
+                &original.bytes,
                 0o600,
             )
             .map_err(|error| format!("cannot write backup {backup_path}: {error}"))?;
             Ok::<String, String>(backup_path)
         });
         let backup_path = backup_path.transpose()?;
+        let target_mode = existing
+            .as_ref()
+            .map(|original| original.mode)
+            .unwrap_or(0o644);
         catos_target::execute::confined::atomic_write_rooted(
             &self.root,
             target_path,
             contents.as_bytes(),
-            0o644,
+            target_mode,
         )
         .map_err(|error| format!("cannot write target config {target_path}: {error}"))?;
         self.changes.push(ConfigChange {
@@ -80,8 +101,8 @@ impl ConfigTransaction {
                 Some(original) => catos_target::execute::confined::atomic_write_rooted(
                     &self.root,
                     &change.target_path,
-                    &original,
-                    0o644,
+                    &original.bytes,
+                    original.mode,
                 ),
                 None => catos_target::execute::confined::remove_rooted_file(
                     &self.root,
@@ -204,6 +225,48 @@ mod tests {
         );
         assert!(matches!(action, BootAction::ConfigWritten { .. }));
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn config_transaction_rollback_restores_original_mode() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+        let root = temp_root();
+        let path = root.join("etc/catos/private.conf");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, "before\n").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        let mut transaction = ConfigTransaction::new(&root);
+
+        transaction.write("/etc/catos/private.conf", "after\n").unwrap();
+        assert_eq!(fs::metadata(&path).unwrap().mode() & 0o7777, 0o600);
+        transaction.rollback().unwrap();
+
+        assert_eq!(fs::read_to_string(&path).unwrap(), "before\n");
+        assert_eq!(fs::metadata(&path).unwrap().mode() & 0o7777, 0o600);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn unreadable_existing_config_is_not_replaced() {
+        use std::os::unix::fs::PermissionsExt;
+
+        if unsafe { libc::geteuid() } == 0 {
+            return;
+        }
+        let root = temp_root();
+        let path = root.join("etc/catos/private.conf");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, "before\n").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o000)).unwrap();
+
+        let result = ConfigTransaction::new(&root).write("/etc/catos/private.conf", "after\n");
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        let contents = fs::read_to_string(&path).unwrap();
+        let _ = fs::remove_dir_all(root);
+
+        assert!(result.is_err(), "unreadable existing file was replaced");
+        assert_eq!(contents, "before\n");
     }
 
     #[test]
