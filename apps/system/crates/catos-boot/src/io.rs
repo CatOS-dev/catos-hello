@@ -29,7 +29,3 @@ pub(crate) fn has_target_path_checked(root: &Path, relative: &str) -> Result<boo
 pub(crate) fn read_target_file(root: &Path, relative: &str) -> Option<String> {
     read_target_file_checked(root, relative).ok().flatten()
 }
-
-pub(crate) fn has_target_path(root: &Path, relative: &str) -> bool {
-    has_target_path_checked(root, relative).unwrap_or(false)
-}

@@ -36,22 +36,22 @@ pub(super) fn snapshot_repair_state(
         return SnapshotRepairState::default();
     }
 
-    if catos_target::execute::confined::read_rooted_file(target_root, "/etc/snapper/configs/root")
-        .is_ok()
-    {
+    let root_config = read_nonempty_target_text(target_root, "/etc/snapper/configs/root");
+    if root_config.is_some() {
         return SnapshotRepairState {
             enabled: true,
             restore_root_config: None,
         };
     }
 
-    let template = catos_target::execute::confined::read_rooted_file(
+    let template = read_nonempty_target_text(
         target_root,
         "/etc/snapper/config-templates/catos-root",
-    )
-    .ok()
-    .and_then(|bytes| String::from_utf8(bytes).ok());
-    if crate::io::has_target_path(target_root, ".snapshots") && template.is_some() {
+    );
+    let snapshots_directory_present =
+        catos_target::execute::confined::list_rooted_directory_names(target_root, "/.snapshots")
+            .is_ok();
+    if snapshots_directory_present && template.is_some() {
         return SnapshotRepairState {
             enabled: true,
             restore_root_config: template,
@@ -59,6 +59,13 @@ pub(super) fn snapshot_repair_state(
     }
 
     SnapshotRepairState::default()
+}
+
+fn read_nonempty_target_text(target_root: &Path, rooted: &str) -> Option<String> {
+    catos_target::execute::confined::read_rooted_file(target_root, rooted)
+        .ok()
+        .and_then(|bytes| String::from_utf8(bytes).ok())
+        .filter(|text| !text.trim().is_empty())
 }
 
 pub(super) fn write_restored_snapper_config(
@@ -241,16 +248,20 @@ fn target_snapshot_catalog_has_entries(target_root: &Path) -> bool {
         .filter_map(|entry| entry.into_string().ok())
         .filter(|entry| entry.chars().all(|character| character.is_ascii_digit()))
         .any(|entry| {
-            catos_target::execute::confined::rooted_regular_file_size(
-                target_root,
-                &format!("/.snapshots/{entry}/info.xml"),
-            )
-            .is_ok()
-                && catos_target::execute::confined::list_rooted_directory_names(
+            let info_present = matches!(
+                catos_target::execute::confined::rooted_regular_file_size(
+                    target_root,
+                    &format!("/.snapshots/{entry}/info.xml"),
+                ),
+                Ok(Some(size)) if size > 0
+            );
+            let snapshot_directory_present =
+                catos_target::execute::confined::list_rooted_directory_names(
                     target_root,
                     &format!("/.snapshots/{entry}/snapshot"),
                 )
-                .is_ok()
+                .is_ok();
+            info_present && snapshot_directory_present
         })
 }
 
@@ -277,4 +288,81 @@ fn snapshot_unit_present(target_root: &Path, unit: &str) -> bool {
             &format!("/etc/systemd/system/{unit}"),
         )
         .is_ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{snapshot_repair_state, target_snapshot_catalog_has_entries};
+    use crate::model::ProviderId;
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+    struct TempRoot(PathBuf);
+
+    impl TempRoot {
+        fn new(name: &str) -> Self {
+            let sequence = TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+            let path = std::env::temp_dir().join(format!(
+                "catos-boot-snapshot-{name}-{}-{sequence}",
+                std::process::id()
+            ));
+            std::fs::create_dir_all(&path).unwrap();
+            Self(path)
+        }
+    }
+
+    impl Drop for TempRoot {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn empty_root_config_is_restored_from_a_valid_target_template() {
+        let root = TempRoot::new("restore-empty-root");
+        std::fs::create_dir_all(root.0.join("etc/snapper/configs")).unwrap();
+        std::fs::create_dir_all(root.0.join("etc/snapper/config-templates")).unwrap();
+        std::fs::create_dir_all(root.0.join(".snapshots")).unwrap();
+        std::fs::write(root.0.join("etc/snapper/configs/root"), b"").unwrap();
+        std::fs::write(
+            root.0.join("etc/snapper/config-templates/catos-root"),
+            b"SUBVOLUME=\"/\"\n",
+        )
+        .unwrap();
+
+        let state = snapshot_repair_state(&root.0, ProviderId::Grub, "btrfs", &[]);
+        assert!(state.enabled);
+        assert_eq!(
+            state.restore_root_config.as_deref(),
+            Some("SUBVOLUME=\"/\"\n")
+        );
+    }
+
+    #[test]
+    fn empty_root_config_without_a_valid_template_is_not_enabled() {
+        let root = TempRoot::new("reject-empty-root");
+        std::fs::create_dir_all(root.0.join("etc/snapper/configs")).unwrap();
+        std::fs::create_dir_all(root.0.join(".snapshots")).unwrap();
+        std::fs::write(root.0.join("etc/snapper/configs/root"), b"\n").unwrap();
+
+        let state = snapshot_repair_state(&root.0, ProviderId::Grub, "btrfs", &[]);
+        assert!(!state.enabled);
+        assert!(state.restore_root_config.is_none());
+    }
+
+    #[test]
+    fn snapshot_catalog_requires_real_info_and_snapshot_directory() {
+        let root = TempRoot::new("catalog");
+        let entry = root.0.join(".snapshots/1");
+        std::fs::create_dir_all(entry.join("snapshot")).unwrap();
+        assert!(!target_snapshot_catalog_has_entries(&root.0));
+
+        std::fs::write(entry.join("info.xml"), b"").unwrap();
+        assert!(!target_snapshot_catalog_has_entries(&root.0));
+
+        std::fs::write(entry.join("info.xml"), b"<snapshot/>\n").unwrap();
+        assert!(target_snapshot_catalog_has_entries(&root.0));
+    }
 }
