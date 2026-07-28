@@ -406,9 +406,9 @@ where
     }
 }
 
-pub fn print_help(program: &str) {
+pub fn help_text(program: &str) -> String {
     let version = crate::PROGRAM_VERSION;
-    print!(
+    format!(
         r#"{program} {version} - open an installed CatOS system for maintenance
 
 USAGE:
@@ -429,7 +429,7 @@ OPTIONS:
 Administrator privileges are requested automatically when an elevation tool
 is available.
 "#
-    );
+    )
 }
 
 fn parse_argv(argv: &[String]) -> Result<ChrootOptions, String> {

@@ -213,13 +213,13 @@ fn output_error(program: &str, error: io::Error) -> i32 {
     exit_code::SERIALIZE_FAILED
 }
 
-/// Print the per-invocation help. Called from `entry::print_help` when
-/// `catos-update --help` is used.
-pub fn print_help(program: &str) {
+/// Build the per-invocation help text. The top-level dispatcher owns stdout
+/// error handling so every public help path follows the same contract.
+pub fn help_text(program: &str) -> String {
     let version = crate::PROGRAM_VERSION;
-    print!(
+    format!(
         "{program} {version} - CatOS interactive system updater\n\nUSAGE:\n    {program}\n    {program} --check\n\nOPTIONS:\n    -c, --check       Print pending updates without applying them.\n    -l, --list        Alias for --check.\n    -h, --help        Show this help message and exit.\n    -V, --version     Print program version and exit.\n\nRunning without --check requires an interactive terminal. The updater asks\nfor confirmation before pacman starts.\n\nEXIT CODES:\n    0   Updates listed, applied, or system up to date.\n    2   Invalid options or no interactive terminal for applying updates.\n    4   No privilege elevation command available.\n    5   Could not enumerate or apply updates.\n    6   Output could not be written completely.\n"
-    );
+    )
 }
 
 /// Read a single line from stdin and treat it as a yes/no answer.

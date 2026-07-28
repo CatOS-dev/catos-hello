@@ -227,8 +227,10 @@ fn run_context(context: CommandContext, argv: &[String]) -> i32 {
                 return print_help(context);
             }
             [arg] if matches!(arg.as_str(), "-V" | "--version") => {
-                println!("{} {}", context.program, crate::PROGRAM_VERSION);
-                return exit_code::SUCCESS;
+                return write_stdout_text(
+                    context.program,
+                    &format!("{} {}\n", context.program, crate::PROGRAM_VERSION),
+                );
             }
             [] => {}
             _ => {
@@ -260,8 +262,10 @@ fn run_context(context: CommandContext, argv: &[String]) -> i32 {
         }
         return print_help(context);
     } else if argv.iter().any(|a| a == "--version" || a == "-V") {
-        println!("{} {}", context.program, crate::PROGRAM_VERSION);
-        return exit_code::SUCCESS;
+        return write_stdout_text(
+            context.program,
+            &format!("{} {}\n", context.program, crate::PROGRAM_VERSION),
+        );
     }
 
     if invocation == Invocation::CatosRecovery
@@ -335,10 +339,10 @@ fn run_system(argv: &[String]) -> i32 {
     let rest = &argv[1..];
     match command {
         "-h" | "--help" => print_help(CommandContext::standalone(Invocation::CatosSystem)),
-        "-V" | "--version" => {
-            println!("catos-system {}", crate::PROGRAM_VERSION);
-            exit_code::SUCCESS
-        }
+        "-V" | "--version" => write_stdout_text(
+            "catos-system",
+            &format!("catos-system {}\n", crate::PROGRAM_VERSION),
+        ),
         "help" => run_system_help(rest),
         "doctor" => run_context(CommandContext::aggregate(Invocation::CatosDoctor), rest),
         "chroot" => run_context(CommandContext::aggregate(Invocation::CatosChroot), rest),
@@ -1050,11 +1054,29 @@ fn interactive_advanced() -> Result<Option<i32>, String> {
     )))
 }
 
-fn print_advanced_help() -> i32 {
+fn write_stdout_text(program: &str, text: &str) -> i32 {
     use std::io::Write;
-    print!("{}", crate::cli::advanced_help_text());
-    std::io::stdout().flush().ok();
-    exit_code::SUCCESS
+
+    let stdout = std::io::stdout();
+    let mut output = stdout.lock();
+    match write_stdout_text_with(&mut output, text) {
+        Ok(()) => exit_code::SUCCESS,
+        Err(error) => {
+            let stderr = std::io::stderr();
+            let mut diagnostic = stderr.lock();
+            let _ = writeln!(diagnostic, "{program}: stdout write failed: {error}");
+            exit_code::SERIALIZE_FAILED
+        }
+    }
+}
+
+fn write_stdout_text_with<W: std::io::Write>(output: &mut W, text: &str) -> std::io::Result<()> {
+    output.write_all(text.as_bytes())?;
+    output.flush()
+}
+
+fn print_advanced_help() -> i32 {
+    write_stdout_text("catos-system", &crate::cli::advanced_help_text())
 }
 
 fn usage_error(program: &str, message: &str, hint: &str) -> i32 {
@@ -1135,7 +1157,6 @@ fn run_doctor(context: CommandContext) -> i32 {
 /// surface (`catos-system`, `catos-recovery`, and the argumentless
 /// `catos-doctor` diagnosis).
 fn run_via_full_parser(context: CommandContext, argv: &[String]) -> i32 {
-    use std::io::Write;
     // Validate the default target root. The default is `/`;
     // if `/` is somehow inaccessible we cannot proceed.
     let default_root = match crate::target::diagnose::system_root::SystemRoot::from_user_input("/")
@@ -1153,14 +1174,10 @@ fn run_via_full_parser(context: CommandContext, argv: &[String]) -> i32 {
             // Replace the program name in the canned help text so users
             // invoking via a symlink see their invocation.
             let text = text.replacement_help_name(context.program);
-            print!("{text}");
-            std::io::stdout().flush().ok();
-            exit_code::SUCCESS
+            write_stdout_text(context.program, &text)
         }
         Ok(crate::cli::ParseOutcome::Version(text)) => {
-            print!("{text}");
-            std::io::stdout().flush().ok();
-            exit_code::SUCCESS
+            write_stdout_text(context.program, &text)
         }
         Ok(crate::cli::ParseOutcome::Run(args)) => {
             if args.command.is_inspection_command() {
@@ -1742,7 +1759,6 @@ fn run_chroot(context: CommandContext, argv: &[String]) -> i32 {
 }
 
 fn print_repair_command_help(context: CommandContext, command: &str) -> i32 {
-    use std::io::Write;
     let version = crate::PROGRAM_VERSION;
     let program = context.program;
     let body = match command {
@@ -1803,13 +1819,10 @@ command does not migrate the installation to a different boot provider.
             );
         }
     };
-    print!("{body}");
-    std::io::stdout().flush().ok();
-    exit_code::SUCCESS
+    write_stdout_text(context.program, &body)
 }
 
 fn print_recovery_command_help(context: CommandContext, command: &str) -> i32 {
-    use std::io::Write;
     let version = crate::PROGRAM_VERSION;
     let program = context.program;
     let common_target = "    --root-device /dev/...     Target Btrfs block device (required).\n    --root-subvolume PATH      Current root subvolume (optional; validated against the plan).\n    --json                     Emit stable JSON on stdout.\n    -h, --help                 Show this help message and exit.\n    -V, --version              Print program version and exit.\n";
@@ -1843,22 +1856,18 @@ fn print_recovery_command_help(context: CommandContext, command: &str) -> i32 {
             return exit_code::ARG_ERROR;
         }
     };
-    print!("{body}");
-    std::io::stdout().flush().ok();
-    exit_code::SUCCESS
+    write_stdout_text(context.program, &body)
 }
 
 /// Print the per-invocation help. Each entry point owns a focused
 /// message describing its own surface rather than the full
 /// `catos-system` parser contract.
 fn print_help(context: CommandContext) -> i32 {
-    use std::io::Write;
     let version = crate::PROGRAM_VERSION;
     let program = context.program;
-    match context.role {
-        Invocation::CatosDoctor => {
-            print!(
-                r#"{program} {version} - check a CatOS installation
+    let text = match context.role {
+        Invocation::CatosDoctor => format!(
+            r#"{program} {version} - check a CatOS installation
 
 USAGE:
     {program}
@@ -1876,11 +1885,9 @@ Enter advances and q quits. Exit status is zero when a selected target was
 diagnosed, even when problems were found; privilege, target-selection,
 namespace, and cleanup failures return non-zero. Run without arguments.
 "#
-            );
-        }
-        Invocation::CatosRepair => {
-            print!(
-                r#"{program} {version} - repair a CatOS installation
+        ),
+        Invocation::CatosRepair => format!(
+            r#"{program} {version} - repair a CatOS installation
 
 USAGE:
     {program}
@@ -1897,13 +1904,11 @@ OPTIONS:
 Run without a command to choose the repair interactively.
 Run `{program} <COMMAND> --help` for command-specific target and output options.
 "#
-            );
-        }
-        Invocation::CatosUpdate => crate::update::print_help(program),
-        Invocation::CatosChroot => chroot::print_help(program),
-        Invocation::CatosRecovery => {
-            print!(
-                r#"{program} {version} - recover a Btrfs CatOS installation
+        ),
+        Invocation::CatosUpdate => crate::update::help_text(program),
+        Invocation::CatosChroot => chroot::help_text(program),
+        Invocation::CatosRecovery => format!(
+            r#"{program} {version} - recover a Btrfs CatOS installation
 
 USAGE:
     {program}
@@ -1926,12 +1931,10 @@ WORKFLOW:
 Run without a command to choose an action interactively.
 Run `{program} <COMMAND> --help` for required arguments.
 "#
-            );
-        }
-        Invocation::CatosSystem => print!("{}", crate::cli::help_text()),
-    }
-    std::io::stdout().flush().ok();
-    exit_code::SUCCESS
+        ),
+        Invocation::CatosSystem => crate::cli::help_text(),
+    };
+    write_stdout_text(program, &text)
 }
 
 /// Dispatch a low-level inspection command.
@@ -2101,6 +2104,33 @@ fn write_json_stdout(json: &str) -> std::io::Result<()> {
 mod tests {
     use super::*;
     use crate::boot::model::BootRepairOutcome;
+
+    struct FailingHelpWriter;
+
+    impl std::io::Write for FailingHelpWriter {
+        fn write(&mut self, _buffer: &[u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "consumer closed",
+            ))
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "consumer closed",
+            ))
+        }
+    }
+
+    #[test]
+    fn help_writer_propagates_output_failures() {
+        assert!(write_stdout_text_with(&mut FailingHelpWriter, "help\n").is_err());
+
+        let mut output = Vec::new();
+        write_stdout_text_with(&mut output, "help\n").unwrap();
+        assert_eq!(output, b"help\n");
+    }
 
     #[test]
     fn recovery_choice_labels_preserve_machine_values() {
