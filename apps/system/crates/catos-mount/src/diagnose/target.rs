@@ -15,7 +15,7 @@ use crate::diagnose::fstab::{parse_all_with_diagnostics, FstabEntry, FstabEntryK
 use crate::diagnose::subvolume::{
     decide_all, history_from_entries, CatosConfirmation, SubvolDecision, SubvolFacts,
 };
-use crate::model::{MountProblem, MountTargetIdentity};
+use crate::model::{CleanupReport, MountProblem, MountTargetIdentity};
 use crate::plan::session::{probe_unmounted_candidates, SelectedTargetProbe};
 use catos_target::diagnose::candidate::{device_matches_fstab_source, inspect_target};
 use catos_target::diagnose::filesystem::{FilesystemProbe, RealFilesystem};
@@ -406,16 +406,42 @@ pub fn select_cli_root<'a>(
     devices: &'a [BlockDevice],
     root_device: Option<&str>,
 ) -> Option<&'a BlockDevice> {
+    select_cli_root_with_cleanup(devices, root_device).0
+}
+
+/// Select a CLI root while preserving cleanup from any temporary automatic
+/// discovery probes. Write-capable callers must inspect every cleanup report
+/// before proceeding.
+pub fn select_cli_root_with_cleanup<'a>(
+    devices: &'a [BlockDevice],
+    root_device: Option<&str>,
+) -> (Option<&'a BlockDevice>, Vec<CleanupReport>) {
     match root_device {
-        Some(requested) => devices.iter().find(|device| {
-            device
-                .dev_path
-                .as_ref()
-                .is_some_and(|path| same_block_device(path, Path::new(requested)))
-                && supported_mount_repair_root(device.filesystem.as_deref())
-                && (!device.mounted_before_session || is_running_root_device(device))
-        }),
-        None => auto_select_running_root(devices).or_else(|| auto_select_cli_root(devices)),
+        Some(requested) => (
+            devices.iter().find(|device| {
+                device
+                    .dev_path
+                    .as_ref()
+                    .is_some_and(|path| same_block_device(path, Path::new(requested)))
+                    && supported_mount_repair_root(device.filesystem.as_deref())
+                    && (!device.mounted_before_session || is_running_root_device(device))
+            }),
+            Vec::new(),
+        ),
+        None => {
+            if let Some(running) = auto_select_running_root(devices) {
+                return (Some(running), Vec::new());
+            }
+            let probes = probe_unmounted_candidates(devices, &[]);
+            let cleanup = probes.cleanup;
+            if cleanup.iter().any(|report| !report.all_clean) {
+                return (None, cleanup);
+            }
+            (
+                auto_select_cli_root_from_candidates(devices, &probes.roots),
+                cleanup,
+            )
+        }
     }
 }
 
@@ -496,9 +522,19 @@ pub fn inspect_running_root() -> Result<SelectedTargetProbe, String> {
 }
 
 pub fn auto_select_cli_root(devices: &[BlockDevice]) -> Option<&BlockDevice> {
-    let probes = probe_unmounted_candidates(devices, &[]);
-    let candidates: Vec<&str> = probes
-        .roots
+    let (selected, cleanup) = select_cli_root_with_cleanup(devices, None);
+    cleanup
+        .iter()
+        .all(|report| report.all_clean)
+        .then_some(selected)
+        .flatten()
+}
+
+fn auto_select_cli_root_from_candidates<'a>(
+    devices: &'a [BlockDevice],
+    roots: &[catos_target::model::RootCandidate],
+) -> Option<&'a BlockDevice> {
+    let candidates: Vec<&str> = roots
         .iter()
         .filter(|root| {
             supported_mount_repair_root(root.filesystem.as_deref())

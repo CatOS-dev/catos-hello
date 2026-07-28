@@ -22,13 +22,13 @@ use std::path::{Path, PathBuf};
 
 use crate::mount::diagnose::layout::detect_boot_mount_layout;
 use crate::mount::diagnose::target::{
-    inspect_running_root, is_running_root_device, same_block_device, select_cli_root,
+    inspect_running_root, is_running_root_device, same_block_device, select_cli_root_with_cleanup,
     select_mount_repair_esp, MountPointObservation,
 };
 use crate::mount::execute::repair::execute_mount_repair;
 use crate::mount::model::{
-    AppliedAction, FstabDigest, FstabTransaction, MountRepairCleanup, MountRepairOutcome,
-    MountRepairPlan, MountRepairReport, MountTargetIdentity, MountVerification,
+    AppliedAction, CleanupReport, FstabDigest, FstabTransaction, MountRepairCleanup,
+    MountRepairOutcome, MountRepairPlan, MountRepairReport, MountTargetIdentity, MountVerification,
 };
 use crate::mount::plan::repair::apply_in_memory as apply_in_memory_pure;
 use crate::mount::plan::session::{inspect_selected_root, probe_unmounted_candidates};
@@ -337,7 +337,17 @@ pub fn run_mount_repair_via_cli(
 ) -> MountRepairReport {
     let fs = RealFilesystem;
     let (devices, mut warnings) = discover_devices(&fs);
-    let Some(root) = select_cli_root(&devices, root_device) else {
+    let (root, selection_cleanup) = select_cli_root_with_cleanup(&devices, root_device);
+    let selection_cleanup = summarize_probe_cleanup(selection_cleanup);
+    if !selection_cleanup.all_clean {
+        let mut report = MountRepairReport::refused(
+            MountRepairOutcome::CleanupIncomplete,
+            "automatic root-selection probe cleanup was incomplete",
+        );
+        report.cleanup = cleanup_into_mount_repair(selection_cleanup);
+        return report;
+    }
+    let Some(root) = root else {
         return MountRepairReport::refused(
             MountRepairOutcome::AmbiguousTarget,
             "root device must identify exactly one verified CatOS root",
@@ -408,6 +418,16 @@ pub fn run_mount_repair_via_cli(
 
     let mut topology_probe = probe_unmounted_candidates(&devices, &selected_probe.fstab);
     warnings.append(&mut topology_probe.warnings);
+    let probe_cleanup = summarize_probe_cleanup(std::mem::take(&mut topology_probe.cleanup));
+    if !probe_cleanup.all_clean {
+        let mut report = MountRepairReport::refused(
+            MountRepairOutcome::CleanupIncomplete,
+            "readonly topology probe cleanup was incomplete",
+        );
+        report.cleanup = cleanup_into_mount_repair(probe_cleanup);
+        report.warnings = warnings;
+        return report;
+    }
     let esp = match select_mount_repair_esp(
         &devices,
         &selected_probe.fstab,
@@ -466,6 +486,15 @@ pub fn run_mount_repair_via_cli(
             );
         }
     };
+    if let Err(reason) = validate_rw_target_identity(&target, root, &session) {
+        let cleanup = session.cleanup();
+        let mut report = MountRepairReport::refused(MountRepairOutcome::DeviceChanged, &reason);
+        report.cleanup = cleanup_into_mount_repair(cleanup);
+        if !report.cleanup.all_clean {
+            report.final_outcome = MountRepairOutcome::CleanupIncomplete;
+        }
+        return report;
+    }
     let top = session.storage_root().to_path_buf();
     let root_path = session.target_root();
     let inputs = match observe_target_inputs(&fs, &top, &root_path, target) {
@@ -618,7 +647,15 @@ pub(crate) fn open_boot_repair_target_session(
 ) -> Result<BootRepairTargetSession, BootRepairSessionOpenError> {
     let fs = RealFilesystem;
     let (devices, _) = discover_devices(&fs);
-    let root = select_cli_root(&devices, root_device).ok_or_else(|| {
+    let (root, selection_cleanup) = select_cli_root_with_cleanup(&devices, root_device);
+    let selection_cleanup = summarize_probe_cleanup(selection_cleanup);
+    if !selection_cleanup.all_clean {
+        return Err(BootRepairSessionOpenError {
+            reason: "automatic root-selection probe cleanup was incomplete".into(),
+            cleanup: selection_cleanup,
+        });
+    }
+    let root = root.ok_or_else(|| {
         BootRepairSessionOpenError::clean(
             "root device must identify exactly one verified CatOS root",
         )
@@ -661,7 +698,14 @@ pub(crate) fn open_boot_repair_target_session(
             "selected target is not identified as CatOS",
         ));
     }
-    let topology_probe = probe_unmounted_candidates(&devices, &selected_probe.fstab);
+    let mut topology_probe = probe_unmounted_candidates(&devices, &selected_probe.fstab);
+    let probe_cleanup = summarize_probe_cleanup(std::mem::take(&mut topology_probe.cleanup));
+    if !probe_cleanup.all_clean {
+        return Err(BootRepairSessionOpenError {
+            reason: "readonly topology probe cleanup was incomplete".into(),
+            cleanup: probe_cleanup,
+        });
+    }
     let esp = select_mount_repair_esp(
         &devices,
         &selected_probe.fstab,
@@ -688,12 +732,16 @@ pub(crate) fn open_boot_repair_target_session(
     };
     let lock = DeviceLock::try_acquire(root_device_path)
         .map_err(|error| BootRepairSessionOpenError::clean(error.message))?;
-    let root_session = TargetMountRwSession::mount(
+    let mut root_session = TargetMountRwSession::mount(
         root_device_path,
         root.filesystem.as_deref().unwrap_or_default(),
         running_root,
     )
     .map_err(|error| BootRepairSessionOpenError::clean(error.message.to_string()))?;
+    if let Err(reason) = validate_rw_target_identity(&target, root, &root_session) {
+        let cleanup = root_session.cleanup();
+        return Err(BootRepairSessionOpenError { reason, cleanup });
+    }
     let mut session = BootRepairTargetSession {
         target,
         devices,
@@ -709,6 +757,166 @@ pub(crate) fn open_boot_repair_target_session(
         return Err(BootRepairSessionOpenError { reason, cleanup });
     }
     Ok(session)
+}
+
+fn validate_rw_target_identity(
+    target: &MountTargetIdentity,
+    sealed: &BlockDevice,
+    session: &TargetMountRwSession,
+) -> Result<(), String> {
+    let storage_root = session.storage_root();
+    let mountinfo_body = std::fs::read_to_string("/proc/self/mountinfo")
+        .map_err(|error| format!("cannot read mountinfo after target mount: {error}"))?;
+    let mounted = crate::mount::diagnose::mountinfo::parse_all(&mountinfo_body)
+        .into_iter()
+        .filter(|mount| mount.mount_point == storage_root)
+        .collect::<Vec<_>>();
+    let mounted = match mounted.as_slice() {
+        [mounted] => mounted,
+        [] => {
+            return Err(format!(
+                "mounted target {} is absent from mountinfo",
+                storage_root.display()
+            ))
+        }
+        _ => {
+            return Err(format!(
+                "mounted target {} has {} stacked mountinfo entries",
+                storage_root.display(),
+                mounted.len()
+            ))
+        }
+    };
+
+    let (fresh_devices, _warnings) = discover_devices(&RealFilesystem);
+    let fresh = fresh_devices
+        .iter()
+        .filter(|candidate| match sealed.major_minor.as_deref() {
+            Some(major_minor) => candidate.major_minor.as_deref() == Some(major_minor),
+            None => candidate.dev_path.as_deref().is_some_and(|path| {
+                sealed
+                    .dev_path
+                    .as_deref()
+                    .is_some_and(|sealed_path| same_block_device(path, sealed_path))
+            }),
+        })
+        .collect::<Vec<_>>();
+    let fresh = match fresh.as_slice() {
+        [fresh] => *fresh,
+        [] => {
+            return Err(format!(
+                "sealed target {} is absent from the fresh block inventory",
+                sealed
+                    .dev_path
+                    .as_deref()
+                    .unwrap_or_else(|| Path::new("<unknown>"))
+                    .display()
+            ))
+        }
+        _ => {
+            return Err(format!(
+                "sealed target {} matches {} fresh block records",
+                sealed.name,
+                fresh.len()
+            ))
+        }
+    };
+    compare_mounted_identity(sealed, mounted, fresh)?;
+
+    if target.root_fstype == "btrfs" {
+        let validated = crate::snapshot::diagnose::identity::validate_mounted_filesystem(
+            storage_root,
+            &target.root_device,
+        )
+        .map_err(|error| format!("cannot validate mounted Btrfs identity: {error}"))?;
+        if let Some(expected_fsid) = target.root_uuid.as_deref() {
+            if validated.filesystem.fsid != expected_fsid {
+                return Err(format!(
+                    "mounted Btrfs FSID {} differs from sealed {}",
+                    validated.filesystem.fsid, expected_fsid
+                ));
+            }
+        }
+        let root_identity = crate::snapshot::diagnose::enumerate::show_subvolume(
+            &session.target_root(),
+        )
+        .map_err(|error| format!("cannot validate mounted Btrfs root subvolume: {error}"))?;
+        if let Some(expected_subvolume) = target.root_subvol.as_deref() {
+            if root_identity.path != expected_subvolume {
+                return Err(format!(
+                    "mounted Btrfs root subvolume {} differs from sealed {}",
+                    root_identity.path, expected_subvolume
+                ));
+            }
+        }
+    }
+
+    let target_root = session.target_root();
+    let target_text = target_root
+        .to_str()
+        .ok_or_else(|| "mounted target root is not valid UTF-8".to_string())?;
+    let system_root =
+        crate::target::diagnose::system_root::SystemRoot::from_user_input(target_text)
+            .map_err(|error| format!("cannot pin mounted target root: {error}"))?;
+    let mut inspection_warnings = Vec::new();
+    let inspection = crate::target::diagnose::candidate::inspect_target(
+        &RealFilesystem,
+        &system_root,
+        &mut inspection_warnings,
+    );
+    if inspection.is_catos_target.status != DetectionStatus::Detected {
+        return Err(format!(
+            "mounted target no longer identifies as CatOS: {}",
+            inspection_warnings.join("; ")
+        ));
+    }
+    Ok(())
+}
+
+fn compare_mounted_identity(
+    sealed: &BlockDevice,
+    mounted: &crate::target::mountinfo::MountInfo,
+    fresh: &BlockDevice,
+) -> Result<(), String> {
+    if let Some(expected) = sealed.major_minor.as_deref() {
+        if mounted.major_minor != expected {
+            return Err(format!(
+                "mounted target major:minor {} differs from sealed {}",
+                mounted.major_minor, expected
+            ));
+        }
+        if fresh.major_minor.as_deref() != Some(expected) {
+            return Err(format!(
+                "fresh target major:minor {:?} differs from sealed {}",
+                fresh.major_minor, expected
+            ));
+        }
+    }
+    let expected_fstype = sealed
+        .filesystem
+        .as_deref()
+        .ok_or_else(|| "sealed target has no filesystem type".to_string())?;
+    if !mounted.fstype.eq_ignore_ascii_case(expected_fstype) {
+        return Err(format!(
+            "mounted target filesystem {} differs from sealed {}",
+            mounted.fstype, expected_fstype
+        ));
+    }
+    if fresh.filesystem.as_deref() != Some(expected_fstype) {
+        return Err(format!(
+            "fresh target filesystem {:?} differs from sealed {}",
+            fresh.filesystem, expected_fstype
+        ));
+    }
+    if let Some(expected_uuid) = sealed.uuid.as_deref() {
+        if fresh.uuid.as_deref() != Some(expected_uuid) {
+            return Err(format!(
+                "fresh target UUID {:?} differs from sealed {}",
+                fresh.uuid, expected_uuid
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn boot_runtime_bind_flags(source: &str) -> u64 {
@@ -996,6 +1204,16 @@ where
     cleanup
 }
 
+fn summarize_probe_cleanup(cleanups: Vec<CleanupReport>) -> CleanupSummary {
+    cleanups.into_iter().fold(
+        CleanupSummary {
+            all_clean: true,
+            ..CleanupSummary::default()
+        },
+        |summary, cleanup| merge_cleanup(summary, cleanup.into()),
+    )
+}
+
 fn merge_cleanup(mut auxiliary: CleanupSummary, root: CleanupSummary) -> CleanupSummary {
     auxiliary.unmounted.extend(root.unmounted);
     auxiliary.residual.extend(root.residual);
@@ -1083,6 +1301,60 @@ mod boot_session_tests {
                 esp_mount_point: "/boot/efi".into(),
             }),
         }
+    }
+
+    fn mount_info(major_minor: &str, fstype: &str) -> crate::target::mountinfo::MountInfo {
+        crate::target::mountinfo::MountInfo {
+            mount_id: 1,
+            parent_id: 0,
+            major_minor: major_minor.into(),
+            root: "/".into(),
+            mount_point: PathBuf::from("/run/catos-system/sessions/test"),
+            vfs_options: vec!["rw".into()],
+            optional_fields: Vec::new(),
+            fstype: fstype.into(),
+            source: "/dev/root".into(),
+            super_options: vec!["rw".into()],
+        }
+    }
+
+    #[test]
+    fn mounted_identity_comparison_rejects_major_minor_uuid_and_fstype_drift() {
+        let mut sealed = device("root", "/dev/root", "ext4");
+        sealed.major_minor = Some("8:2".into());
+        sealed.uuid = Some("root-uuid".into());
+        let mut fresh = sealed.clone();
+        assert!(compare_mounted_identity(&sealed, &mount_info("8:2", "ext4"), &fresh).is_ok());
+
+        assert!(
+            compare_mounted_identity(&sealed, &mount_info("8:3", "ext4"), &fresh)
+                .unwrap_err()
+                .contains("major:minor")
+        );
+        fresh.uuid = Some("other".into());
+        assert!(
+            compare_mounted_identity(&sealed, &mount_info("8:2", "ext4"), &fresh)
+                .unwrap_err()
+                .contains("UUID")
+        );
+        fresh = sealed.clone();
+        assert!(
+            compare_mounted_identity(&sealed, &mount_info("8:2", "xfs"), &fresh)
+                .unwrap_err()
+                .contains("filesystem")
+        );
+    }
+
+    #[test]
+    fn readonly_probe_cleanup_residual_is_preserved() {
+        let cleanup = summarize_probe_cleanup(vec![CleanupReport {
+            all_clean: false,
+            directory_cleanup_error: Some("probe directory is busy".into()),
+            ..CleanupReport::default()
+        }]);
+
+        assert!(!cleanup.all_clean);
+        assert_eq!(cleanup.residual, vec!["probe directory is busy"]);
     }
 
     #[test]

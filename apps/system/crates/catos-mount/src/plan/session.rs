@@ -1250,6 +1250,7 @@ mod prober {
         pub esps: Vec<EspCandidate>,
         pub btrfs_subvolumes: Vec<BtrfsSubvolume>,
         pub warnings: Vec<Warning>,
+        pub cleanup: Vec<CleanupReport>,
     }
 
     pub struct SelectedTargetProbe {
@@ -1526,6 +1527,7 @@ mod prober {
                 format!("temporary probe for {source} left residual mounts"),
             ));
         }
+        report.cleanup.push(cleanup);
     }
 
     fn probe_btrfs(device: &BlockDevice, report: &mut ProbeCandidates) {
@@ -1581,6 +1583,7 @@ mod prober {
                 format!("temporary btrfs probe for {source} left residual mounts"),
             ));
         }
+        report.cleanup.push(cleanup);
     }
 
     fn enumerate_btrfs_subvolumes(root: &Path) -> (Vec<BtrfsSubvolume>, Vec<Warning>) {

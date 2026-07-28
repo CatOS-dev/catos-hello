@@ -13,7 +13,8 @@ pub fn verify_grub_target(target_root: &Path, kernels: &[Kernel]) -> ProviderVer
     let valid = config
         .as_deref()
         .is_some_and(grub_config_has_bootable_linux_entry)
-        && kernels.iter().any(|kernel| {
+        && !kernels.is_empty()
+        && kernels.iter().all(|kernel| {
             target_regular_file_present(target_root, kernel.initramfs.trim_start_matches('/'))
         });
     ProviderVerificationResult {
@@ -125,12 +126,16 @@ fn target_deployed_kernel_assets(
     else {
         return false;
     };
-    kernels.iter().any(|kernel| {
-        let directory = directory(kernel).replace("{machine_id}", &machine_id);
-        target_regular_file_present(target_root, &format!("{directory}/{kernel_asset}"))
-            && target_regular_file_present(target_root, &format!("{directory}/{initramfs_asset}"))
-            && directory.starts_with(esp)
-    })
+    !kernels.is_empty()
+        && kernels.iter().all(|kernel| {
+            let directory = directory(kernel).replace("{machine_id}", &machine_id);
+            target_regular_file_present(target_root, &format!("{directory}/{kernel_asset}"))
+                && target_regular_file_present(
+                    target_root,
+                    &format!("{directory}/{initramfs_asset}"),
+                )
+                && directory.starts_with(esp)
+        })
 }
 
 fn target_systemd_boot_entry_present(target_root: &Path, esp: &str, kernels: &[Kernel]) -> bool {
@@ -145,12 +150,13 @@ fn target_systemd_boot_entry_present(target_root: &Path, esp: &str, kernels: &[K
         &format!("/{esp}/loader/entries"),
     )
     .unwrap_or_default();
-    kernels.iter().any(|kernel| {
-        let prefix = format!("{machine_id}-{}", kernel.version);
-        entries.iter().any(|entry| {
-            entry
-                .to_str()
-                .is_some_and(|entry| entry.starts_with(&prefix) && entry.ends_with(".conf"))
+    !kernels.is_empty()
+        && kernels.iter().all(|kernel| {
+            let prefix = format!("{machine_id}-{}", kernel.version);
+            entries.iter().any(|entry| {
+                entry
+                    .to_str()
+                    .is_some_and(|entry| entry.starts_with(&prefix) && entry.ends_with(".conf"))
+            })
         })
-    })
 }

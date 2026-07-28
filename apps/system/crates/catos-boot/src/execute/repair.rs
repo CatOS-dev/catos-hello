@@ -52,7 +52,6 @@ use crate::diagnose::provider::{detect, DetectionInputs, DetectionVerdict};
 use crate::execute::providers::{build_ctx, build_executor, build_verifier};
 use crate::execute::secureboot::{finalize_secure_boot, SecureBootInputs};
 use crate::execute::target::{TargetRequest, TargetRunner, TrustedTargetRunner};
-use crate::io::read_target_file;
 use crate::model::{
     BootCmdlineFacts, BootRepairOutcome, BootRepairReport, BootVerification, PlatformFacts,
     SecureBootReport,
@@ -65,6 +64,156 @@ use catos_target::Evidence;
 pub use crate::execute::providers::ProviderInputs;
 pub use crate::plan::initramfs::Kernel;
 pub use crate::plan::registry::ProviderProfile;
+
+#[allow(clippy::too_many_arguments)]
+fn build_mkinitcpio_inputs<'a>(
+    target: &MountTargetIdentity,
+    target_root: &Path,
+    existing_config: &'a str,
+    installed_packages: &[String],
+    storage_devices: &[catos_target::model::BlockDevice],
+    cmdline_facts: &BootCmdlineFacts,
+    provider: crate::model::ProviderId,
+    snapshots_enabled: bool,
+) -> Result<crate::plan::initramfs::MkinitcpioInputs<'a>, String> {
+    use catos_mount::model::BootMountLayout;
+    use catos_target::fstab::{parse_all_with_diagnostics, FstabEntryKind};
+    use catos_target::FsError;
+
+    let fstab_bytes = catos_target::execute::confined::read_rooted_file(target_root, "/etc/fstab")
+        .map_err(|error| format!("cannot read target /etc/fstab: {error}"))?;
+    let fstab = String::from_utf8(fstab_bytes)
+        .map_err(|error| format!("target /etc/fstab is not UTF-8: {error}"))?;
+    let (entries, diagnostics) = parse_all_with_diagnostics(&fstab);
+    if !diagnostics.is_empty() {
+        return Err(format!(
+            "target /etc/fstab contains {} malformed entr{}",
+            diagnostics.len(),
+            if diagnostics.len() == 1 { "y" } else { "ies" }
+        ));
+    }
+
+    let has_separate_usr = entries
+        .iter()
+        .any(|entry| entry.kind != FstabEntryKind::Swap && entry.target == "/usr" && !entry.noauto);
+    let has_unencrypted_separate_boot = match target.boot_layout.as_ref() {
+        Some(BootMountLayout::EspAtBoot { .. }) => true,
+        Some(BootMountLayout::SeparateBootAndEsp { boot_device, .. }) => {
+            let Some(device) = unique_inventory_device_by_path(boot_device, storage_devices)?
+            else {
+                return Err(format!(
+                    "separate /boot device {} is absent from the sealed block inventory",
+                    boot_device.display()
+                ));
+            };
+            !device_chain_has_filesystem(device, storage_devices, "crypto_LUKS")?
+        }
+        _ => false,
+    };
+
+    let uses_lvm = match unique_inventory_device_by_path(&target.root_device, storage_devices)? {
+        Some(device) => device_chain_has_filesystem(device, storage_devices, "LVM2_member")?,
+        None => false,
+    };
+    let has_crypto_keyfile = match catos_target::execute::confined::rooted_regular_file_size(
+        target_root,
+        "/crypto_keyfile.bin",
+    ) {
+        Ok(Some(size)) => size > 0,
+        Ok(None) | Err(FsError::NotFound) => false,
+        Err(error) => return Err(format!("cannot inspect target crypto keyfile: {error}")),
+    };
+
+    Ok(crate::plan::initramfs::MkinitcpioInputs {
+        existing_config,
+        root_filesystem: target.root_fstype.clone(),
+        encrypted_root: cmdline_facts.luks_root.is_some(),
+        has_unencrypted_separate_boot,
+        has_separate_usr,
+        has_swap: cmdline_facts.resume.is_some(),
+        encrypted_swap: matches!(
+            cmdline_facts.resume,
+            Some(crate::model::ResumeTarget::Mapper { .. })
+        ),
+        uses_lvm,
+        has_plymouth: installed_packages
+            .iter()
+            .any(|package| package == "plymouth"),
+        has_crypto_keyfile,
+        provider,
+        snapshots_enabled,
+        root_is_btrfs: target.root_fstype == "btrfs",
+    })
+}
+
+fn unique_inventory_device_by_path<'a>(
+    path: &Path,
+    devices: &'a [catos_target::model::BlockDevice],
+) -> Result<Option<&'a catos_target::model::BlockDevice>, String> {
+    let matches = devices
+        .iter()
+        .filter(|device| device.dev_path.as_deref() == Some(path))
+        .collect::<Vec<_>>();
+    match matches.as_slice() {
+        [] => Ok(None),
+        [device] => Ok(Some(*device)),
+        _ => Err(format!(
+            "device path {} is ambiguous across {} inventory records",
+            path.display(),
+            matches.len()
+        )),
+    }
+}
+
+fn device_chain_has_filesystem(
+    device: &catos_target::model::BlockDevice,
+    devices: &[catos_target::model::BlockDevice],
+    filesystem: &str,
+) -> Result<bool, String> {
+    let mut current = device;
+    let mut visited = std::collections::BTreeSet::new();
+    for _ in 0..=devices.len() {
+        if !visited.insert(current.name.as_str()) {
+            return Err(format!(
+                "block backing chain for {} contains a cycle at {}",
+                device.name, current.name
+            ));
+        }
+        if current
+            .filesystem
+            .as_deref()
+            .is_some_and(|value| value.eq_ignore_ascii_case(filesystem))
+        {
+            return Ok(true);
+        }
+        if current.parent.is_empty() {
+            return Ok(false);
+        }
+        let parents = devices
+            .iter()
+            .filter(|candidate| candidate.name == current.parent)
+            .collect::<Vec<_>>();
+        current = match parents.as_slice() {
+            [parent] => *parent,
+            [] => {
+                return Err(format!(
+                    "backing device {} for {} is absent from the sealed inventory",
+                    current.parent, current.name
+                ))
+            }
+            _ => {
+                return Err(format!(
+                    "backing device {} for {} is ambiguous",
+                    current.parent, current.name
+                ))
+            }
+        };
+    }
+    Err(format!(
+        "block backing chain for {} exceeds the inventory size",
+        device.name
+    ))
+}
 
 /// Run the boot-repair flow against an already-mounted target. The
 /// caller (the CLI entry point) is responsible for target discovery,
@@ -216,6 +365,21 @@ pub fn run_boot_repair(
         target.root_fstype == "btrfs",
     );
 
+    let preflight_failure = |code: &str, message: String| BootRepairReport {
+        target: Some(target.clone()),
+        platform: Some(platform),
+        detected_provider: Some(provider),
+        firmware_method: method,
+        provider_evidence: evidence.clone(),
+        kernel_cmdline: Some(cmdline.clone()),
+        cmdline_facts: Some(cmdline_facts.clone()),
+        final_outcome: BootRepairOutcome::ManualInterventionRequired,
+        requires_human_action: true,
+        fully_complete: false,
+        evidence: vec![Evidence::new(code, "repair::boot::preflight", message)],
+        ..BootRepairReport::default()
+    };
+
     let efi_device = derive_efi_device(target, storage_devices);
     let snapshot_state = snapshot_repair_state(
         target_root,
@@ -223,23 +387,55 @@ pub fn run_boot_repair(
         &target.root_fstype,
         installed_packages,
     );
-    let mkinitcpio_text = read_target_file(target_root, "etc/mkinitcpio.conf").unwrap_or_default();
-    let kernels = collect_target_kernels(target_root);
-    let mkinitcpio_inputs = crate::plan::initramfs::MkinitcpioInputs {
-        existing_config: &mkinitcpio_text,
-        root_filesystem: target.root_fstype.clone(),
-        has_plymouth: installed_packages
-            .iter()
-            .any(|package| package == "plymouth"),
-        has_crypto_keyfile: catos_target::execute::confined::read_rooted_file(
-            target_root,
-            "/crypto_keyfile.bin",
-        )
-        .is_ok(),
+    let mkinitcpio_text =
+        match crate::io::read_target_file_checked(target_root, "etc/mkinitcpio.conf") {
+            Ok(Some(text)) => text,
+            Ok(None) => {
+                return preflight_failure(
+                    "MKINITCPIO_CONFIG_MISSING",
+                    "target /etc/mkinitcpio.conf is missing".into(),
+                )
+            }
+            Err(error) => return preflight_failure("MKINITCPIO_CONFIG_UNREADABLE", error),
+        };
+    let kernels = match collect_target_kernels(target_root) {
+        Ok(kernels) if !kernels.is_empty() => kernels,
+        Ok(_) => {
+            return preflight_failure(
+                "TARGET_KERNELS_MISSING",
+                "target contains no complete kernel module tree with pkgbase and vmlinuz".into(),
+            )
+        }
+        Err(error) => return preflight_failure("TARGET_KERNELS_UNREADABLE", error),
+    };
+    let mkinitcpio_inputs = match build_mkinitcpio_inputs(
+        target,
+        target_root,
+        &mkinitcpio_text,
+        installed_packages,
+        storage_devices,
+        cmdline_facts,
         provider,
-        root_is_btrfs: target.root_fstype == "btrfs",
-        snapshots_enabled: snapshot_state.enabled,
-        ..Default::default()
+        snapshot_state.enabled,
+    ) {
+        Ok(inputs) => inputs,
+        Err(error) => return preflight_failure("INITRAMFS_FACTS_INCOMPLETE", error),
+    };
+    let secureboot_inputs = match (
+        target_secureboot_marker_present(target_root),
+        target_signed_catos_efi_present(target_root, ctx.esp_mount_point.as_deref()),
+    ) {
+        (Ok(target_marker_present), Ok(signed_artefact_observed)) => SecureBootInputs {
+            provider,
+            target_marker_present,
+            package_present: installed_packages
+                .iter()
+                .any(|package| package == "catos-secureboot"),
+            signed_artefact_observed,
+            previous_payload: None,
+        },
+        (Err(error), _) => return preflight_failure("SECUREBOOT_POLICY_UNREADABLE", error),
+        (_, Err(error)) => return preflight_failure("SECUREBOOT_ASSETS_UNREADABLE", error),
     };
     let mut config_transaction = ConfigTransaction::new(target_root);
     let mut config_actions = match write_provider_configs(
@@ -418,16 +614,6 @@ pub fn run_boot_repair(
             BootRepairOutcome::VerificationFailed
         } else {
             // 7. Secure Boot finalisation (preserves target policy).
-            let secureboot_inputs = SecureBootInputs {
-                provider,
-                target_marker_present: target_secureboot_marker_present(target_root),
-                package_present: installed_packages.iter().any(|p| p == "catos-secureboot"),
-                signed_artefact_observed: target_signed_catos_efi_present(
-                    target_root,
-                    ctx.esp_mount_point.as_deref(),
-                ),
-                previous_payload: None,
-            };
             let (report, outcome_override, secureboot_action) =
                 finalize_secure_boot(&runner, &secureboot_inputs);
             if let Some(result) = secureboot_action {
@@ -607,17 +793,104 @@ mod tests {
     }
 
     #[test]
+    fn production_mkinitcpio_inputs_preserve_encryption_resume_and_separate_usr() {
+        use crate::model::{BootCmdlineFacts, LuksMapping, ResumeTarget};
+        use crate::plan::initramfs::compute_arrays;
+        use catos_mount::model::BootMountLayout;
+
+        let target_root = TempTargetRoot::new();
+        fs::create_dir_all(target_root.path.join("etc")).unwrap();
+        fs::write(
+            target_root.path.join("etc/fstab"),
+            "UUID=root-fs / btrfs defaults,subvol=/@ 0 0\n\
+             UUID=boot-fs /boot ext4 defaults 0 2\n\
+             UUID=usr-fs /usr ext4 defaults 0 2\n\
+             /dev/mapper/cryptswap none swap defaults 0 0\n",
+        )
+        .unwrap();
+        fs::write(
+            target_root.path.join("etc/mkinitcpio.conf"),
+            "HOOKS=(base udev block encrypt filesystems resume fsck)\n",
+        )
+        .unwrap();
+        fs::write(target_root.path.join("crypto_keyfile.bin"), b"key").unwrap();
+
+        let mut target = btrfs_target();
+        target.root_device = PathBuf::from("/dev/mapper/cryptroot");
+        target.boot_layout = Some(BootMountLayout::SeparateBootAndEsp {
+            boot_device: PathBuf::from("/dev/sda1"),
+            esp_device: PathBuf::from("/dev/sda2"),
+            esp_mount_point: "/boot/efi".into(),
+        });
+
+        let mut root = block_device("dm-0", Some("/dev/mapper/cryptroot"), "sda3");
+        root.class = catos_target::model::DeviceClass::DeviceMapper;
+        root.uuid = Some("root-fs".into());
+        let mut luks = block_device("sda3", Some("/dev/sda3"), "sda");
+        luks.filesystem = Some("crypto_LUKS".into());
+        let mut boot = block_device("sda1", Some("/dev/sda1"), "sda");
+        boot.filesystem = Some("ext4".into());
+        boot.uuid = Some("boot-fs".into());
+        let mut usr = block_device("sda5", Some("/dev/sda5"), "sda");
+        usr.filesystem = Some("ext4".into());
+        usr.uuid = Some("usr-fs".into());
+        let mut disk = block_device("sda", Some("/dev/sda"), "");
+        disk.filesystem = None;
+        let devices = vec![root, luks, boot, usr, disk];
+        let facts = BootCmdlineFacts {
+            luks_root: Some(LuksMapping {
+                luks_uuid: "luks-root".into(),
+                mapper_name: "cryptroot".into(),
+            }),
+            resume: Some(ResumeTarget::Mapper {
+                mapper_name: "cryptswap".into(),
+            }),
+            evidence: Vec::new(),
+        };
+
+        let config = fs::read_to_string(target_root.path.join("etc/mkinitcpio.conf")).unwrap();
+        let inputs = build_mkinitcpio_inputs(
+            &target,
+            &target_root.path,
+            &config,
+            &["plymouth".into()],
+            &devices,
+            &facts,
+            ProviderId::Grub,
+            false,
+        )
+        .unwrap();
+        assert!(inputs.encrypted_root);
+        assert!(inputs.has_swap);
+        assert!(inputs.encrypted_swap);
+        assert!(inputs.has_unencrypted_separate_boot);
+        assert!(inputs.has_separate_usr);
+        assert!(inputs.has_plymouth);
+        assert!(inputs.has_crypto_keyfile);
+
+        let arrays = compute_arrays(&inputs);
+        for required in ["encrypt", "openswap", "resume", "usr", "plymouth"] {
+            assert!(
+                arrays.hooks.iter().any(|hook| hook == required),
+                "missing {required} in {:?}",
+                arrays.hooks
+            );
+        }
+    }
+
+    #[test]
     fn mounted_orchestrator_collects_provider_evidence_only_from_target_root() {
         let target_root = TempTargetRoot::new();
         fs::create_dir_all(target_root.path.join("etc/default/grub.d")).unwrap();
         fs::create_dir_all(target_root.path.join("boot/grub")).unwrap();
+        fs::create_dir_all(target_root.path.join("var/lib/pacman/local")).unwrap();
         fs::write(
             target_root.path.join("etc/default/grub.d/00-catos.cfg"),
             "GRUB_DISTRIBUTOR=TargetOnlyCatOS\n",
         )
         .unwrap();
 
-        let evidence = collect_detection_inputs_from_target_root(&target_root.path);
+        let evidence = collect_detection_inputs_from_target_root(&target_root.path).unwrap();
 
         assert_eq!(
             evidence.grub_defaults_catos.as_deref(),
@@ -632,6 +905,7 @@ mod tests {
         fs::create_dir_all(target_root.path.join("boot/efi/loader")).unwrap();
         fs::create_dir_all(target_root.path.join("boot/efi/EFI/Linux")).unwrap();
         fs::create_dir_all(target_root.path.join("boot/efi/EFI/CatOS/linux")).unwrap();
+        fs::create_dir_all(target_root.path.join("var/lib/pacman/local")).unwrap();
         fs::write(
             target_root.path.join("boot/efi/limine.conf"),
             "timeout: 3\n",
@@ -662,7 +936,7 @@ mod tests {
         )
         .unwrap();
 
-        let inputs = collect_detection_inputs_from_target_root(&target_root.path);
+        let inputs = collect_detection_inputs_from_target_root(&target_root.path).unwrap();
 
         assert!(inputs.has_esp_limine_conf);
         assert!(inputs.has_systemd_boot_loader);
@@ -760,6 +1034,7 @@ mod tests {
     #[test]
     fn target_evidence_rejects_symlinked_path_components() {
         let target_root = TempTargetRoot::new();
+        fs::create_dir_all(target_root.path.join("var/lib/pacman/local")).unwrap();
         let escaped = std::env::temp_dir().join(format!(
             "catos-boot-repair-escaped-{}",
             TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed)
@@ -772,11 +1047,15 @@ mod tests {
         .unwrap();
         std::os::unix::fs::symlink(&escaped, target_root.path.join("etc")).unwrap();
 
-        let evidence = collect_detection_inputs_from_target_root(&target_root.path);
+        let error = collect_detection_inputs_from_target_root(&target_root.path).unwrap_err();
         fs::remove_dir_all(&escaped).unwrap();
 
-        assert!(evidence.grub_defaults_catos.is_none());
-        assert!(evidence.limine_defaults.is_none());
+        assert!(
+            error.contains("symlink")
+                || error.contains("unsafe")
+                || error.contains("escapes target root"),
+            "{error}"
+        );
     }
 
     #[test]
@@ -945,7 +1224,7 @@ mod tests {
         fs::write(module.join("pkgbase"), "linux-catos\n").unwrap();
         fs::write(module.join("vmlinuz"), b"kernel").unwrap();
 
-        let kernels = collect_target_kernels(&target_root.path);
+        let kernels = collect_target_kernels(&target_root.path).unwrap();
 
         assert_eq!(kernels.len(), 1);
         assert_eq!(kernels[0].version, "6.18.0-catos");
@@ -1061,6 +1340,59 @@ mod tests {
     }
 
     #[test]
+    fn limine_assets_require_every_discovered_kernel() {
+        let target_root = TempTargetRoot::new();
+        fs::create_dir_all(target_root.path.join("boot/efi/machine-id/linux")).unwrap();
+        fs::create_dir_all(target_root.path.join("etc")).unwrap();
+        fs::write(target_root.path.join("etc/machine-id"), "machine-id\n").unwrap();
+        fs::write(
+            target_root.path.join("boot/efi/limine.conf"),
+            "timeout: 5\n",
+        )
+        .unwrap();
+        fs::write(
+            target_root.path.join("boot/efi/machine-id/linux/vmlinuz"),
+            b"kernel",
+        )
+        .unwrap();
+        fs::write(
+            target_root.path.join("boot/efi/machine-id/linux/initramfs"),
+            b"initramfs",
+        )
+        .unwrap();
+        let kernels = vec![
+            Kernel {
+                version: "6.18.0".into(),
+                package: "linux".into(),
+                image: "/usr/lib/modules/6.18.0/vmlinuz".into(),
+                initramfs: "/boot/initramfs-linux.img".into(),
+            },
+            Kernel {
+                version: "6.18.0-lts".into(),
+                package: "linux-lts".into(),
+                image: "/usr/lib/modules/6.18.0-lts/vmlinuz".into(),
+                initramfs: "/boot/initramfs-linux-lts.img".into(),
+            },
+        ];
+
+        assert!(!target_provider_assets_present(
+            ProviderId::Limine,
+            &target_root.path,
+            Some("/boot/efi"),
+            &kernels,
+        ));
+    }
+
+    #[test]
+    fn regular_secureboot_marker_is_authoritative() {
+        let target_root = TempTargetRoot::new();
+        fs::create_dir_all(target_root.path.join("etc/catos")).unwrap();
+        fs::write(target_root.path.join("etc/catos/secureboot"), b"enabled\n").unwrap();
+
+        assert!(target_secureboot_marker_present(&target_root.path).unwrap());
+    }
+
+    #[test]
     fn firmware_boot_configuration_is_not_a_secureboot_marker() {
         let target_root = TempTargetRoot::new();
         fs::create_dir_all(target_root.path.join("etc/catos")).unwrap();
@@ -1070,7 +1402,7 @@ mod tests {
         )
         .unwrap();
 
-        assert!(!target_secureboot_marker_present(&target_root.path));
+        assert!(!target_secureboot_marker_present(&target_root.path).unwrap());
     }
 
     #[test]
@@ -1151,7 +1483,9 @@ mod tests {
         )
         .unwrap();
 
-        let written = read_target_file(&target_root.path, "etc/mkinitcpio.conf").unwrap();
+        let written = crate::io::read_target_file_checked(&target_root.path, "etc/mkinitcpio.conf")
+            .unwrap()
+            .unwrap();
         assert!(written.contains("limine-btrfs-overlayfs"));
     }
 

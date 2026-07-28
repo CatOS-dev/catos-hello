@@ -5,8 +5,7 @@
 
 use crate::boot::diagnose::target::{
     collect_boot_cmdline_facts, collect_detection_inputs_from_target_root,
-    collect_installed_packages_from_target_root, derive_bios_install_disk, detect_partition_table,
-    detect_target_architecture,
+    derive_bios_install_disk, detect_partition_table, detect_target_architecture,
 };
 use crate::boot::execute::repair::run_boot_repair;
 use crate::boot::model::{BootRepairOutcome, BootRepairReport, FirmwareClass, PlatformFacts};
@@ -120,8 +119,19 @@ fn run_boot_repair_mounted(
         }
     };
 
-    let detection = collect_detection_inputs_from_target_root(&target_root);
-    let installed_packages = collect_installed_packages_from_target_root(&target_root);
+    let detection = match collect_detection_inputs_from_target_root(&target_root) {
+        Ok(detection) => detection,
+        Err(error) => {
+            return target_facts_refusal(
+                target,
+                platform,
+                "BOOT_TARGET_FACTS_UNREADABLE",
+                error,
+                session.cleanup(),
+            )
+        }
+    };
+    let installed_packages = detection.installed_packages.clone();
     let bios_install_path = derive_bios_install_disk(&target, session.devices());
 
     let mut report = run_boot_repair(
@@ -142,6 +152,35 @@ fn run_boot_repair_mounted(
     );
     attach_session_cleanup(&mut report, session.cleanup());
     report
+}
+
+fn target_facts_refusal(
+    target: crate::mount::model::MountTargetIdentity,
+    platform: PlatformFacts,
+    code: &str,
+    message: String,
+    cleanup: crate::snapshot::model::CleanupSummary,
+) -> BootRepairReport {
+    let all_clean = cleanup.all_clean;
+    BootRepairReport {
+        target: Some(target),
+        platform: Some(platform),
+        cleanup: MountRepairCleanup {
+            unmounted: cleanup.unmounted,
+            residual: cleanup.residual,
+            all_clean,
+        },
+        final_outcome: if all_clean {
+            BootRepairOutcome::ManualInterventionRequired
+        } else {
+            BootRepairOutcome::CleanupIncomplete
+        },
+        requires_human_action: true,
+        fully_complete: false,
+        evidence: vec![Evidence::new(code, "repair::boot::target-facts", message)],
+        actions: Vec::new(),
+        ..BootRepairReport::default()
+    }
 }
 
 fn cmdline_facts_refusal(

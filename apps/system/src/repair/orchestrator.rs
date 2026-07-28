@@ -47,6 +47,7 @@ use crate::fs::safety::{
     SafetyDecision, SafetyVerdict,
 };
 use crate::fs::verify::{verify, VerificationOutcome};
+use crate::mount::model::CleanupReport;
 use crate::mount::plan::session::probe_unmounted_candidates;
 use crate::target::diagnose::block::discover_devices;
 use crate::target::diagnose::filesystem::RealFilesystem;
@@ -88,8 +89,29 @@ pub fn run_fs_repair_with<R: FsCommandRunner + ?Sized>(
     let effective_selection = if selection.explicit_device.is_some() {
         selection
     } else {
-        let probe = probe_unmounted_candidates(&devices, &[]);
-        warnings.extend(probe.warnings);
+        let mut probe = probe_unmounted_candidates(&devices, &[]);
+        warnings.append(&mut probe.warnings);
+        let probe_cleanup = probe_cleanup_for_fs(std::mem::take(&mut probe.cleanup));
+        if !probe_cleanup.all_clean {
+            evidence.push(Evidence::new(
+                "AUTO_DISCOVERY_CLEANUP_INCOMPLETE",
+                "repair::orchestrator",
+                "automatic root discovery left temporary probe resources",
+            ));
+            return FsRepairReport {
+                target_device: None,
+                filesystem_type: None,
+                was_mounted_before_session: false,
+                selected_tool: None,
+                attempts: Vec::new(),
+                verification_mount: None,
+                cleanup: probe_cleanup,
+                final_outcome: FsRepairOutcome::Unknown,
+                requires_human_action: true,
+                evidence,
+                warnings,
+            };
+        }
         match auto_select_catos_root(&devices, &probe.roots) {
             Ok(device) => RepairTargetSelection {
                 explicit_device: Some(device),
@@ -203,6 +225,36 @@ pub fn run_fs_repair_with<R: FsCommandRunner + ?Sized>(
             report
         }
     }
+}
+
+fn probe_cleanup_for_fs(cleanups: Vec<CleanupReport>) -> RepairCleanup {
+    let mut summary = RepairCleanup {
+        all_clean: true,
+        ..RepairCleanup::default()
+    };
+    for cleanup in cleanups {
+        summary.unmounted.extend(
+            cleanup
+                .unmounted
+                .into_iter()
+                .map(|resource| resource.target.display().to_string()),
+        );
+        summary
+            .residual
+            .extend(cleanup.residual.into_iter().map(|residual| {
+                format!(
+                    "{}: {}",
+                    residual.resource.target.display(),
+                    residual.reason
+                )
+            }));
+        if let Some(error) = cleanup.directory_cleanup_error {
+            summary.residual.push(error);
+        }
+        summary.all_clean &= cleanup.all_clean;
+    }
+    summary.all_clean &= summary.residual.is_empty();
+    summary
 }
 
 fn auto_select_catos_root(
@@ -716,4 +768,21 @@ fn same_device(a: &Path, b: &Path) -> bool {
         return false;
     };
     am.rdev() == bm.rdev()
+}
+
+#[cfg(test)]
+mod probe_cleanup_tests {
+    use super::*;
+
+    #[test]
+    fn automatic_probe_cleanup_residual_is_preserved() {
+        let cleanup = probe_cleanup_for_fs(vec![CleanupReport {
+            all_clean: false,
+            directory_cleanup_error: Some("probe session directory remains".into()),
+            ..CleanupReport::default()
+        }]);
+
+        assert!(!cleanup.all_clean);
+        assert_eq!(cleanup.residual, vec!["probe session directory remains"]);
+    }
 }

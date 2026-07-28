@@ -1,7 +1,7 @@
 //! Target-side inspection and post-repair verification helpers.
 
 use crate::diagnose::provider::DetectionInputs;
-use crate::io::{has_target_path, read_target_file};
+use crate::io::{has_target_path_checked, read_target_file_checked};
 use catos_mount::model::MountTargetIdentity;
 use catos_target::diagnose::candidate::device_matches_fstab_source;
 use catos_target::fstab::{parse_all_with_diagnostics, FstabEntryKind, FstabSource};
@@ -633,82 +633,136 @@ pub fn derive_efi_device(
     Some((disk_path, partition))
 }
 
-pub fn collect_detection_inputs_from_target_root(root: &Path) -> DetectionInputs {
-    DetectionInputs {
-        grub_defaults_catos: read_target_file(root, "etc/default/grub.d/00-catos.cfg"),
-        limine_defaults: read_target_file(root, "etc/default/limine"),
-        kernel_install_catos: read_target_file(
+pub fn collect_detection_inputs_from_target_root(root: &Path) -> Result<DetectionInputs, String> {
+    let installed_packages = collect_installed_packages_from_target_root(root)?;
+    Ok(DetectionInputs {
+        grub_defaults_catos: read_target_file_checked(root, "etc/default/grub.d/00-catos.cfg")?,
+        limine_defaults: read_target_file_checked(root, "etc/default/limine")?,
+        kernel_install_catos: read_target_file_checked(
             root,
             "etc/kernel/install.conf.d/20-catos-bootloadu.conf",
-        ),
-        firmware_boot_conf: read_target_file(root, "etc/catos/firmware-boot.conf"),
-        kernel_cmdline: read_target_file(root, "etc/kernel/cmdline"),
-        has_boot_grub: has_target_path(root, "boot/grub"),
-        has_esp_limine_conf: target_regular_file_in_any(
+        )?,
+        firmware_boot_conf: read_target_file_checked(root, "etc/catos/firmware-boot.conf")?,
+        kernel_cmdline: read_target_file_checked(root, "etc/kernel/cmdline")?,
+        has_boot_grub: has_target_path_checked(root, "boot/grub")?,
+        has_esp_limine_conf: target_regular_file_in_any_checked(
             root,
             &[
                 "boot/limine.conf",
                 "boot/efi/limine.conf",
                 "efi/limine.conf",
             ],
-        ),
-        has_systemd_boot_loader: target_regular_file_in_any(
+        )?,
+        has_systemd_boot_loader: target_regular_file_in_any_checked(
             root,
             &[
                 "boot/loader/loader.conf",
                 "boot/efi/loader/loader.conf",
                 "efi/loader/loader.conf",
             ],
-        ),
-        has_catos_uki_deployed: target_uki_deployed(root),
-        has_efistub_deployed: target_efistub_deployed(root),
-        installed_packages: Vec::new(),
+        )?,
+        has_catos_uki_deployed: target_uki_deployed_checked(root)?,
+        has_efistub_deployed: target_efistub_deployed_checked(root)?,
+        installed_packages,
+    })
+}
+
+pub fn collect_installed_packages_from_target_root(root: &Path) -> Result<Vec<String>, String> {
+    use catos_target::execute::confined::{rooted_path_kind, RootedPathKind};
+
+    let entries =
+        catos_target::execute::confined::list_rooted_directory_names(root, "/var/lib/pacman/local")
+            .map_err(|error| format!("cannot enumerate target pacman database: {error}"))?;
+    let mut packages = Vec::new();
+    for entry in entries {
+        let entry = entry
+            .into_string()
+            .map_err(|_| "target pacman database contains a non-UTF-8 entry".to_string())?;
+        let package_dir = format!("/var/lib/pacman/local/{entry}");
+        match rooted_path_kind(root, &package_dir) {
+            Ok(Some(RootedPathKind::Directory)) => {}
+            Ok(Some(RootedPathKind::Symlink)) => {
+                return Err(format!(
+                    "target pacman database entry {package_dir} is a symlink"
+                ))
+            }
+            Ok(Some(_)) | Ok(None) | Err(catos_target::FsError::NotFound) => continue,
+            Err(error) => {
+                return Err(format!(
+                    "cannot inspect target pacman database entry {package_dir}: {error}"
+                ))
+            }
+        }
+        let desc_path = format!("{package_dir}/desc");
+        let contents = catos_target::execute::confined::read_rooted_file(root, &desc_path)
+            .map_err(|error| format!("cannot read target package record {desc_path}: {error}"))?;
+        let contents = String::from_utf8(contents)
+            .map_err(|error| format!("target package record {desc_path} is not UTF-8: {error}"))?;
+        let package = pacman_package_name(&contents)
+            .ok_or_else(|| format!("target package record {desc_path} has no %NAME% field"))?;
+        packages.push(package);
     }
+    Ok(packages)
 }
 
-pub fn collect_installed_packages_from_target_root(root: &Path) -> Vec<String> {
-    catos_target::execute::confined::list_rooted_directory_names(root, "/var/lib/pacman/local")
-        .unwrap_or_default()
-        .into_iter()
-        .filter_map(|entry| entry.into_string().ok())
-        .filter_map(|entry| {
-            catos_target::execute::confined::read_rooted_file(
-                root,
-                &format!("/var/lib/pacman/local/{entry}/desc"),
-            )
-            .ok()
-        })
-        .filter_map(|contents| String::from_utf8(contents).ok())
-        .filter_map(|contents| pacman_package_name(&contents))
-        .collect()
-}
+pub fn collect_target_kernels(root: &Path) -> Result<Vec<crate::plan::initramfs::Kernel>, String> {
+    use catos_target::execute::confined::{rooted_path_kind, RootedPathKind};
 
-pub fn collect_target_kernels(root: &Path) -> Vec<crate::plan::initramfs::Kernel> {
     let entries =
         catos_target::execute::confined::list_rooted_directory_names(root, "/usr/lib/modules")
-            .unwrap_or_default()
-            .into_iter()
-            .filter_map(|entry| entry.into_string().ok())
-            .map(|version| {
-                let base = format!("/usr/lib/modules/{version}");
-                let pkgbase = catos_target::execute::confined::read_rooted_file(
-                    root,
-                    &format!("{base}/pkgbase"),
-                )
-                .ok()
-                .and_then(|bytes| String::from_utf8(bytes).ok())
-                .unwrap_or_default();
-                let has_vmlinuz = catos_target::execute::confined::rooted_regular_file_size(
-                    root,
-                    &format!("{base}/vmlinuz"),
-                )
-                .ok()
-                .flatten()
-                .is_some_and(|size| size > 0);
-                (version, !pkgbase.is_empty(), has_vmlinuz, pkgbase)
-            })
-            .collect::<Vec<_>>();
-    crate::plan::initramfs::discover_kernels(&entries)
+            .map_err(|error| format!("cannot enumerate target kernel modules: {error}"))?;
+    let mut discovered = Vec::new();
+    for entry in entries {
+        let version = entry
+            .into_string()
+            .map_err(|_| "target modules tree contains a non-UTF-8 entry".to_string())?;
+        let base = format!("/usr/lib/modules/{version}");
+        match rooted_path_kind(root, &base) {
+            Ok(Some(RootedPathKind::Directory)) => {}
+            Ok(Some(
+                RootedPathKind::Symlink | RootedPathKind::RegularFile | RootedPathKind::Other,
+            ))
+            | Ok(None)
+            | Err(catos_target::FsError::NotFound) => continue,
+            Err(error) => {
+                return Err(format!(
+                    "cannot inspect target kernel directory {base}: {error}"
+                ))
+            }
+        }
+        let pkgbase = match catos_target::execute::confined::read_rooted_file(
+            root,
+            &format!("{base}/pkgbase"),
+        ) {
+            Ok(bytes) => String::from_utf8(bytes)
+                .map_err(|error| format!("target kernel {version} pkgbase is not UTF-8: {error}"))?
+                .trim()
+                .to_string(),
+            Err(catos_target::FsError::NotFound) => continue,
+            Err(error) => {
+                return Err(format!(
+                    "cannot read target kernel {version} pkgbase: {error}"
+                ))
+            }
+        };
+        if pkgbase.is_empty() {
+            continue;
+        }
+        let has_vmlinuz = match catos_target::execute::confined::rooted_regular_file_size(
+            root,
+            &format!("{base}/vmlinuz"),
+        ) {
+            Ok(Some(size)) => size > 0,
+            Ok(None) | Err(catos_target::FsError::NotFound) => false,
+            Err(error) => {
+                return Err(format!(
+                    "cannot inspect target kernel {version} image: {error}"
+                ))
+            }
+        };
+        discovered.push((version, true, has_vmlinuz, pkgbase));
+    }
+    Ok(crate::plan::initramfs::discover_kernels(&discovered))
 }
 
 fn pacman_package_name(desc: &str) -> Option<String> {
@@ -725,79 +779,136 @@ fn pacman_package_name(desc: &str) -> Option<String> {
 }
 
 pub fn target_regular_file_present(root: &Path, relative: &str) -> bool {
-    catos_target::execute::confined::rooted_regular_file_size(root, &format!("/{relative}"))
-        .ok()
-        .flatten()
-        .is_some_and(|size| size > 0)
+    target_regular_file_present_checked(root, relative).unwrap_or(false)
+}
+
+fn target_regular_file_present_checked(root: &Path, relative: &str) -> Result<bool, String> {
+    match catos_target::execute::confined::rooted_regular_file_size(root, &format!("/{relative}")) {
+        Ok(Some(size)) => Ok(size > 0),
+        Ok(None) | Err(catos_target::FsError::NotFound) => Ok(false),
+        Err(error) => Err(format!("cannot inspect target file /{relative}: {error}")),
+    }
 }
 
 pub fn target_regular_file_in_any(root: &Path, candidates: &[&str]) -> bool {
-    candidates
-        .iter()
-        .any(|candidate| target_regular_file_present(root, candidate))
+    target_regular_file_in_any_checked(root, candidates).unwrap_or(false)
+}
+
+fn target_regular_file_in_any_checked(root: &Path, candidates: &[&str]) -> Result<bool, String> {
+    for candidate in candidates {
+        if target_regular_file_present_checked(root, candidate)? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 pub fn target_uki_deployed(root: &Path) -> bool {
-    ["/boot/EFI/Linux", "/boot/efi/EFI/Linux", "/efi/EFI/Linux"]
-        .iter()
-        .any(|directory| {
-            catos_target::execute::confined::list_rooted_directory_names(root, directory)
-                .unwrap_or_default()
-                .iter()
-                .any(|entry| {
-                    entry
-                        .to_str()
-                        .is_some_and(|entry| entry.starts_with("catos-") && entry.ends_with(".efi"))
-                })
-        })
+    target_uki_deployed_checked(root).unwrap_or(false)
+}
+
+fn target_uki_deployed_checked(root: &Path) -> Result<bool, String> {
+    for directory in ["/boot/EFI/Linux", "/boot/efi/EFI/Linux", "/efi/EFI/Linux"] {
+        let entries = match list_optional_target_directory(root, directory)? {
+            Some(entries) => entries,
+            None => continue,
+        };
+        for entry in entries {
+            let entry = entry
+                .to_str()
+                .ok_or_else(|| format!("target directory {directory} contains non-UTF-8 name"))?;
+            if entry.starts_with("catos-")
+                && entry.ends_with(".efi")
+                && target_regular_file_present_checked(
+                    root,
+                    format!("{directory}/{entry}").trim_start_matches('/'),
+                )?
+            {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
 }
 
 pub fn target_efistub_deployed(root: &Path) -> bool {
-    ["/boot/EFI/CatOS", "/boot/efi/EFI/CatOS", "/efi/EFI/CatOS"]
-        .iter()
-        .any(|directory| {
-            catos_target::execute::confined::list_rooted_directory_names(root, directory)
-                .unwrap_or_default()
-                .iter()
-                .filter_map(|entry| entry.to_str().map(str::to_string))
-                .any(|package| {
-                    target_regular_file_present(
-                        root,
-                        &format!(
-                            "{}/{package}/vmlinuz.efi",
-                            directory.trim_start_matches('/')
-                        ),
-                    ) && target_regular_file_present(
-                        root,
-                        &format!(
-                            "{}/{package}/initramfs.img",
-                            directory.trim_start_matches('/')
-                        ),
-                    )
-                })
-        })
-}
-pub fn target_secureboot_marker_present(target_root: &Path) -> bool {
-    has_target_path(target_root, "etc/catos/secureboot")
-        || read_target_file(target_root, "etc/catos/secureboot.conf").is_some()
-        || has_target_path(target_root, "var/lib/catos/secureboot")
+    target_efistub_deployed_checked(root).unwrap_or(false)
 }
 
-pub fn target_signed_catos_efi_present(target_root: &Path, esp_mount_point: Option<&str>) -> bool {
+fn target_efistub_deployed_checked(root: &Path) -> Result<bool, String> {
+    for directory in ["/boot/EFI/CatOS", "/boot/efi/EFI/CatOS", "/efi/EFI/CatOS"] {
+        let entries = match list_optional_target_directory(root, directory)? {
+            Some(entries) => entries,
+            None => continue,
+        };
+        for entry in entries {
+            let package = entry
+                .to_str()
+                .ok_or_else(|| format!("target directory {directory} contains non-UTF-8 name"))?;
+            let base = directory.trim_start_matches('/');
+            if target_regular_file_present_checked(root, &format!("{base}/{package}/vmlinuz.efi"))?
+                && target_regular_file_present_checked(
+                    root,
+                    &format!("{base}/{package}/initramfs.img"),
+                )?
+            {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
+}
+
+fn list_optional_target_directory(
+    root: &Path,
+    directory: &str,
+) -> Result<Option<Vec<std::ffi::OsString>>, String> {
+    match catos_target::execute::confined::list_rooted_directory_names(root, directory) {
+        Ok(entries) => Ok(Some(entries)),
+        Err(catos_target::FsError::NotFound) => Ok(None),
+        Err(error) => Err(format!(
+            "cannot enumerate target directory {directory}: {error}"
+        )),
+    }
+}
+
+pub fn target_secureboot_marker_present(target_root: &Path) -> Result<bool, String> {
+    Ok(
+        has_target_path_checked(target_root, "etc/catos/secureboot")?
+            || has_target_path_checked(target_root, "etc/catos/secureboot.conf")?
+            || has_target_path_checked(target_root, "var/lib/catos/secureboot")?,
+    )
+}
+
+pub fn target_signed_catos_efi_present(
+    target_root: &Path,
+    esp_mount_point: Option<&str>,
+) -> Result<bool, String> {
     let Some(esp_mount_point) = esp_mount_point else {
-        return false;
+        return Ok(false);
     };
     let directory = format!("/{}/EFI/CatOS", esp_mount_point.trim_start_matches('/'));
-    let entries =
-        catos_target::execute::confined::list_rooted_directory_names(target_root, &directory)
-            .unwrap_or_default()
-            .into_iter()
-            .filter_map(|entry| entry.into_string().ok())
-            .collect::<Vec<_>>();
-    entries.iter().any(|entry| entry.ends_with(".efi"))
-        && entries
-            .iter()
-            .any(|entry| entry.ends_with(".sig") || entry.ends_with(".p7b"))
+    let entries = match list_optional_target_directory(target_root, &directory)? {
+        Some(entries) => entries,
+        None => return Ok(false),
+    };
+    let mut has_efi = false;
+    let mut has_signature = false;
+    for entry in entries {
+        let entry = entry
+            .to_str()
+            .ok_or_else(|| format!("target directory {directory} contains non-UTF-8 name"))?;
+        let relative = format!("{}/{}", directory.trim_start_matches('/'), entry);
+        if entry.ends_with(".efi") && target_regular_file_present_checked(target_root, &relative)? {
+            has_efi = true;
+        }
+        if (entry.ends_with(".sig") || entry.ends_with(".p7b"))
+            && target_regular_file_present_checked(target_root, &relative)?
+        {
+            has_signature = true;
+        }
+    }
+    Ok(has_efi && has_signature)
 }
 
 #[cfg(test)]
