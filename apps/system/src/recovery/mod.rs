@@ -60,12 +60,16 @@ pub enum RecoveryOutcome {
         final_state: TransactionState,
         cleanup: CleanupSummary,
     },
+    ArgumentError(Box<SnapshotError>),
     Error(Box<SnapshotError>),
 }
 
 /// Run a recovery subcommand. Called by `entry.rs` after the CLI has
 /// routed `recovery <SUB>` here.
 pub fn run_recovery(args: RecoveryArgs) -> RecoveryOutcome {
+    if let Err(error) = validate_cli_contract(&args) {
+        return RecoveryOutcome::ArgumentError(Box::new(error));
+    }
     match args.subcommand {
         RecoverySubcommand::List => match read::run_list(&args) {
             Ok(report) => RecoveryOutcome::List(report),
@@ -115,24 +119,10 @@ pub fn run_recovery(args: RecoveryArgs) -> RecoveryOutcome {
 /// through the normal renderer so `--json` callers receive the established
 /// structured error instead of a premature permission failure.
 pub(crate) fn write_cli_contract_is_valid(args: &RecoveryArgs) -> bool {
-    match args.subcommand {
-        RecoverySubcommand::Apply => {
-            args.plan_id.is_some()
-                && args.confirm.is_some()
-                && args.plan_file.is_some()
-                && args.require_target_selection().is_ok()
-        }
-        RecoverySubcommand::Resume => {
-            args.require_target_selection().is_ok()
-                && require_transaction_id(args.transaction.as_deref(), "resume").is_ok()
-        }
-        RecoverySubcommand::Revert => {
-            args.require_target_selection().is_ok()
-                && require_transaction_id(args.transaction.as_deref(), "revert").is_ok()
-                && args.confirm.is_some()
-        }
-        _ => false,
-    }
+    matches!(
+        args.subcommand,
+        RecoverySubcommand::Apply | RecoverySubcommand::Resume | RecoverySubcommand::Revert
+    ) && validate_cli_contract(args).is_ok()
 }
 
 // ---------------------------------------------------------------------------
@@ -168,6 +158,7 @@ fn exit_code_for_recovery(
 /// should set a non-success exit code based on its outcome.
 pub fn exit_code_for(outcome: &RecoveryOutcome) -> i32 {
     match outcome {
+        RecoveryOutcome::ArgumentError(_) => exit_code::ARG_ERROR,
         RecoveryOutcome::Error(error) => {
             if matches!(error.kind, SnapshotErrorKind::CurrentRootRefused) {
                 exit_code::PERMISSION_DENIED
@@ -207,6 +198,68 @@ pub fn exit_code_for(outcome: &RecoveryOutcome) -> i32 {
 // ---------------------------------------------------------------------------
 // Validation helpers
 // ---------------------------------------------------------------------------
+
+fn validate_cli_contract(args: &RecoveryArgs) -> Result<(), SnapshotError> {
+    match args.subcommand {
+        RecoverySubcommand::List => {
+            args.require_target_selection()?;
+        }
+        RecoverySubcommand::Inspect | RecoverySubcommand::Plan => {
+            args.require_target_selection()?;
+            if args.snapshot_subvolume.is_none() {
+                let command = if args.subcommand == RecoverySubcommand::Inspect {
+                    "inspect"
+                } else {
+                    "plan"
+                };
+                return Err(SnapshotError::new(
+                    SnapshotErrorKind::TargetChanged,
+                    format!("--snapshot-subvolume is required for {command}"),
+                ));
+            }
+        }
+        RecoverySubcommand::Apply => {
+            if args.plan_id.is_none() {
+                return Err(SnapshotError::new(
+                    SnapshotErrorKind::ConfirmationTokenMismatch,
+                    "apply requires --plan-id",
+                ));
+            }
+            if args.confirm.is_none() {
+                return Err(SnapshotError::new(
+                    SnapshotErrorKind::ConfirmationTokenMismatch,
+                    "apply requires --confirm <token>",
+                ));
+            }
+            if args.plan_file.is_none() {
+                return Err(SnapshotError::new(
+                    SnapshotErrorKind::TransactionNotFound,
+                    "apply requires --plan-file <path>",
+                ));
+            }
+            args.require_target_selection()?;
+        }
+        RecoverySubcommand::Status => {
+            require_transaction_id(args.transaction.as_deref(), "status")?;
+            args.require_target_selection()?;
+        }
+        RecoverySubcommand::Resume => {
+            args.require_target_selection()?;
+            require_transaction_id(args.transaction.as_deref(), "resume")?;
+        }
+        RecoverySubcommand::Revert => {
+            args.require_target_selection()?;
+            require_transaction_id(args.transaction.as_deref(), "revert")?;
+            if args.confirm.is_none() {
+                return Err(SnapshotError::new(
+                    SnapshotErrorKind::ConfirmationTokenMismatch,
+                    "revert requires --confirm <token>",
+                ));
+            }
+        }
+    }
+    Ok(())
+}
 
 fn require_transaction_id<'a>(
     transaction_id: Option<&'a str>,
@@ -323,6 +376,27 @@ struct TargetSelectionResolved {
 mod tests {
     use super::*;
     use crate::snapshot::model::TransactionState;
+
+    #[test]
+    fn static_cli_contract_errors_have_argument_exit_status() {
+        let outcome = run_recovery(RecoveryArgs {
+            subcommand: RecoverySubcommand::List,
+            ..Default::default()
+        });
+        assert!(matches!(outcome, RecoveryOutcome::ArgumentError(_)));
+        assert_eq!(exit_code_for(&outcome), exit_code::ARG_ERROR);
+
+        let outcome = run_recovery(RecoveryArgs {
+            subcommand: RecoverySubcommand::Status,
+            target: crate::cli::TargetSelection {
+                root_device: Some("/dev/vda2".into()),
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+        assert!(matches!(outcome, RecoveryOutcome::ArgumentError(_)));
+        assert_eq!(exit_code_for(&outcome), exit_code::ARG_ERROR);
+    }
 
     #[test]
     fn reconciled_reverted_state_still_offers_idempotent_revert_confirmation() {

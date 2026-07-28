@@ -639,6 +639,24 @@ fn run_diagnosis_action_audit_records_per_action_outcome() {
 // ===========================================================================
 
 #[test]
+fn unauthorised_diagnosis_with_problems_is_not_reported_clean() {
+    let inputs = MountRepairInputs {
+        fstab_text: "UUID=wrong  /  btrfs  defaults,subvol=/@wrong  0 0\n".into(),
+        target: target("correct"),
+        catos_confirmation: CatosConfirmation::Confirmed,
+        subvol_facts: SubvolFacts {
+            observations: vec![subvol_present("/@")],
+        },
+        mount_point_observations: HashMap::new(),
+    };
+    let report = run_mount_repair_diagnosis(inputs, false);
+    assert_eq!(report.final_outcome, MountRepairOutcome::PartiallyRepaired);
+    assert!(!report.fully_complete);
+    assert!(report.requires_human_action);
+    assert!(report.actions.is_empty());
+}
+
+#[test]
 fn diagnose_matches_run_mount_repair_diagnosis_problems() {
     let fstab = "UUID=wrong  /  btrfs  defaults,subvol=/@wrong  0 0\n";
     let inputs = MountRepairInputs {

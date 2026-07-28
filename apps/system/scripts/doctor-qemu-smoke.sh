@@ -612,6 +612,8 @@ if [ "$SCENARIO" = ambiguous ]; then
     echo "__NONTTY_RC__=$non_tty_rc"
     echo "__NONTTY_END__"
     run_tty '1\n'
+elif [ "$SCENARIO" = cancel ]; then
+    run_tty 'n\n'
 else
     run_tty 'y\n'
 fi
@@ -761,6 +763,15 @@ assert_not_contains "$LAST_LOG" "target=offline" running_root
 assert_not_contains "$LAST_LOG" "TARGET_NOT_FOUND" running_root
 assert_not_contains "$LAST_LOG" "OFFLINE_FIRMWARE_STATE_UNAVAILABLE" running_root
 assert_not_contains "$LAST_LOG" "__RUNNING_ROOT_PREPARE_FAILED__" running_root
+
+echo "=== scenario: decline-target ==="
+run_qemu cancel "$ROOT_GRUB" "$ESP_GRUB"
+assert_contains "$LAST_LOG" "Use this target? [y/N]" cancel
+assert_contains "$LAST_LOG" "__DOCTOR_RC__=0" cancel
+assert_contains "$LAST_LOG" "__DOCTOR_NO_RESIDUAL_MOUNTS__" cancel
+assert_contains "$LAST_LOG" "__DOCTOR_NO_RESIDUAL_SESSION_DIRS__" cancel
+assert_not_contains "$LAST_LOG" "Item          | Status" cancel
+assert_not_contains "$LAST_LOG" "TARGET_NOT_FOUND" cancel
 
 echo "=== scenario: broken-fstab ==="
 run_qemu broken_fstab "$ROOT_BROKEN" "$ESP_GRUB"

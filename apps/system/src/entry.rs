@@ -1076,7 +1076,10 @@ fn invocation_dispatch(context: CommandContext, argv: &[String]) -> i32 {
 /// Target health is carried by the report; process failure is reserved for a
 /// diagnosis that could not start or could not clean up its own resources.
 fn run_doctor(context: CommandContext) -> i32 {
-    let report = crate::doctor::run_doctor();
+    let report = match crate::doctor::run_doctor() {
+        crate::doctor::DoctorRunOutcome::Completed(report) => report,
+        crate::doctor::DoctorRunOutcome::Declined => return exit_code::SUCCESS,
+    };
     let exit = crate::output::doctor_exit_code_for(&report);
     let mut rendered = Vec::new();
     if let Err(error) = crate::output::render_doctor_human_with_columns(
@@ -1470,14 +1473,15 @@ fn run_repair_mount(context: CommandContext, argv: &[String]) -> i32 {
 fn mount_outcome_exit_code(outcome: crate::mount::model::MountRepairOutcome) -> i32 {
     use crate::mount::model::MountRepairOutcome as O;
     match outcome {
-        O::Clean | O::Repaired | O::PartiallyRepaired => exit_code::SUCCESS,
+        O::Clean | O::Repaired => exit_code::SUCCESS,
         O::AmbiguousTarget
         | O::NotCatos
         | O::UnsafePath
         | O::ConflictingFstab
         | O::SubvolumeConflict
         | O::UnsupportedLayout => exit_code::ARG_ERROR,
-        O::DeviceChanged
+        O::PartiallyRepaired
+        | O::DeviceChanged
         | O::FstabChanged
         | O::DataConflict
         | O::VerificationFailed
@@ -2166,6 +2170,14 @@ mod tests {
                 "--root-subvolume",
                 "/@",
             ]
+        );
+    }
+
+    #[test]
+    fn partially_repaired_mount_is_not_a_success_exit() {
+        assert_ne!(
+            mount_outcome_exit_code(crate::mount::model::MountRepairOutcome::PartiallyRepaired),
+            crate::error::exit_code::SUCCESS
         );
     }
 

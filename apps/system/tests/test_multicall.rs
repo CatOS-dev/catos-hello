@@ -122,10 +122,10 @@ fn core_probe_results_are_identical_across_entry_points() {
     assert_eq!(system_value["schemaVersion"].as_u64(), Some(2));
     assert_eq!(system_value["invocation"].as_str(), Some("catos-system"));
 
-    // Both forms reach the recovery engine. Without --root-device they
-    // fail with the same structured `target_changed` error and the same
-    // exit code (PROBE_FAILED = 5). This proves the new entry point is a
-    // thin re-mapping over the existing parser, not a parallel CLI.
+    // Both forms reach the recovery layer. Without --root-device they
+    // fail with the same structured `target_changed` argument error and
+    // exit ARG_ERROR (2). This proves the new entry point is a thin
+    // re-mapping over the existing parser, not a parallel CLI.
     let canonical_link = tmp.path.join("catos-system");
     symlink(&bin, &canonical_link).unwrap();
     let recovery_link = tmp.path.join("catos-recovery");
@@ -147,8 +147,8 @@ fn core_probe_results_are_identical_across_entry_points() {
     );
     assert_eq!(
         canonical_out.status.code(),
-        Some(5),
-        "recovery inspect without --root-device must reach the engine and exit PROBE_FAILED"
+        Some(2),
+        "recovery inspect without --root-device must be a structured argument error"
     );
 
     let mut canonical: serde_json::Value =
@@ -304,33 +304,24 @@ fn run_via(link: &std::path::Path, args: &[&str]) -> (bool, i32, String, String)
 // ---------------------------------------------------------------------------
 
 #[test]
-fn recovery_list_without_root_device_reaches_recovery_engine() {
-    // Real dispatch proof: `catos-recovery list` (no --root-device) MUST
-    // reach the recovery list orchestrator, which returns the structured
-    // `target_changed`/`requires --root-device` error. That path exits
-    // PROBE_FAILED (5), not ARG_ERROR (2). If the routing fell through
-    // to the generic parser, `list` would be an unknown subcommand and
-    // the exit code would be 2.
+fn recovery_list_without_root_device_reaches_recovery_layer() {
+    // Real dispatch proof: the public `list` token is accepted and rendered
+    // through the recovery JSON envelope. The missing required target is a
+    // static usage error, so it exits ARG_ERROR rather than PROBE_FAILED.
     let bin = bin_path();
     let tmp = TempDir::new("catos-recovery-list-dispatch").unwrap();
     let link = link_to(&bin, &tmp, "catos-recovery");
     let (ok, code, stdout, stderr) = run_via(&link, &["list", "--json"]);
     assert!(!ok, "stdout={stdout}, stderr={stderr}");
-    assert_ne!(
-        code, 2,
-        "list must not be rejected as an unknown subcommand; stderr={stderr}"
-    );
-    assert_eq!(
-        code, 5,
-        "expected PROBE_FAILED from recovery list orchestrator"
-    );
-    // The error must come from the recovery layer, not the generic CLI
-    // parser: stdout is pure JSON, kind=error, payload.kind is a recovery
-    // error kind (target_changed).
+    assert_eq!(code, 2, "stderr={stderr}");
+    assert!(stderr.is_empty(), "stderr={stderr}");
     let value: serde_json::Value =
         serde_json::from_str(stdout.trim()).expect("recovery list failure must be JSON");
     assert_eq!(value["kind"], "error");
     assert_eq!(value["payload"]["kind"], "target_changed");
+    assert!(value["payload"]["message"]
+        .as_str()
+        .is_some_and(|message| message.contains("--root-device")));
 }
 
 #[test]
@@ -354,31 +345,22 @@ fn recovery_doubled_recovery_subcommand_is_rejected() {
 
 #[test]
 fn recovery_subcommands_route_directly() {
-    // Every public recovery subcommand MUST route via the new direct
-    // surface (no `recovery` prefix). Without --root-device each one
-    // exits PROBE_FAILED (5), proving dispatch reached the recovery
-    // layer rather than the generic parser (which would exit 2).
+    // Every public recovery subcommand MUST route via the direct surface.
+    // Missing required fields are static argument errors, but the payload
+    // must still be the recovery envelope rather than an unknown-command
+    // message from the generic parser.
     let bin = bin_path();
     let tmp = TempDir::new("catos-recovery-direct").unwrap();
     let link = link_to(&bin, &tmp, "catos-recovery");
-    for sub in ["list", "inspect", "plan"] {
-        let (ok, code, _stdout, stderr) = run_via(&link, &[sub, "--json"]);
+    for sub in ["list", "inspect", "plan", "apply", "status", "resume", "revert"] {
+        let (ok, code, stdout, stderr) = run_via(&link, &[sub, "--json"]);
         assert!(!ok, "catos-recovery {sub} unexpectedly succeeded");
-        assert_eq!(
-            code, 5,
-            "catos-recovery {sub} should reach recovery engine (exit 5); stderr={stderr}"
-        );
-    }
-    // Subcommands that require a transaction id also reach the recovery
-    // layer but fail one step earlier (transaction id validation). They
-    // still must NOT exit 2 (unknown subcommand).
-    for sub in ["status", "resume", "revert"] {
-        let (ok, code, _stdout, stderr) = run_via(&link, &[sub, "--json"]);
-        assert!(!ok, "catos-recovery {sub} unexpectedly succeeded");
-        assert_ne!(
-            code, 2,
-            "catos-recovery {sub} must route to recovery engine, not generic parser; stderr={stderr}"
-        );
+        assert_eq!(code, 2, "catos-recovery {sub}: stderr={stderr}");
+        assert!(stderr.is_empty(), "catos-recovery {sub}: stderr={stderr}");
+        let value: serde_json::Value = serde_json::from_str(stdout.trim())
+            .unwrap_or_else(|error| panic!("catos-recovery {sub}: {error}; stdout={stdout}"));
+        assert_eq!(value["kind"], "error", "catos-recovery {sub}");
+        assert!(value["payload"]["kind"].is_string(), "catos-recovery {sub}");
     }
 }
 
@@ -746,6 +728,45 @@ fn doctor_remains_argumentless_after_routing_changes() {
         assert!(!ok, "catos-doctor {forbidden} unexpectedly succeeded");
         assert_eq!(code, 2);
     }
+}
+
+#[test]
+fn recovery_static_usage_errors_exit_two_and_preserve_json() {
+    let directory = TempDir::new("recovery-static-usage").unwrap();
+    let recovery = directory.path.join("catos-recovery");
+    symlink(bin_path(), &recovery).unwrap();
+
+    for args in [
+        vec!["list"],
+        vec!["inspect", "--root-device", "/dev/does-not-exist"],
+        vec!["status", "--root-device", "/dev/does-not-exist"],
+        vec![
+            "list",
+            "--root-device",
+            "/dev/does-not-exist",
+            "--esp-device",
+            "/dev/vda1",
+        ],
+    ] {
+        let output = Command::new(&recovery).args(&args).output().unwrap();
+        assert_eq!(
+            output.status.code(),
+            Some(2),
+            "args={args:?} stdout={} stderr={}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    let output = Command::new(&recovery)
+        .args(["list", "--json"])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    assert!(output.stderr.is_empty());
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["kind"], "error");
+    assert_eq!(value["payload"]["kind"], "target_changed");
 }
 
 #[test]

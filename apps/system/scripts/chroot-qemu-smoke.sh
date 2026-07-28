@@ -261,8 +261,8 @@ cat > "$INITRAMFS/bin/chroot-child" <<'CHILD'
 #!/bin/sh
 scenario=$1
 case "$scenario" in
-    default) /bin/catos-chroot --no-systemd-chroot ;;
-    show_snapshots) /bin/catos-chroot --no-systemd-chroot --show-btrfs-dot-snapshots ;;
+    default|cancel) /bin/catos-chroot --no-systemd-chroot ;;
+    show_snapshots|show_snapshots_cancel) /bin/catos-chroot --no-systemd-chroot --show-btrfs-dot-snapshots ;;
     *) echo "unknown scenario $scenario" >&2; exit 2 ;;
 esac
 echo $? > /tmp/chroot.rc
@@ -294,7 +294,9 @@ for arg in $(cat /proc/cmdline); do
 done
 case "$scenario" in
     default) input='y\nn\n' ;;
-    show_snapshots) input='0\nn\n' ;;
+    show_snapshots) input='1\nn\n' ;;
+    cancel) input='n\n' ;;
+    show_snapshots_cancel) input='0\n' ;;
     *) input='' ;;
 esac
 rm -f /tmp/chroot.rc /tmp/chroot.out /tmp/chroot.err /tmp/typescript
@@ -354,9 +356,17 @@ run_qemu() {
     LAST_LOG=$(cat "$log.normalized")
     assert_contains "$LAST_LOG" "__CHROOT_END__" "$scenario"
     assert_contains "$LAST_LOG" "__CHROOT_RC__=0" "$scenario"
-    assert_contains "$LAST_LOG" "__CHROOT_TARGET_VERIFIED__" "$scenario"
-    assert_contains "$LAST_LOG" "__ARCH_CHROOT_BASH_ARGC__=1" "$scenario"
-    assert_contains "$LAST_LOG" "__ARCH_CHROOT_BASH_ARG1__=-i" "$scenario"
+    case "$scenario" in
+        cancel|show_snapshots_cancel)
+            assert_not_contains "$LAST_LOG" "__CHROOT_TARGET_VERIFIED__" "$scenario"
+            assert_not_contains "$LAST_LOG" "__ARCH_CHROOT_BASH_ARGC__" "$scenario"
+            ;;
+        *)
+            assert_contains "$LAST_LOG" "__CHROOT_TARGET_VERIFIED__" "$scenario"
+            assert_contains "$LAST_LOG" "__ARCH_CHROOT_BASH_ARGC__=1" "$scenario"
+            assert_contains "$LAST_LOG" "__ARCH_CHROOT_BASH_ARG1__=-i" "$scenario"
+            ;;
+    esac
     assert_contains "$LAST_LOG" "__NO_RESIDUAL_CHROOT_MOUNTS__" "$scenario"
     assert_contains "$LAST_LOG" "__NO_RESIDUAL_CHROOT_SESSIONS__" "$scenario"
     assert_not_contains "$LAST_LOG" "__RESIDUAL_CHROOT_MOUNT__" "$scenario"
@@ -377,5 +387,13 @@ assert_contains "$LAST_LOG" "Available CatOS targets:" show_snapshots
 assert_contains "$LAST_LOG" "CatOS Historical Snapshot" show_snapshots
 assert_contains "$LAST_LOG" "subvol=/@snapshots/1/snapshot" show_snapshots
 assert_contains "$LAST_LOG" "Selected target: CatOS Chroot QEMU Fixture" show_snapshots
+
+echo "=== scenario: decline-single-target ==="
+run_qemu cancel
+assert_contains "$LAST_LOG" "Use this target? [y/N]" cancel
+
+echo "=== scenario: back-from-multiple-targets ==="
+run_qemu show_snapshots_cancel
+assert_contains "$LAST_LOG" "  [0] Back" show_snapshots_cancel
 
 echo "pass: Chroot QEMU acceptance exercised /bin/catos-chroot, the host arch-chroot implementation, its /bin/bash -i default entrypoint, target selection, snapshot visibility, same-filesystem Btrfs subvolume assembly, mount verification, reverse cleanup and session removal"

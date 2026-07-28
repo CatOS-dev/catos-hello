@@ -69,15 +69,15 @@ pub fn run(argv: &[String], program: &str) -> i32 {
         crate::selection_ui::TargetSelectionPolicy::OfflineOnly,
     ) {
         crate::selection_ui::Selection::Selected(candidate) => *candidate,
-        crate::selection_ui::Selection::Declined => {
-            eprintln!("{program}: target selection declined");
-            return exit_code::ARG_ERROR;
-        }
+        crate::selection_ui::Selection::Declined => return exit_code::SUCCESS,
         crate::selection_ui::Selection::Unavailable(reason) if discovery.candidates.is_empty() => {
             let encrypted =
                 match crate::selection_ui::select_luks_device(&discovery.inventory, program) {
-                    Ok(Some(device)) => device,
-                    Ok(None) => {
+                    Ok(crate::selection_ui::LuksSelection::Selected(device)) => *device,
+                    Ok(crate::selection_ui::LuksSelection::Declined) => {
+                        return exit_code::SUCCESS;
+                    }
+                    Ok(crate::selection_ui::LuksSelection::Unavailable) => {
                         eprintln!("{program}: {reason}");
                         return exit_code::PROBE_FAILED;
                     }
@@ -115,14 +115,15 @@ pub fn run(argv: &[String], program: &str) -> i32 {
                 },
                 || opened.take().expect("opened LUKS token").close(),
             ) {
-                Ok((selected, fresh_inventory, warnings)) => {
-                    for warning in warnings {
+                Ok(Some(resolved)) => {
+                    for warning in resolved.warnings {
                         eprintln!("{program}: warning: {warning}");
                     }
-                    devices = fresh_inventory;
+                    devices = resolved.inventory;
                     opened_luks = opened;
-                    selected
+                    resolved.candidate
                 }
+                Ok(None) => return exit_code::SUCCESS,
                 Err(error) => {
                     eprintln!("{program}: {error}");
                     return exit_code::PROBE_FAILED;
@@ -337,18 +338,18 @@ fn find_selected_device(
         .cloned()
 }
 
+#[derive(Debug)]
+struct ResolvedLuksTarget {
+    candidate: crate::target::discovery::TargetCandidate,
+    inventory: Vec<BlockDevice>,
+    warnings: Vec<String>,
+}
+
 fn resolve_after_luks<D, S, C>(
     discover: D,
     select: S,
     close: C,
-) -> Result<
-    (
-        crate::target::discovery::TargetCandidate,
-        Vec<BlockDevice>,
-        Vec<String>,
-    ),
-    String,
->
+) -> Result<Option<ResolvedLuksTarget>, String>
 where
     D: FnOnce() -> crate::target::discovery::DiscoveryReport,
     S: FnOnce(&crate::target::discovery::DiscoveryReport) -> crate::selection_ui::Selection,
@@ -361,7 +362,8 @@ where
     let candidate = match select(&report) {
         crate::selection_ui::Selection::Selected(candidate) => *candidate,
         crate::selection_ui::Selection::Declined => {
-            return close_after_luks_failure(close, "target selection declined")
+            close().map_err(|error| format!("LUKS cleanup failed: {error}"))?;
+            return Ok(None);
         }
         crate::selection_ui::Selection::Unavailable(reason) => {
             return close_after_luks_failure(
@@ -377,7 +379,11 @@ where
             "selected mapper is absent from fresh shared inventory",
         );
     }
-    Ok((candidate, fresh, warnings))
+    Ok(Some(ResolvedLuksTarget {
+        candidate,
+        inventory: fresh,
+        warnings,
+    }))
 }
 
 fn close_after_luks_failure<T, C>(close: C, reason: &str) -> Result<T, String>
@@ -731,12 +737,40 @@ mod tests {
             },
             || panic!("successful rediscovery must not close mapper"),
         )
-        .unwrap();
+        .unwrap()
+        .expect("selected mapper must be returned");
         assert_eq!(
-            result.0.root_device,
+            result.candidate.root_device,
             std::path::PathBuf::from("/dev/mapper/luks-id")
         );
-        assert_eq!(result.1.len(), 1);
+        assert_eq!(result.inventory.len(), 1);
+    }
+
+    #[test]
+    fn declining_after_luks_unlock_closes_mapper_and_is_not_an_error() {
+        let closed = std::cell::Cell::new(false);
+        let result = resolve_after_luks(
+            crate::target::discovery::DiscoveryReport::default,
+            |_| crate::selection_ui::Selection::Declined,
+            || {
+                closed.set(true);
+                Ok(())
+            },
+        )
+        .expect("operator cancellation is not a failure");
+        assert!(result.is_none());
+        assert!(closed.get(), "unlocked mapper must be closed on cancellation");
+    }
+
+    #[test]
+    fn declining_after_luks_unlock_still_reports_cleanup_failure() {
+        let error = resolve_after_luks(
+            crate::target::discovery::DiscoveryReport::default,
+            |_| crate::selection_ui::Selection::Declined,
+            || Err("close failed".into()),
+        )
+        .expect_err("cleanup failure must not be reported as a clean cancellation");
+        assert!(error.contains("LUKS cleanup failed: close failed"));
     }
 
     #[test]

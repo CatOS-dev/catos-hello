@@ -16,6 +16,13 @@ pub enum Selection {
     Unavailable(String),
 }
 
+#[derive(Debug, Clone)]
+pub enum LuksSelection {
+    Selected(Box<BlockDevice>),
+    Declined,
+    Unavailable,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TargetSelectionPolicy {
     Any,
@@ -95,19 +102,65 @@ fn select_from_candidates(
 /// Pick an encrypted container only when no eligible CatOS candidate exists.
 /// The unlocked mapper is subsequently re-discovered and passed through the
 /// caller's explicit target-selection policy.
-pub fn select_luks_device(devices: &[BlockDevice], program: &str) -> Result<Option<BlockDevice>, String> {
+pub fn select_luks_device(
+    devices: &[BlockDevice],
+    program: &str,
+) -> Result<LuksSelection, String> {
+    let stdin = io::stdin();
+    let stdout = io::stdout();
+    let mut input = stdin.lock();
+    let mut output = stdout.lock();
+    select_luks_device_with(
+        devices,
+        program,
+        io::stdin().is_terminal(),
+        &mut input,
+        &mut output,
+    )
+}
+
+fn select_luks_device_with<R: BufRead, W: Write>(
+    devices: &[BlockDevice],
+    program: &str,
+    interactive: bool,
+    input: &mut R,
+    output: &mut W,
+) -> Result<LuksSelection, String> {
     let candidates = luks_candidates(devices);
-    if candidates.is_empty() { return Ok(None); }
-    if !io::stdin().is_terminal() { return Err("an encrypted target requires an interactive terminal".into()); }
-    println!("Encrypted containers:");
-    for (index, device) in candidates.iter().enumerate() {
-        println!("  [{}] {} UUID={}", index + 1, device.dev_path.as_ref().map(|p| p.display().to_string()).unwrap_or_else(|| device.name.clone()), device.uuid.as_deref().unwrap_or("unknown"));
+    if candidates.is_empty() {
+        return Ok(LuksSelection::Unavailable);
     }
-    println!("  [0] Back");
-    let Some(index) = read_index(program, "encrypted container", candidates.len())? else {
-        return Ok(None);
+    if !interactive {
+        return Err("an encrypted target requires an interactive terminal".into());
+    }
+    writeln!(output, "Encrypted containers:")
+        .map_err(|error| format!("stdout write failed: {error}"))?;
+    for (index, device) in candidates.iter().enumerate() {
+        writeln!(
+            output,
+            "  [{}] {} UUID={}",
+            index + 1,
+            device
+                .dev_path
+                .as_ref()
+                .map(|path| path.display().to_string())
+                .unwrap_or_else(|| device.name.clone()),
+            device.uuid.as_deref().unwrap_or("unknown")
+        )
+        .map_err(|error| format!("stdout write failed: {error}"))?;
+    }
+    writeln!(output, "  [0] Back")
+        .map_err(|error| format!("stdout write failed: {error}"))?;
+    let Some(index) = read_index_with(
+        input,
+        output,
+        program,
+        "encrypted container",
+        candidates.len(),
+    )? else {
+        return Ok(LuksSelection::Declined);
     };
-    Ok(Some((*candidates[index]).clone()))
+    Ok(LuksSelection::Selected(Box::new((*candidates[index]).clone())))
 }
 
 fn luks_candidates(devices: &[BlockDevice]) -> Vec<&BlockDevice> {
@@ -227,6 +280,71 @@ mod tests {
         let mut plain = encrypted.clone();
         plain.filesystem = Some("ext4".into());
         assert_eq!(luks_candidates(&[plain, encrypted.clone()]), vec![&encrypted]);
+    }
+
+    #[test]
+    fn luks_picker_distinguishes_absence_decline_and_selection() {
+        let encrypted = crate::target::model::BlockDevice {
+            name: "sda2".into(),
+            dev_path: Some(PathBuf::from("/dev/sda2")),
+            major_minor: None,
+            parent: String::new(),
+            class: Default::default(),
+            disk_kind: Default::default(),
+            partition_role: crate::target::model::PartitionRole::Unknown,
+            partition_number: None,
+            size_sectors: None,
+            read_only: false,
+            removable: false,
+            filesystem: Some("crypto_LUKS".into()),
+            uuid: Some("luks-id".into()),
+            part_uuid: None,
+            label: None,
+            part_label: None,
+            mount_point: None,
+            mounts: Vec::new(),
+            mounted_before_session: false,
+            evidence: Vec::new(),
+        };
+
+        let mut no_input = std::io::Cursor::new(Vec::<u8>::new());
+        let mut output = Vec::new();
+        assert!(matches!(
+            select_luks_device_with(&[], "catos-chroot", true, &mut no_input, &mut output)
+                .unwrap(),
+            LuksSelection::Unavailable
+        ));
+
+        let mut decline = std::io::Cursor::new(b"0\n".to_vec());
+        let mut output = Vec::new();
+        assert!(matches!(
+            select_luks_device_with(
+                std::slice::from_ref(&encrypted),
+                "catos-chroot",
+                true,
+                &mut decline,
+                &mut output,
+            )
+            .unwrap(),
+            LuksSelection::Declined
+        ));
+
+        let mut select = std::io::Cursor::new(b"1\n".to_vec());
+        let mut output = Vec::new();
+        match select_luks_device_with(
+            std::slice::from_ref(&encrypted),
+            "catos-chroot",
+            true,
+            &mut select,
+            &mut output,
+        )
+        .unwrap()
+        {
+            LuksSelection::Selected(device) => {
+                assert_eq!(device.dev_path, encrypted.dev_path);
+            }
+            other => panic!("expected selected encrypted device, got {other:?}"),
+        }
     }
 
     #[test]

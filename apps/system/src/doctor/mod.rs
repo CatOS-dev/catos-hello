@@ -44,6 +44,12 @@ use crate::target::Evidence;
 pub mod target_selection;
 use target_selection::TargetDiscoveryErrorKind;
 
+#[derive(Debug)]
+pub enum DoctorRunOutcome {
+    Completed(Box<DoctorReport>),
+    Declined,
+}
+
 /// The single selected target and its readonly lifetime.  Section code receives
 /// this context instead of independently rediscovering a target.
 pub(crate) struct DoctorTargetContext {
@@ -406,15 +412,21 @@ fn open_target_esp(
     }
 }
 
-pub fn run_doctor() -> DoctorReport {
+pub fn run_doctor() -> DoctorRunOutcome {
     let runner = crate::fs::command::TrustedRunner::new();
     let environment = sections::capture_environment();
     if let Err(error) = crate::mount::execute::namespace::establish_private_namespace() {
-        return namespace_failure_report(environment, error.to_string());
+        return DoctorRunOutcome::Completed(Box::new(namespace_failure_report(
+            environment,
+            error.to_string(),
+        )));
     }
     let selected = match target_selection::discover_target_session() {
         Ok(value) => value,
         Err(error) => {
+            if error.kind == TargetDiscoveryErrorKind::Declined {
+                return DoctorRunOutcome::Declined;
+            }
             let mut report = DoctorReport {
                 environment,
                 ..DoctorReport::default()
@@ -426,7 +438,7 @@ pub fn run_doctor() -> DoctorReport {
             };
             report.cleanup = cleanup_report(error.cleanup, None);
             aggregate(&mut report);
-            return report;
+            return DoctorRunOutcome::Completed(Box::new(report));
         }
     };
     let target = selected.target.clone();
@@ -456,7 +468,7 @@ pub fn run_doctor() -> DoctorReport {
                 .map(|id| DoctorSection::new(*id, DoctorSectionStatus::Unknown))
                 .collect();
             aggregate(&mut report);
-            return report;
+            return DoctorRunOutcome::Completed(Box::new(report));
         }
     };
     let mut report = DoctorReport {
@@ -512,7 +524,7 @@ pub fn run_doctor() -> DoctorReport {
     );
     aggregate(&mut report);
     report.cleanup = cleanup_report(context.cleanup(), None);
-    report
+    DoctorRunOutcome::Completed(Box::new(report))
 }
 
 fn namespace_failure_report(environment: DoctorEnvironment, reason: String) -> DoctorReport {

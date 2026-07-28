@@ -114,7 +114,7 @@ pub fn run_mount_repair_diagnosis(
             actions: Vec::new(),
             verification: None,
             cleanup: MountRepairCleanup::default(),
-            final_outcome: MountRepairOutcome::Clean,
+            final_outcome: MountRepairOutcome::PartiallyRepaired,
             requires_human_action: problem_count > 0,
             fully_complete: false,
             evidence,

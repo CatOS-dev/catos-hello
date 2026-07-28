@@ -118,7 +118,7 @@ pub fn render_recovery_json(
                 serde_json::Value::Object(payload),
             )
         }
-        RecoveryOutcome::Error(error) => json_envelope(
+        RecoveryOutcome::ArgumentError(error) | RecoveryOutcome::Error(error) => json_envelope(
             invocation,
             target_root,
             "error",
@@ -167,7 +167,9 @@ pub fn render_recovery_human<W: Write>(
             Ok(())
         }
         RecoveryOutcome::Status(report) => render_status(out, report),
-        RecoveryOutcome::Error(error) => render_error(out, error),
+        RecoveryOutcome::ArgumentError(error) | RecoveryOutcome::Error(error) => {
+            render_error(out, error)
+        }
     }
 }
 
