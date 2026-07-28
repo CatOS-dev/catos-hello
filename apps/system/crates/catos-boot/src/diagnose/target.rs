@@ -872,7 +872,19 @@ fn list_optional_target_directory(
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SecureBootPolicyEvidence {
+    pub present: bool,
+    pub enrollment_password_path: String,
+}
+
 pub fn target_secureboot_policy_present(target_root: &Path) -> Result<bool, String> {
+    Ok(target_secureboot_policy_evidence(target_root)?.present)
+}
+
+pub fn target_secureboot_policy_evidence(
+    target_root: &Path,
+) -> Result<SecureBootPolicyEvidence, String> {
     let paths = secureboot_storage_paths(target_root)?;
     let state = read_optional_target_file(target_root, &paths.state_path)?;
     let key_paths = [
@@ -893,7 +905,10 @@ pub fn target_secureboot_policy_present(target_root: &Path) -> Result<bool, Stri
                 paths.state_path
             ));
         }
-        return Ok(false);
+        return Ok(SecureBootPolicyEvidence {
+            present: false,
+            enrollment_password_path: paths.enrollment_password_path,
+        });
     };
     if key_count != key_paths.len() {
         return Err(format!(
@@ -903,24 +918,30 @@ pub fn target_secureboot_policy_present(target_root: &Path) -> Result<bool, Stri
     }
 
     validate_secureboot_state(&state, &paths.state_path)?;
-    Ok(true)
+    Ok(SecureBootPolicyEvidence {
+        present: true,
+        enrollment_password_path: paths.enrollment_password_path,
+    })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct SecureBootStoragePaths {
     state_path: String,
     key_dir: String,
+    enrollment_password_path: String,
 }
 
 fn secureboot_storage_paths(target_root: &Path) -> Result<SecureBootStoragePaths, String> {
     const CONFIG_PATH: &str = "/etc/catos/secureboot.conf";
     const DEFAULT_STATE_PATH: &str = "/var/lib/catos-secureboot/state.json";
     const DEFAULT_KEY_DIR: &str = "/var/lib/catos-secureboot/keys";
+    const DEFAULT_ENROLLMENT_PASSWORD_PATH: &str = "/var/lib/catos-secureboot/enrollment-password";
 
     let Some(config) = read_optional_target_file(target_root, CONFIG_PATH)? else {
         return Ok(SecureBootStoragePaths {
             state_path: DEFAULT_STATE_PATH.into(),
             key_dir: DEFAULT_KEY_DIR.into(),
+            enrollment_password_path: DEFAULT_ENROLLMENT_PASSWORD_PATH.into(),
         });
     };
     let config = String::from_utf8(config)
@@ -928,6 +949,7 @@ fn secureboot_storage_paths(target_root: &Path) -> Result<SecureBootStoragePaths
     let mut in_secureboot = false;
     let mut state_path: Option<String> = None;
     let mut key_dir: Option<String> = None;
+    let mut enrollment_password_path: Option<String> = None;
     for (index, raw) in config.lines().enumerate() {
         let line = raw.trim();
         if line.is_empty() || line.starts_with('#') {
@@ -947,6 +969,7 @@ fn secureboot_storage_paths(target_root: &Path) -> Result<SecureBootStoragePaths
         let target = match name.trim() {
             "state_path" => &mut state_path,
             "key_dir" => &mut key_dir,
+            "enrollment_password_path" => &mut enrollment_password_path,
             _ => continue,
         };
         if target.is_some() {
@@ -962,6 +985,8 @@ fn secureboot_storage_paths(target_root: &Path) -> Result<SecureBootStoragePaths
     Ok(SecureBootStoragePaths {
         state_path: state_path.unwrap_or_else(|| DEFAULT_STATE_PATH.into()),
         key_dir: key_dir.unwrap_or_else(|| DEFAULT_KEY_DIR.into()),
+        enrollment_password_path: enrollment_password_path
+            .unwrap_or_else(|| DEFAULT_ENROLLMENT_PASSWORD_PATH.into()),
     })
 }
 
@@ -1002,7 +1027,9 @@ fn validate_rooted_policy_path(value: &str, name: &str) -> Result<String, String
 
     let path = Path::new(value);
     if !path.is_absolute() || path == Path::new("/") {
-        return Err(format!("target Secure Boot {name} must be an absolute non-root path"));
+        return Err(format!(
+            "target Secure Boot {name} must be an absolute non-root path"
+        ));
     }
     if path.components().any(|component| {
         matches!(
@@ -1010,7 +1037,9 @@ fn validate_rooted_policy_path(value: &str, name: &str) -> Result<String, String
             Component::CurDir | Component::ParentDir | Component::Prefix(_)
         )
     }) {
-        return Err(format!("target Secure Boot {name} contains an unsafe path component"));
+        return Err(format!(
+            "target Secure Boot {name} contains an unsafe path component"
+        ));
     }
     if value.contains('\0') {
         return Err(format!("target Secure Boot {name} contains NUL"));
@@ -1046,14 +1075,14 @@ fn validate_secureboot_state(bytes: &[u8], path: &str) -> Result<(), String> {
         .as_object()
         .ok_or_else(|| format!("target Secure Boot state {path} is not a JSON object"))?;
     if object.get("version").and_then(serde_json::Value::as_u64) != Some(1) {
-        return Err(format!("target Secure Boot state {path} has unsupported version"));
+        return Err(format!(
+            "target Secure Boot state {path} has unsupported version"
+        ));
     }
     let fingerprint = object
         .get("certificate_fingerprint")
         .and_then(serde_json::Value::as_str)
-        .ok_or_else(|| {
-            format!("target Secure Boot state {path} has no certificate fingerprint")
-        })?;
+        .ok_or_else(|| format!("target Secure Boot state {path} has no certificate fingerprint"))?;
     if fingerprint.len() != 64 || !fingerprint.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         return Err(format!(
             "target Secure Boot state {path} has an invalid SHA-256 certificate fingerprint"

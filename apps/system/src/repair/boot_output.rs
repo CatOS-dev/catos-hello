@@ -127,6 +127,18 @@ pub fn render_boot_repair_human<W: Write>(
             "  enrollment pending    : {}",
             secureboot.enrollment_pending
         )?;
+        if let Some(password) = &secureboot.enrollment_password {
+            writeln!(out, "  MokManager password   : {}", password.expose())?;
+        }
+        if let Some(path) = &secureboot.enrollment_password_path {
+            writeln!(out, "  password stored at    : {path}")?;
+        }
+        if secureboot.enrollment_pending {
+            writeln!(
+                out,
+                "  next boot             : enter the one-time password in MokManager"
+            )?;
+        }
         if let Some(message) = &secureboot.failure_message {
             writeln!(out, "  failure               : {message}")?;
         }
@@ -220,4 +232,41 @@ fn render_action_human<W: Write>(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::boot::model::{SecureBootReport, SensitiveString};
+
+    #[test]
+    fn mok_password_is_human_only_and_json_reports_its_target_path() {
+        let report = BootRepairReport {
+            secureboot: Some(SecureBootReport {
+                target_policy_present: true,
+                enable_invoked: true,
+                certificate_fingerprint: Some("AA:BB".into()),
+                enrollment_pending: true,
+                enrollment_password_generated: true,
+                enrollment_password_path: Some(
+                    "/var/lib/catos-secureboot/enrollment-password".into(),
+                ),
+                enrollment_password: Some(SensitiveString::new("SEKRET123")),
+                ..SecureBootReport::default()
+            }),
+            ..BootRepairReport::default()
+        };
+
+        let mut human = Vec::new();
+        render_boot_repair_human(&report, &mut human).unwrap();
+        let human = String::from_utf8(human).unwrap();
+        assert!(human.contains("SEKRET123"));
+        assert!(human.contains("/var/lib/catos-secureboot/enrollment-password"));
+
+        let json = render_boot_repair_json(&report, "catos-repair boot", std::path::Path::new("/"))
+            .unwrap();
+        assert!(!json.contains("SEKRET123"));
+        assert!(json.contains("enrollment_password_generated"));
+        assert!(json.contains("/var/lib/catos-secureboot/enrollment-password"));
+    }
 }

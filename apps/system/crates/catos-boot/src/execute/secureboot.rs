@@ -24,7 +24,9 @@
 //!   `catos-secureboot`.
 
 use crate::execute::target::{TargetRequest, TargetRunner};
-use crate::model::{BootRepairOutcome, ProviderId, SecureBootReport, TargetCommandResult};
+use crate::model::{
+    BootRepairOutcome, ProviderId, SecureBootReport, SensitiveString, TargetCommandResult,
+};
 use crate::plan::registry;
 
 /// Inputs the orchestrator supplies. All filesystem facts are
@@ -39,6 +41,9 @@ pub struct SecureBootInputs {
     /// state record and complete machine key material. The package config
     /// alone is never policy evidence.
     pub target_policy_present: bool,
+    /// Target path configured by `catos-secureboot` for persisting the
+    /// one-time MokManager enrollment password.
+    pub enrollment_password_path: String,
     /// Verbatim payload (stdout) captured from `catos-secureboot`
     /// when the orchestrator replayed a previous result for
     /// resumption. `None` for a fresh invocation.
@@ -127,10 +132,17 @@ pub fn finalize_secure_boot<R: TargetRunner>(
                 "re-apply existing CatOS Secure Boot policy",
             );
             let result = runner.invoke(&request);
-            if result.binary_missing || result.timed_out || result.exit_code != 0 {
+            let payload = String::from_utf8_lossy(&result.stdout).into_owned();
+            let audited_result = redact_secure_boot_stdout(result, &payload);
+            if audited_result.binary_missing
+                || audited_result.timed_out
+                || audited_result.exit_code != 0
+            {
                 let failure = format!(
                     "catos-secureboot enable failed (exit={}, missing={}, timeout={})",
-                    result.exit_code, result.binary_missing, result.timed_out
+                    audited_result.exit_code,
+                    audited_result.binary_missing,
+                    audited_result.timed_out
                 );
                 return (
                     SecureBootReport {
@@ -138,27 +150,36 @@ pub fn finalize_secure_boot<R: TargetRunner>(
                         enable_invoked: true,
                         ambiguous: false,
                         failure_message: Some(failure),
-                        raw_payload: sanitise_payload(&String::from_utf8_lossy(&result.stdout)),
-                        ..SecureBootReport::default()
-                    },
-                    Some(BootRepairOutcome::ManualInterventionRequired),
-                    Some(result),
-                );
-            }
-            let payload = String::from_utf8_lossy(&result.stdout).into_owned();
-            match parse_secure_boot_payload(&payload) {
-                Ok(parsed) => (
-                    SecureBootReport {
-                        target_policy_present: true,
-                        enable_invoked: true,
-                        certificate_fingerprint: parsed.fingerprint,
-                        enrollment_pending: parsed.enrollment_pending,
                         raw_payload: sanitise_payload(&payload),
                         ..SecureBootReport::default()
                     },
-                    None,
-                    Some(result),
-                ),
+                    Some(BootRepairOutcome::ManualInterventionRequired),
+                    Some(audited_result),
+                );
+            }
+            match parse_secure_boot_payload(&payload) {
+                Ok(parsed) => {
+                    let password_generated = parsed.enrollment_password.is_some();
+                    let password_path =
+                        password_generated.then(|| inputs.enrollment_password_path.clone());
+                    (
+                        SecureBootReport {
+                            target_policy_present: true,
+                            enable_invoked: true,
+                            certificate_fingerprint: parsed.fingerprint,
+                            enrollment_pending: parsed.enrollment_pending,
+                            enrollment_password_generated: password_generated,
+                            enrollment_password_path: password_path,
+                            enrollment_password: parsed
+                                .enrollment_password
+                                .map(SensitiveString::new),
+                            raw_payload: sanitise_payload(&payload),
+                            ..SecureBootReport::default()
+                        },
+                        None,
+                        Some(audited_result),
+                    )
+                }
                 Err(reason) => (
                     SecureBootReport {
                         target_policy_present: true,
@@ -169,7 +190,7 @@ pub fn finalize_secure_boot<R: TargetRunner>(
                         ..SecureBootReport::default()
                     },
                     Some(BootRepairOutcome::ManualInterventionRequired),
-                    Some(result),
+                    Some(audited_result),
                 ),
             }
         }
@@ -180,6 +201,7 @@ pub fn finalize_secure_boot<R: TargetRunner>(
 struct ParsedPayload {
     fingerprint: Option<String>,
     enrollment_pending: bool,
+    enrollment_password: Option<String>,
 }
 
 /// Parse the JSON payload `catos-secureboot enable` returns. Uses
@@ -203,10 +225,40 @@ fn parse_secure_boot_payload(payload: &str) -> Result<ParsedPayload, String> {
         .get("enrollment_pending")
         .and_then(|value| value.as_bool())
         .ok_or_else(|| "catos-secureboot did not report enrollment state".to_string())?;
+    let enrollment_password = object
+        .get("enrollment_password")
+        .and_then(|value| value.as_str())
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    if enrollment_pending && enrollment_password.is_none() {
+        return Err(
+            "catos-secureboot reported pending enrollment without a one-time password".into(),
+        );
+    }
+    if !enrollment_pending && enrollment_password.is_some() {
+        return Err(
+            "catos-secureboot returned an enrollment password without pending enrollment".into(),
+        );
+    }
     Ok(ParsedPayload {
         fingerprint: Some(fingerprint.to_string()),
         enrollment_pending,
+        enrollment_password,
     })
+}
+
+fn redact_secure_boot_stdout(
+    mut result: TargetCommandResult,
+    payload: &str,
+) -> TargetCommandResult {
+    result.stdout = if payload.trim().is_empty() {
+        Vec::new()
+    } else if let Some(sanitised) = sanitise_payload(payload) {
+        sanitised.into_bytes()
+    } else {
+        br#"{"redacted":true,"reason":"unparseable catos-secureboot output"}"#.to_vec()
+    };
+    result
 }
 
 fn sanitise_payload(payload: &str) -> Option<String> {
@@ -228,6 +280,7 @@ mod tests {
         SecureBootInputs {
             provider,
             target_policy_present: false,
+            enrollment_password_path: "/var/lib/catos-secureboot/enrollment-password".into(),
             previous_payload: None,
         }
     }
@@ -275,18 +328,19 @@ mod tests {
     }
 
     #[test]
-    fn successful_reapply_records_fingerprint_and_pending() {
+    fn pending_enrollment_reports_password_but_redacts_command_audit() {
         let runner = RecordedTargetRunner::new().expect_raw(
             "catos-secureboot",
             ["enable", "--generate-enrollment-password", "--json"],
             0,
-            br#"{"fingerprint":"AA:BB","enrollment_pending":true,"enrollment_password":"sekret"}"#
+            br#"{"fingerprint":"AA:BB","enrollment_pending":true,"enrollment_password":"SEKRET123"}"#
                 .to_vec(),
             b"".to_vec(),
         );
         let inputs = SecureBootInputs {
             provider: ProviderId::Grub,
             target_policy_present: true,
+            enrollment_password_path: "/var/lib/catos-secureboot/enrollment-password".into(),
             ..SecureBootInputs::default()
         };
         let (report, outcome, action) = finalize_secure_boot(&runner, &inputs);
@@ -294,14 +348,42 @@ mod tests {
         assert!(report.enable_invoked);
         assert_eq!(report.certificate_fingerprint.as_deref(), Some("AA:BB"));
         assert!(report.enrollment_pending);
-        assert!(action.is_some());
+        assert!(report.enrollment_password_generated);
+        assert_eq!(report.enrollment_password.as_deref(), Some("SEKRET123"));
+        assert_eq!(
+            report.enrollment_password_path.as_deref(),
+            Some("/var/lib/catos-secureboot/enrollment-password")
+        );
         assert!(!report
             .raw_payload
             .as_deref()
             .unwrap_or_default()
-            .contains("sekret"));
+            .contains("SEKRET123"));
+        let action = action.expect("secure boot command action");
+        let audited_stdout = String::from_utf8(action.stdout).unwrap();
+        assert!(!audited_stdout.contains("SEKRET123"));
+        assert!(audited_stdout.contains("fingerprint"));
         assert!(runner.invoked_binary("catos-secureboot"));
         runner.assert_consumed();
+    }
+
+    #[test]
+    fn enrollment_password_and_pending_state_must_be_consistent() {
+        let missing = match parse_secure_boot_payload(
+            r#"{"fingerprint":"AA","enrollment_pending":true}"#,
+        ) {
+            Ok(_) => panic!("pending enrollment without a password was accepted"),
+            Err(error) => error,
+        };
+        assert!(missing.contains("without a one-time password"));
+
+        let unexpected = match parse_secure_boot_payload(
+            r#"{"fingerprint":"AA","enrollment_pending":false,"enrollment_password":"SEKRET123"}"#,
+        ) {
+            Ok(_) => panic!("a password without pending enrollment was accepted"),
+            Err(error) => error,
+        };
+        assert!(unexpected.contains("without pending enrollment"));
     }
 
     #[test]

@@ -11,9 +11,10 @@
 //! * The provider is **detected** from the target's own configuration
 //!   and deployed artefacts — never selected by the live environment
 //!   or guessed from a single stale ESP file.
-//! * Each fixed command the orchestrator ran is recorded verbatim in
+//! * Each fixed command the orchestrator ran is audited in
 //!   [`BootAction::TargetCommand`], including argv, exit code, signal,
-//!   timeout, and truncation state.
+//!   timeout, and truncation state. Sensitive command output is redacted
+//!   before it enters the report.
 //! * `final_outcome` is the single source of truth. Bootloader
 //!   installs, EFI variable writes, and signature operations are NOT
 //!   atomic; partial success MUST surface as
@@ -32,6 +33,34 @@ use serde::{Deserialize, Serialize};
 use catos_mount::model::{MountRepairCleanup, MountTargetIdentity};
 use catos_target::model::Warning;
 use catos_target::Evidence;
+
+/// A value that must never be emitted by serde or exposed through `Debug`.
+#[derive(Clone, Default, PartialEq, Eq)]
+pub struct SensitiveString(String);
+
+impl SensitiveString {
+    pub fn new(value: impl Into<String>) -> Self {
+        Self(value.into())
+    }
+
+    pub fn expose(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Debug for SensitiveString {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("<redacted>")
+    }
+}
+
+impl std::ops::Deref for SensitiveString {
+    type Target = str;
+
+    fn deref(&self) -> &Self::Target {
+        self.expose()
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Boot resource topology
@@ -528,6 +557,17 @@ pub struct SecureBootReport {
     /// is still pending.
     #[serde(default)]
     pub enrollment_pending: bool,
+    /// `true` iff `catos-secureboot` generated a one-time MokManager password.
+    #[serde(default)]
+    pub enrollment_password_generated: bool,
+    /// Target-relative absolute path where `catos-secureboot` persisted the
+    /// one-time password. Safe to expose; the password itself is not.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enrollment_password_path: Option<String>,
+    /// One-time MokManager password for human output only. It is skipped by
+    /// serde and its `Debug` representation is always redacted.
+    #[serde(skip)]
+    pub enrollment_password: Option<SensitiveString>,
     /// `true` iff the orchestrator was unable to determine whether
     /// Secure Boot should be re-applied (refuses to guess).
     #[serde(default)]
@@ -661,6 +701,26 @@ impl TargetFile {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sensitive_string_is_redacted_from_debug_and_secureboot_json() {
+        let report = SecureBootReport {
+            enrollment_password_generated: true,
+            enrollment_password_path: Some("/var/lib/catos-secureboot/enrollment-password".into()),
+            enrollment_password: Some(SensitiveString::new("SEKRET123")),
+            ..SecureBootReport::default()
+        };
+
+        let debug = format!("{report:?}");
+        assert!(!debug.contains("SEKRET123"));
+        assert!(debug.contains("<redacted>"));
+
+        let json = serde_json::to_string(&report).unwrap();
+        assert!(!json.contains("SEKRET123"));
+        assert!(!json.contains("\"enrollment_password\""));
+        assert!(json.contains("enrollment_password_generated"));
+        assert!(json.contains("enrollment_password_path"));
+    }
 
     #[test]
     fn outcome_code_matches_serde_form() {

@@ -421,10 +421,11 @@ pub fn run_boot_repair(
         Ok(inputs) => inputs,
         Err(error) => return preflight_failure("INITRAMFS_FACTS_INCOMPLETE", error),
     };
-    let secureboot_inputs = match target_secureboot_policy_present(target_root) {
-        Ok(target_policy_present) => SecureBootInputs {
+    let secureboot_inputs = match target_secureboot_policy_evidence(target_root) {
+        Ok(policy) => SecureBootInputs {
             provider,
-            target_policy_present,
+            target_policy_present: policy.present,
+            enrollment_password_path: policy.enrollment_password_path,
             previous_payload: None,
         },
         Err(error) => return preflight_failure("SECUREBOOT_POLICY_UNREADABLE", error),
@@ -678,12 +679,14 @@ fn merge_verification(
     existing
 }
 #[cfg(test)]
+use crate::diagnose::target::target_secureboot_policy_present;
+#[cfg(test)]
 use crate::diagnose::target::{
     collect_detection_inputs_from_target_root, derive_bios_install_disk,
     detect_target_architecture, target_regular_file_present,
 };
 use crate::diagnose::target::{
-    collect_target_kernels, derive_efi_device, target_secureboot_policy_present,
+    collect_target_kernels, derive_efi_device, target_secureboot_policy_evidence,
 };
 #[cfg(test)]
 use crate::model::FirmwareClass;
@@ -1430,6 +1433,7 @@ key_dir = "/var/lib/catos-secureboot/keys"
             r#"[secureboot]
 state_path = "/srv/catos/sb-state.json" # target state
 key_dir = "/srv/catos/keys"
+enrollment_password_path = "/srv/catos/mok-password"
 "#,
         )
         .unwrap();
@@ -1440,7 +1444,9 @@ key_dir = "/srv/catos/keys"
             1,
         );
 
-        assert!(target_secureboot_policy_present(&target_root.path).unwrap());
+        let evidence = target_secureboot_policy_evidence(&target_root.path).unwrap();
+        assert!(evidence.present);
+        assert_eq!(evidence.enrollment_password_path, "/srv/catos/mok-password");
     }
 
     #[test]
@@ -1521,9 +1527,7 @@ key_dir = "/var/lib/catos-secureboot/keys"
             "/var/lib/catos-secureboot/keys",
             1,
         );
-        let state = target_root
-            .path
-            .join("var/lib/catos-secureboot/state.json");
+        let state = target_root.path.join("var/lib/catos-secureboot/state.json");
         fs::write(
             state,
             r#"{"version":1,"enrollment_pending":false,"certificate_fingerprint":"AA"}

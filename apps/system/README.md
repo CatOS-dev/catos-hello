@@ -651,6 +651,10 @@ on. The target's existing policy is the only authority:
   `catos-secureboot enable --generate-enrollment-password --json`.
 - EFI Stub is explicitly unsupported by the registry's `supportedProviders`
   list; repair refuses before invoking `catos-secureboot`.
+- When MokManager enrollment is pending, human output prints the generated
+  one-time password and its target-local storage path. JSON output and command
+  audit records never contain the password; they expose only that a password
+  was generated and where `catos-secureboot` stored it.
 - EFI variable writes, MOK enrollment, and signing operations are NOT
   atomic. Partial success surfaces as `partially_repaired` or
   `manual_intervention_required`, never as `repaired`.
