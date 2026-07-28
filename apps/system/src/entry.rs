@@ -779,7 +779,9 @@ fn snapshot_menu_items(
                 snapshot.path.clone(),
                 format!(
                     "{} (subvolid {}, generation {})",
-                    snapshot.path, snapshot.subvolume_id, snapshot.generation
+                    crate::selection_ui::terminal_text(&snapshot.path),
+                    snapshot.subvolume_id,
+                    snapshot.generation
                 ),
             )
         })
@@ -797,9 +799,9 @@ fn transaction_menu_items(
                 transaction.transaction_id.clone(),
                 format!(
                     "{} — {} — snapshot {}",
-                    transaction.transaction_id,
+                    crate::selection_ui::terminal_text(&transaction.transaction_id),
                     transaction.state.code(),
-                    transaction.source_snapshot_path
+                    crate::selection_ui::terminal_text(&transaction.source_snapshot_path)
                 ),
             )
         })
@@ -891,18 +893,39 @@ fn recovery_plan_summary(plan: &crate::snapshot::model::RecoveryPlan) -> String 
 
     let mut output = String::new();
     writeln!(output, "Recovery plan:").expect("writing to String cannot fail");
-    writeln!(output, "  Plan ID         : {}", plan.plan_id)
+    writeln!(
+        output,
+        "  Plan ID         : {}",
+        crate::selection_ui::terminal_text(&plan.plan_id)
+    )
         .expect("writing to String cannot fail");
-    writeln!(output, "  Filesystem      : {}", plan.filesystem.fsid)
+    writeln!(
+        output,
+        "  Filesystem      : {}",
+        crate::selection_ui::terminal_text(&plan.filesystem.fsid)
+    )
         .expect("writing to String cannot fail");
-    writeln!(output, "  Current root    : {}", plan.current_root.path)
+    writeln!(
+        output,
+        "  Current root    : {}",
+        crate::selection_ui::terminal_text(&plan.current_root.path)
+    )
         .expect("writing to String cannot fail");
-    writeln!(output, "  Source snapshot : {}", plan.source_snapshot.path)
+    writeln!(
+        output,
+        "  Source snapshot : {}",
+        crate::selection_ui::terminal_text(&plan.source_snapshot.path)
+    )
         .expect("writing to String cannot fail");
     if !plan.risks_and_warnings.is_empty() {
         writeln!(output, "  Risks and warnings:").expect("writing to String cannot fail");
         for warning in &plan.risks_and_warnings {
-            writeln!(output, "    - {warning}").expect("writing to String cannot fail");
+            writeln!(
+                output,
+                "    - {}",
+                crate::selection_ui::terminal_text(warning)
+            )
+            .expect("writing to String cannot fail");
         }
     }
     output
@@ -2179,7 +2202,7 @@ mod tests {
                 evidence: vec![],
             },
             source_snapshot: crate::snapshot::model::BtrfsSubvolumeIdentity {
-                path: "/.snapshots/42/snapshot".into(),
+                path: "/.snapshots/42/snapshot\nspoof\x1b[2J".into(),
                 subvolume_id: 300,
                 generation: 80,
                 uuid: None,
@@ -2200,7 +2223,7 @@ mod tests {
             },
             predicted_steps: vec![],
             refusal_conditions: vec![],
-            risks_and_warnings: vec!["review boot state".into()],
+            risks_and_warnings: vec!["review boot state\nspoof\x1b[2J".into()],
             nonce: "00".repeat(32),
             plan_digest: "00".repeat(32),
             confirmation_token: "token".into(),
@@ -2211,15 +2234,18 @@ mod tests {
         assert!(summary.contains("Plan ID         : plan-123"));
         assert!(summary.contains("Filesystem      : fsid-123"));
         assert!(summary.contains("Current root    : /@"));
-        assert!(summary.contains("Source snapshot : /.snapshots/42/snapshot"));
-        assert!(summary.contains("review boot state"));
+        assert!(summary.contains(
+            "Source snapshot : /.snapshots/42/snapshot\\nspoof\\u{1b}[2J"
+        ));
+        assert!(summary.contains("review boot state\\nspoof\\u{1b}[2J"));
+        assert!(!summary.contains('\x1b'));
     }
 
     #[test]
     fn recovery_choice_labels_preserve_machine_values() {
         let report = crate::recovery::model::RecoveryListReport {
             readonly_snapshots: vec![crate::snapshot::model::BtrfsSubvolumeIdentity {
-                path: "/.snapshots/42/snapshot".into(),
+                path: "/.snapshots/42/snapshot\nspoof\x1b[2J".into(),
                 subvolume_id: 420,
                 generation: 99,
                 uuid: None,
@@ -2233,16 +2259,21 @@ mod tests {
                 plan_id: "plan-123".into(),
                 created_at_unix: 1,
                 last_updated_unix: 2,
-                source_snapshot_path: "/.snapshots/42/snapshot".into(),
+                source_snapshot_path: "/.snapshots/42/snapshot\nspoof\x1b[2J".into(),
             }],
             ..Default::default()
         };
         let snapshots = snapshot_menu_items(&report);
-        assert_eq!(snapshots[0].0, "/.snapshots/42/snapshot");
+        assert_eq!(snapshots[0].0, "/.snapshots/42/snapshot\nspoof\x1b[2J");
         assert!(snapshots[0].1.contains("subvolid 420"));
+        assert!(!snapshots[0].1.contains('\x1b'));
+        assert!(!snapshots[0].1.contains('\n'));
+        assert!(snapshots[0].1.contains("\\nspoof\\u{1b}[2J"));
         let transactions = transaction_menu_items(&report);
         assert_eq!(transactions[0].0, "tx-123");
         assert!(transactions[0].1.contains("completed"));
+        assert!(!transactions[0].1.contains('\x1b'));
+        assert!(!transactions[0].1.contains('\n'));
     }
 
     #[test]

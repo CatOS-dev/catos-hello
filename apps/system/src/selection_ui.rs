@@ -30,6 +30,42 @@ pub enum TargetSelectionPolicy {
     PreferRunningRoot,
 }
 
+fn interactive_terminal_available(stdin_is_terminal: bool, stdout_is_terminal: bool) -> bool {
+    stdin_is_terminal && stdout_is_terminal
+}
+
+pub(crate) fn terminal_text(value: &str) -> String {
+    let mut output = String::with_capacity(value.len());
+    for character in value.chars() {
+        match character {
+            '\n' => output.push_str("\\n"),
+            '\r' => output.push_str("\\r"),
+            '\t' => output.push_str("\\t"),
+            character if terminal_control_character(character) => {
+                use std::fmt::Write as _;
+                write!(output, "\\u{{{:x}}}", character as u32)
+                    .expect("writing to String cannot fail");
+            }
+            character => output.push(character),
+        }
+    }
+    output
+}
+
+fn terminal_control_character(character: char) -> bool {
+    character.is_control()
+        || matches!(
+            character,
+            '\u{061c}'
+                | '\u{200e}'
+                | '\u{200f}'
+                | '\u{2028}'
+                | '\u{2029}'
+                | '\u{202a}'..='\u{202e}'
+                | '\u{2066}'..='\u{2069}'
+        )
+}
+
 pub fn select_target_with_policy(
     report: &DiscoveryReport,
     program: &str,
@@ -37,7 +73,7 @@ pub fn select_target_with_policy(
 ) -> Selection {
     let stdin = io::stdin();
     let stdout = io::stdout();
-    let interactive = stdin.is_terminal();
+    let interactive = interactive_terminal_available(stdin.is_terminal(), stdout.is_terminal());
     let mut input = stdin.lock();
     let mut output = stdout.lock();
     select_target_with_policy_with(
@@ -205,7 +241,7 @@ pub fn select_luks_device(
     select_luks_device_with(
         devices,
         program,
-        io::stdin().is_terminal(),
+        interactive_terminal_available(stdin.is_terminal(), stdout.is_terminal()),
         &mut input,
         &mut output,
     )
@@ -228,16 +264,17 @@ fn select_luks_device_with<R: BufRead, W: Write>(
     writeln!(output, "Encrypted containers:")
         .map_err(|error| format!("stdout write failed: {error}"))?;
     for (index, device) in candidates.iter().enumerate() {
+        let device_name = device
+            .dev_path
+            .as_ref()
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| device.name.clone());
         writeln!(
             output,
             "  [{}] {} UUID={}",
             index + 1,
-            device
-                .dev_path
-                .as_ref()
-                .map(|path| path.display().to_string())
-                .unwrap_or_else(|| device.name.clone()),
-            device.uuid.as_deref().unwrap_or("unknown")
+            terminal_text(&device_name),
+            terminal_text(device.uuid.as_deref().unwrap_or("unknown"))
         )
         .map_err(|error| format!("stdout write failed: {error}"))?;
     }
@@ -260,10 +297,26 @@ fn luks_candidates(devices: &[BlockDevice]) -> Vec<&BlockDevice> {
 }
 
 pub fn summary(candidate: &TargetCandidate) -> String {
-    let distro = candidate.os_release.pretty_name.as_deref().or(candidate.os_release.name.as_deref()).unwrap_or("CatOS");
+    let distro = candidate
+        .os_release
+        .pretty_name
+        .as_deref()
+        .or(candidate.os_release.name.as_deref())
+        .unwrap_or("CatOS");
     let uuid = candidate.root_uuid.as_deref().unwrap_or("unknown");
-    let subvol = candidate.root_subvolume.as_deref().map(|v| format!(" subvol={v}")).unwrap_or_default();
-    format!("{distro} — {} — {} UUID={uuid}{subvol}", candidate.root_device.display(), candidate.root_fstype)
+    let subvol = candidate
+        .root_subvolume
+        .as_deref()
+        .map(|value| format!(" subvol={}", terminal_text(value)))
+        .unwrap_or_default();
+    format!(
+        "{} — {} — {} UUID={}{}",
+        terminal_text(distro),
+        terminal_text(&candidate.root_device.display().to_string()),
+        terminal_text(&candidate.root_fstype),
+        terminal_text(uuid),
+        subvol
+    )
 }
 
 fn write_summary<W: Write>(
@@ -353,6 +406,14 @@ mod tests {
     }
 
     #[test]
+    fn interactive_selection_requires_both_terminal_streams() {
+        assert!(interactive_terminal_available(true, true));
+        assert!(!interactive_terminal_available(true, false));
+        assert!(!interactive_terminal_available(false, true));
+        assert!(!interactive_terminal_available(false, false));
+    }
+
+    #[test]
     fn noninteractive_running_root_selection_does_not_write_stdout() {
         let report = DiscoveryReport {
             candidates: vec![candidate("/dev/running", true)],
@@ -423,6 +484,19 @@ mod tests {
             Selection::Unavailable(reason) => assert!(reason.contains("offline")),
             other => panic!("expected unavailable selection, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn target_summary_escapes_terminal_control_characters() {
+        let mut target = candidate("/dev/root", false);
+        target.os_release.pretty_name = Some("CatOS\x1b[2J\nspoof".into());
+        target.root_subvolume = Some("/@\nother".into());
+
+        let rendered = summary(&target);
+        assert!(!rendered.contains('\x1b'));
+        assert!(!rendered.contains('\n'));
+        assert!(rendered.contains("CatOS\\u{1b}[2J\\nspoof"));
+        assert!(rendered.contains("subvol=/@\\nother"));
     }
 
     #[test]
