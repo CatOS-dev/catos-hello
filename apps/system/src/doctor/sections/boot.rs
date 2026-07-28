@@ -816,7 +816,7 @@ pub(in crate::doctor) fn run_secure_boot_section(
         Evidence::new(
             "TARGET_POLICY_MARKER",
             "doctor::secure_boot",
-            format!("/etc/catos/secureboot present: {target_marker}"),
+            format!("target Secure Boot marker present: {target_marker}"),
         ),
     );
     if firmware_sb_on.is_none() {
@@ -828,15 +828,6 @@ pub(in crate::doctor) fn run_secure_boot_section(
         ));
         return Ok(());
     }
-    if esp.is_none() {
-        set_section(sections, id, DoctorSectionStatus::Unknown);
-        report.limitations.push(DoctorLimitation::new(
-            id,
-            "TARGET_ESP_UNAVAILABLE",
-            "target firmware boot assets are unavailable; this is not interpreted as BIOS or Secure Boot disabled",
-        ));
-        return Ok(());
-    }
     let firmware_sb_on = firmware_sb_on.expect("checked firmware Secure Boot state");
     let policy_inconsistent = !secure_boot_policy_consistent(firmware_sb_on, target_marker);
     if policy_inconsistent {
@@ -845,7 +836,7 @@ pub(in crate::doctor) fn run_secure_boot_section(
             issue_code::SECURE_BOOT_STATE_INCOMPLETE,
             DoctorSeverity::Error,
             id,
-            "Secure Boot policy is inconsistent across firmware runtime, target marker, and firmware-boot configuration",
+            "Secure Boot policy is inconsistent between firmware runtime state and the target policy marker",
         ));
         let esp_device = context
             .esp
