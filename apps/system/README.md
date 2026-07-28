@@ -62,6 +62,15 @@ interactive Apply loads the plan ID and confirmation token from the validated
 plan file, and interactive Revert obtains its state-bound token from a fresh
 status check.
 
+Target discovery reports facts rather than applying one global exclusion rule.
+A confirmed CatOS `/` remains visible as the current-running-root candidate,
+while other installations remain offline candidates. Consumers then apply their
+own safety policy: Doctor prefers the current CatOS root on an installed system
+or inside a chroot; Live and initramfs Doctor runs consider only offline
+installations; chroot, filesystem repair, and snapshot recovery exclude the
+current root; mount-layout and boot repair may select it only where their own
+safety contracts support in-place operation.
+
 Doctor, chroot, all Repair commands, and the write-capable Recovery commands
 (`apply`, `resume`, and `revert`) request administrator privileges through an
 absolute trusted `sudo`, `sudo-rs`, `doas`, or `run0` path before privileged
@@ -400,7 +409,7 @@ The following surfaces are wired into CTest when `-DBUILD_TESTS=ON`:
 | `catos-system-recovery-qemu-smoke` | Authoritative real-Btrfs acceptance in QEMU. Exercises the happy path, all three fault windows, resume reconciliation, Completed revert including the reverse-swap crash window, non-default source identity, guest-side data/backup/readonly assertions, nested-layout refusal, external-ESP refusal, and byte-for-byte ESP no-write verification. Once QEMU starts, skipped assertions are hard failures. |
 | `catos-system-repair-qemu-smoke` | Real-filesystem repair acceptance in QEMU. It repairs deliberately damaged ext4 and FAT images, damages one metadata-DUP root-tree mirror and proves Btrfs escalates from the checksum diagnostic to `--repair` and a clean recheck, exercises normal XFS repair, and creates a real unclean XFS journal by killing a writer VM before proving `xfs_repair -L` reports `repaired_with_risk`. |
 | `catos-system-mount-repair-qemu-smoke` | State-changing mount-repair acceptance in QEMU. It exercises all six `/boot`/ESP layouts, a Btrfs `@boot`, an independent ext4 `/boot`, a plain ext4 target, the currently-running ext4 root without unmounting it, complete fstab mount verification, and empty-subvolume rollback after an induced verification failure. |
-| `catos-system-doctor-qemu-smoke` | Read-only Doctor acceptance in QEMU. Builds real CatOS btrfs target images (healthy, fs-corrupt, mount-break, ambiguous, doctor-fail), runs `catos-doctor` against each, asserts exit code 0 under the documented Doctor exit semantics for every unhealthy scenario, asserts non-zero exit only for doctor-fail, AND verifies byte-for-byte by `sha256` that no target image was written. Once QEMU starts, skipped assertions are hard failures. |
+| `catos-system-doctor-qemu-smoke` | Read-only Doctor acceptance in QEMU. Covers offline CatOS targets, provider detection, corruption, broken fstab, ambiguity, interrupted recovery, and a real running-root case that mounts the CatOS `@` subvolume as `/` and enters it with `switch_root` before executing `catos-doctor`. It asserts the correct `offline`/`running` target kind, cleanup, exit semantics, and byte-for-byte `sha256` no-write guarantees. Once QEMU starts, skipped assertions are hard failures. |
 
 The two minimal initramfs tests are opt-in through
 `-DCATOS_SYSTEM_INITRAMFS_SMOKE=ON`. The real storage test is enabled with
@@ -456,7 +465,7 @@ On this host (rustc 1.96.1, x86_64-unknown-linux-musl):
 
 ```
 $ stat -c %s <binary>
-1036992
+1815296
 $ file <binary>
 ... static-pie linked ... stripped
 $ readelf -l <binary> | grep INTERP     # (empty)
@@ -465,7 +474,7 @@ $ bash scripts/verify-static.sh <binary>
 ok: no PT_INTERP segment
 ok: no NEEDED entries
 ok: ELF magic bytes present
-info: binary size 1036992 bytes (1012 KiB)
+info: binary size 1815296 bytes (1772 KiB)
 RESULT: OK (binary is fully static)
 ```
 
@@ -709,6 +718,14 @@ catos-doctor
   GUI/front-end consumption; the public entry point intentionally does not
   expose it.
 * `--help` / `--version` work as on every other entry point.
+* **Runtime-aware target policy.** On an installed CatOS system or inside a
+  CatOS chroot, a confirmed `/` is selected before any offline installation and
+  does not create false ambiguity. In Live and initramfs environments, the
+  running environment remains discovery evidence but is ineligible as the
+  diagnosis target; only installed offline CatOS roots are selectable.
+* **No running-root remount.** Doctor borrows `/` directly after revalidating
+  the mount source, filesystem type, and Btrfs subvolume against current
+  mountinfo. Offline roots continue to use explicit read-only/no-replay mounts.
 * With interactive stdin, Doctor requests administrator privileges through an
   absolute trusted `sudo`, `sudo-rs`, `doas`, or `run0` executable before
   creating a private mount namespace. Stdout may be redirected to a report
@@ -783,7 +800,9 @@ are mounts it created itself inside its private mount namespace
 (`DoctorCleanup`). The QEMU acceptance test
 (`scripts/doctor-qemu-smoke.sh`) verifies this by `sha256`-hashing
 each target image before and after a `catos-doctor` run; any hash
-mismatch is a hard failure.
+mismatch is a hard failure. The same matrix boots one fixture by mounting its
+CatOS `@` subvolume as `/` and using `switch_root`, so running-root acceptance
+is not inferred from an offline-target test.
 
 ### Issue codes
 

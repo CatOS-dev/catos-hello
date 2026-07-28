@@ -111,6 +111,7 @@ UUID_CORRUPT=66666666-6666-4666-8666-666666666666
 UUID_INTERRUPTED=77777777-7777-4777-8777-777777777777
 UUID_AMBIG_A=88888888-8888-4888-8888-888888888888
 UUID_AMBIG_B=99999999-9999-4999-8999-999999999999
+UUID_RUNNING=aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa
 
 ROOT_GRUB=$WORKDIR/root-grub.img
 ROOT_LIMINE=$WORKDIR/root-limine.img
@@ -121,6 +122,7 @@ ROOT_CORRUPT=$WORKDIR/root-corrupt.img
 ROOT_INTERRUPTED=$WORKDIR/root-interrupted.img
 ROOT_AMBIG_A=$WORKDIR/root-ambiguous-a.img
 ROOT_AMBIG_B=$WORKDIR/root-ambiguous-b.img
+ROOT_RUNNING=$WORKDIR/root-running.img
 ESP_GRUB=$WORKDIR/esp-grub.img
 ESP_LIMINE=$WORKDIR/esp-limine.img
 ESP_SYSTEMD=$WORKDIR/esp-systemd.img
@@ -169,7 +171,7 @@ CFG
 }
 
 build_root_image() {
-    local image=$1 root_uuid=$2 provider=$3 fstab_uuid=$4 interrupted=$5 metadata_dup=$6
+    local image=$1 root_uuid=$2 provider=$3 fstab_uuid=$4 interrupted=$5 metadata_dup=$6 runtime_tree=${7:-}
     local tree=$WORKDIR/tree-$(basename "$image" .img)
     rm -rf "$tree"
     mkdir -p \
@@ -188,6 +190,12 @@ build_root_image() {
         "$tree/@home" "$tree/@root" "$tree/@srv" "$tree/@cache" \
         "$tree/@tmp" "$tree/@log" "$tree/@snapshots" "$tree/@snapshot-source" \
         "$tree/.catos-recovery/transactions"
+    if [[ -n $runtime_tree ]]; then
+        cp -a "$runtime_tree"/. "$tree/@/"
+        mkdir -p "$tree/@/sbin"
+        cp "$runtime_tree/bin/running-root-init" "$tree/@/sbin/init"
+        chmod +x "$tree/@/sbin/init"
+    fi
     cat > "$tree/@/etc/os-release" <<'OS_RELEASE'
 NAME="CatOS"
 ID=catos
@@ -405,7 +413,7 @@ chmod +x \
 ln -s catos-system "$INITRAMFS/bin/catos-doctor"
 ln -s catos-system "$INITRAMFS/bin/catos-chroot"
 for applet in sh mount umount cat echo printf sleep poweroff mkdir grep awk find \
-              sync sed head tr insmod script timeout sha256sum chmod ln readlink basename dirname; do
+              sync sed head tr insmod script timeout sha256sum chmod ln readlink basename dirname switch_root; do
     ln -sf /bin/busybox "$INITRAMFS/bin/$applet"
 done
 ln -sf /bin/busybox "$INITRAMFS/sbin/poweroff"
@@ -459,6 +467,41 @@ echo $? > /tmp/doctor.rc
 CHILD
 chmod +x "$INITRAMFS/bin/doctor-child"
 
+cat > "$INITRAMFS/bin/running-root-init" <<'RUNNING_INIT'
+#!/bin/sh
+PATH=/bin:/sbin:/usr/bin:/usr/sbin
+export PATH
+mkdir -p /tmp /run /dev/pts
+mount -t tmpfs tmpfs /tmp
+chmod 1777 /tmp
+
+rm -f /tmp/doctor.rc /tmp/doctor.out /tmp/doctor.err /tmp/typescript
+printf '\n\n\n\n\n\n' | timeout -s KILL 30 script -q -c /bin/doctor-child /tmp/typescript \
+    > /tmp/doctor.out 2> /tmp/doctor.err
+rc=$(cat /tmp/doctor.rc 2>/dev/null || echo 255)
+echo "__DOCTOR_BEGIN__"
+cat /tmp/doctor.out
+echo "__DOCTOR_STDERR__"
+cat /tmp/doctor.err
+echo "__DOCTOR_RC__=$rc"
+echo "__DOCTOR_END__"
+if grep -Fq '/run/catos-system/sessions/' /proc/self/mountinfo; then
+    echo "__DOCTOR_RESIDUAL_MOUNTS__"
+    grep -F '/run/catos-system/sessions/' /proc/self/mountinfo
+else
+    echo "__DOCTOR_NO_RESIDUAL_MOUNTS__"
+fi
+if [ -d /run/catos-system/sessions ] \
+    && find /run/catos-system/sessions -mindepth 1 -print -quit 2>/dev/null | grep -q .; then
+    echo "__DOCTOR_RESIDUAL_SESSION_DIRS__"
+    find /run/catos-system/sessions -mindepth 1 -maxdepth 2 -print
+else
+    echo "__DOCTOR_NO_RESIDUAL_SESSION_DIRS__"
+fi
+poweroff -f
+RUNNING_INIT
+chmod +x "$INITRAMFS/bin/running-root-init"
+
 cat > "$INITRAMFS/init" <<'GUEST'
 #!/bin/sh
 PATH=/bin:/sbin:/usr/bin:/usr/sbin
@@ -484,6 +527,22 @@ SCENARIO=""
 for arg in $(cat /proc/cmdline); do
     case "$arg" in catos_doctor_scenario=*) SCENARIO=${arg#catos_doctor_scenario=} ;; esac
 done
+
+if [ "$SCENARIO" = running_root ]; then
+    mkdir -p /newroot
+    if ! mount -t btrfs -o ro,norecovery,subvol=@ /dev/vda /newroot; then
+        echo __RUNNING_ROOT_PREPARE_FAILED__=mount
+        poweroff -f
+    fi
+    for path in proc sys dev run; do
+        mkdir -p "/newroot/$path"
+        mount --move "/$path" "/newroot/$path" || {
+            echo "__RUNNING_ROOT_PREPARE_FAILED__=move-$path"
+            poweroff -f
+        }
+    done
+    exec switch_root /newroot /sbin/init
+fi
 
 if [ "$SCENARIO" = prepare_interrupted ]; then
     mkdir -p /tmp/prepare-root
@@ -573,6 +632,7 @@ sync
 poweroff -f
 GUEST
 chmod +x "$INITRAMFS/init"
+build_root_image "$ROOT_RUNNING" "$UUID_RUNNING" grub "$UUID_RUNNING" no no "$INITRAMFS"
 (
     cd "$INITRAMFS"
     find . -print0 | cpio --null -o -H newc 2>/dev/null | gzip -q -1 > "$INITRAMFS_IMG"
@@ -690,6 +750,18 @@ assert_provider provider_limine "$ROOT_LIMINE" "$ESP_LIMINE" "$UUID_LIMINE" limi
 assert_provider provider_systemd "$ROOT_SYSTEMD" "$ESP_SYSTEMD" "$UUID_SYSTEMD" systemd-boot
 assert_provider provider_uki "$ROOT_UKI" "$ESP_UKI" "$UUID_UKI" uki
 
+echo "=== scenario: running-root ==="
+run_qemu running_root "$ROOT_RUNNING" "$ESP_GRUB" "$ROOT_LIMINE"
+assert_doctor_success "$LAST_LOG" running_root
+assert_contains "$LAST_LOG" "Selected target: CatOS QEMU Fixture" running_root
+assert_contains "$LAST_LOG" "UUID=$UUID_RUNNING" running_root
+assert_contains "$LAST_LOG" "target=running" running_root
+assert_contains "$LAST_LOG" "Storage       | healthy    | /dev/vda; btrfs; /@" running_root
+assert_not_contains "$LAST_LOG" "target=offline" running_root
+assert_not_contains "$LAST_LOG" "TARGET_NOT_FOUND" running_root
+assert_not_contains "$LAST_LOG" "OFFLINE_FIRMWARE_STATE_UNAVAILABLE" running_root
+assert_not_contains "$LAST_LOG" "__RUNNING_ROOT_PREPARE_FAILED__" running_root
+
 echo "=== scenario: broken-fstab ==="
 run_qemu broken_fstab "$ROOT_BROKEN" "$ESP_GRUB"
 assert_doctor_success "$LAST_LOG" broken_fstab
@@ -723,4 +795,4 @@ assert_contains "$LAST_LOG" "RECOVERY_TRANSACTION_INTERRUPTED" interrupted_trans
 assert_contains "$LAST_LOG" "catos-recovery resume" interrupted_transaction
 assert_contains "$LAST_LOG" "tx-00000000000000000000000000000004" interrupted_transaction
 
-echo "pass: Doctor QEMU acceptance exercised /bin/catos-doctor, real target selection, provider matrix, corruption, fstab failure, ambiguity, recovery, cleanup and no-write hashes"
+echo "pass: Doctor QEMU acceptance exercised offline and running-root target selection, provider matrix, corruption, fstab failure, ambiguity, recovery, cleanup and no-write hashes"

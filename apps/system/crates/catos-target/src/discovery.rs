@@ -34,12 +34,13 @@ pub struct TargetCandidate {
     pub evidence: Vec<Evidence>,
 }
 
-/// A selected candidate held open on a real readonly/no-replay mount.  The
-/// owner must call [`TargetSession::cleanup`] and preserve the returned
-/// result in its report.
+/// A selected candidate held either by borrowing the verified running `/`
+/// or by a real readonly/no-replay mount. The owner must call
+/// [`TargetSession::cleanup`] and preserve every returned cleanup result.
 pub struct TargetSession {
     candidate: TargetCandidate,
-    probe: ReadonlyProbe,
+    root: PathBuf,
+    probe: Option<ReadonlyProbe>,
 }
 
 /// A non-root filesystem attached to a selected target (for example its ESP)
@@ -63,17 +64,77 @@ impl ReadonlySession {
 
 impl TargetSession {
     pub fn open(candidate: TargetCandidate) -> Result<Self, String> {
+        if candidate.running_environment_member {
+            verify_running_root_candidate(&candidate)?;
+            return Ok(Self { candidate, root: PathBuf::from("/"), probe: None });
+        }
         let probe = ReadonlyProbe::mount(
             &candidate.root_device,
             &candidate.root_fstype,
             candidate.root_subvolume.as_deref().map(|value| value.trim_start_matches('/')),
         )?;
-        Ok(Self { candidate, probe })
+        let root = probe.path().to_path_buf();
+        Ok(Self { candidate, root, probe: Some(probe) })
     }
 
-    pub fn root(&self) -> &Path { self.probe.path() }
+    pub fn root(&self) -> &Path { &self.root }
     pub fn candidate(&self) -> &TargetCandidate { &self.candidate }
-    pub fn cleanup(mut self) -> ProbeCleanup { self.probe.cleanup() }
+    pub fn cleanup(mut self) -> Vec<ProbeCleanup> {
+        self.probe.take().map(|mut probe| vec![probe.cleanup()]).unwrap_or_default()
+    }
+}
+
+fn verify_running_root_candidate(candidate: &TargetCandidate) -> Result<(), String> {
+    let mountinfo = std::fs::read_to_string("/proc/self/mountinfo")
+        .map_err(|error| format!("cannot read current mount identity: {error}"))?;
+    verify_running_root_candidate_with(candidate, &mountinfo, same_block_device)
+}
+
+fn verify_running_root_candidate_with<F>(candidate: &TargetCandidate, mountinfo: &str, same_device: F) -> Result<(), String>
+where
+    F: Fn(&Path, &Path) -> bool,
+{
+    if !candidate.currently_mounted || !candidate.running_environment_member {
+        return Err("candidate is not marked as the mounted running root".into());
+    }
+    let root = crate::mountinfo::parse_all(mountinfo)
+        .into_iter()
+        .find(|mount| mount.mount_point == Path::new("/"))
+        .ok_or_else(|| "current root mount identity is unavailable".to_string())?;
+    if !same_device(&candidate.root_device, Path::new(&root.source)) {
+        return Err(format!(
+            "running-root device identity changed: expected {}, observed {}",
+            candidate.root_device.display(), root.source
+        ));
+    }
+    if root.fstype != candidate.root_fstype {
+        return Err(format!(
+            "running-root filesystem changed: expected {}, observed {}",
+            candidate.root_fstype, root.fstype
+        ));
+    }
+    let observed_subvolume = if candidate.root_fstype == "btrfs" {
+        normalise_subvolume_path(Path::new(&root.root))
+    } else {
+        None
+    };
+    if observed_subvolume != candidate.root_subvolume {
+        return Err(format!(
+            "running-root subvolume changed: expected {:?}, observed {:?}",
+            candidate.root_subvolume, observed_subvolume
+        ));
+    }
+    Ok(())
+}
+
+fn same_block_device(left: &Path, right: &Path) -> bool {
+    use std::os::unix::fs::{FileTypeExt, MetadataExt};
+    match (std::fs::metadata(left), std::fs::metadata(right)) {
+        (Ok(left), Ok(right)) => left.file_type().is_block_device()
+            && right.file_type().is_block_device()
+            && left.rdev() == right.rdev(),
+        _ => false,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -116,70 +177,91 @@ impl ProbeCleanup {
     }
 }
 
-/// Discover installed CatOS targets. Candidate contents are always read from
-/// the candidate mount, never from the running host root.
+/// Discover CatOS targets as facts. The current root is inspected directly
+/// when mounted from a supported block filesystem; offline roots use temporary
+/// readonly/no-replay mounts.
 pub fn discover_targets() -> DiscoveryReport {
     discover_targets_with_options(DiscoveryOptions::default())
 }
 
-pub fn discover_targets_with_options(options: DiscoveryOptions) -> DiscoveryReport {
+/// Inspect only the current process root. This path never creates a temporary
+/// mount and is used by Doctor before considering unrelated offline systems.
+pub fn discover_running_root() -> DiscoveryReport {
     let fs = RealFilesystem;
     let (devices, warnings) = discover_devices(&fs);
-    let mut report = DiscoveryReport::default();
-    for warning in warnings {
-        report.rejected.push(DiscoveryRejection {
-            source: "block-inventory".into(), reason: warning.message,
-            evidence: Vec::new(),
-        });
-    }
-    report.inventory = devices.clone();
-    for device in &devices {
-        inspect_device(device, options, &mut report);
+    let mut report = report_from_inventory(devices, warnings);
+    for device in report.inventory.clone() {
+        inspect_running_device(&device, &mut report);
     }
     report.candidates.sort_by_key(candidate_key);
     report
 }
 
-/// The shared inventory used by consumers that need to resolve fstab entries
-/// after target selection. It is intentionally the same inventory pass as
-/// candidate discovery, not a second `lsblk` implementation.
-pub fn discover_inventory() -> Vec<BlockDevice> {
-    discover_devices(&RealFilesystem).0
+pub fn discover_targets_with_options(options: DiscoveryOptions) -> DiscoveryReport {
+    let fs = RealFilesystem;
+    let (devices, warnings) = discover_devices(&fs);
+    let mut report = report_from_inventory(devices, warnings);
+    for device in report.inventory.clone() {
+        inspect_device(&device, options, &mut report);
+    }
+    report.candidates.sort_by_key(candidate_key);
+    report
+}
+
+fn report_from_inventory(devices: Vec<BlockDevice>, warnings: Vec<crate::model::Warning>) -> DiscoveryReport {
+    let mut report = DiscoveryReport { inventory: devices, ..DiscoveryReport::default() };
+    for warning in warnings {
+        report.rejected.push(DiscoveryRejection {
+            source: "block-inventory".into(), reason: warning.message, evidence: Vec::new(),
+        });
+    }
+    report
+}
+
+fn inspect_running_device(device: &BlockDevice, report: &mut DiscoveryReport) -> bool {
+    let Some(fstype) = device.filesystem.as_deref() else { return false };
+    if !matches!(fstype, "btrfs" | "ext2" | "ext3" | "ext4" | "xfs" | "f2fs") { return false }
+    let Some(path) = device.dev_path.as_ref() else { return false };
+    let Some(mount) = device.mounts.iter().find(|mount| mount.mount_point == Path::new("/")) else { return false };
+    let subvolume = (fstype == "btrfs").then(|| normalise_subvolume_path(&mount.root)).flatten();
+    match inspect_at(device, Path::new("/"), subvolume, None, true, true, "current running root") {
+        Some(candidate) => report.candidates.push(candidate),
+        None => report.rejected.push(rejected(path, "current running root does not identify as CatOS".into())),
+    }
+    true
 }
 
 fn inspect_device(device: &BlockDevice, options: DiscoveryOptions, report: &mut DiscoveryReport) {
     let Some(fstype) = device.filesystem.as_deref() else { return };
     if !matches!(fstype, "btrfs" | "ext2" | "ext3" | "ext4" | "xfs" | "f2fs") { return }
     let Some(path) = device.dev_path.as_ref() else { return };
-    let live_mount = device.mounts.iter().find(|mount| mount.mount_point == Path::new("/"));
-    if let Some(mount) = live_mount {
-        if fstype != "btrfs" {
-            report.excluded.push(excluded(path, "device", "current Live root device", mount.root.display().to_string()));
-            return;
-        }
-    }
+    let is_running_device = inspect_running_device(device, report);
+    if is_running_device && fstype != "btrfs" { return }
 
     if fstype == "btrfs" {
-        inspect_btrfs_device(device, live_mount.map(|mount| mount.root.as_path()), options, report);
+        inspect_btrfs_device(device, options, report);
         return;
     }
     let mut probe = match ReadonlyProbe::mount(path, fstype, None) {
         Ok(probe) => probe,
         Err(reason) => { report.rejected.push(rejected(path, reason)); return; }
     };
-    let result = inspect_at(device, probe.path(), None, None, None, "readonly no-replay temporary mount");
+    let (currently_mounted, running_environment_member) = candidate_mount_membership(device, None);
+    let result = inspect_at(
+        device, probe.path(), None, None, currently_mounted,
+        running_environment_member, "readonly no-replay temporary mount",
+    );
     let cleanup = probe.cleanup();
-    let clean = cleanup.error.is_none();
+    let clean = cleanup.is_clean();
     report.cleanup.push(cleanup);
     if !clean { report.rejected.push(rejected(path, "readonly probe cleanup failed".into())); return; }
     match result {
-        Some(candidate) if candidate.running_environment_member => report.excluded.push(excluded(path, "subvolume", "current Live root subvolume", candidate.root_subvolume.unwrap_or_else(|| "/".into()))),
         Some(candidate) => report.candidates.push(candidate),
         None => report.rejected.push(rejected(path, "candidate os-release/layout is not CatOS".into())),
     }
 }
 
-fn inspect_btrfs_device(device: &BlockDevice, live_subvolume: Option<&Path>, options: DiscoveryOptions, report: &mut DiscoveryReport) {
+fn inspect_btrfs_device(device: &BlockDevice, options: DiscoveryOptions, report: &mut DiscoveryReport) {
     let Some(path) = device.dev_path.as_ref() else { return };
     let mut probe = match ReadonlyProbe::mount_with_options(path, "btrfs", "ro,norecovery,subvolid=5") {
         Ok(probe) => probe,
@@ -187,10 +269,13 @@ fn inspect_btrfs_device(device: &BlockDevice, live_subvolume: Option<&Path>, opt
     };
     let subvolumes = list_btrfs_subvolumes(probe.path());
     let cleanup = probe.cleanup();
-    let clean = cleanup.error.is_none();
+    let clean = cleanup.is_clean();
     report.cleanup.push(cleanup);
     if !clean { report.rejected.push(rejected(path, "readonly probe cleanup failed".into())); return; }
-    let subvolumes = match subvolumes { Ok(values) => values, Err(reason) => { report.rejected.push(rejected(path, reason)); return; } };
+    let subvolumes = match subvolumes {
+        Ok(values) => values,
+        Err(reason) => { report.rejected.push(rejected(path, reason)); return; }
+    };
     for (subvolume_id, subvolume) in subvolumes {
         if is_dot_snapshot_root(&subvolume) && !options.include_dot_snapshots {
             report.excluded.push(DiscoveryRejection {
@@ -200,27 +285,51 @@ fn inspect_btrfs_device(device: &BlockDevice, live_subvolume: Option<&Path>, opt
                     "BTRFS_SNAPSHOT_ROOT_EXCLUDED",
                     path.display().to_string(),
                     "historical snapshot roots are excluded from normal target selection",
-                )
-                .with_value(format!("/{subvolume}"))],
+                ).with_value(format!("/{subvolume}"))],
             });
             continue;
         }
+        let subvolume_path = format!("/{subvolume}");
+        let (currently_mounted, running_environment_member) =
+            candidate_mount_membership(device, Some(&subvolume_path));
+        if running_environment_member { continue }
         let mut subprobe = match ReadonlyProbe::mount(path, "btrfs", Some(&subvolume)) {
             Ok(probe) => probe,
-            Err(reason) => { report.rejected.push(rejected(path, format!("cannot probe subvolume /{subvolume}: {reason}"))); continue; }
+            Err(reason) => {
+                report.rejected.push(rejected(path, format!("cannot probe subvolume /{subvolume}: {reason}")));
+                continue;
+            }
         };
-        let live = live_subvolume.map(|value| value.to_string_lossy().trim_start_matches('/').to_string());
-        let candidate = inspect_at(device, subprobe.path(), Some(format!("/{subvolume}")), Some(subvolume_id), None, "readonly no-replay Btrfs subvolume mount");
+        let candidate = inspect_at(
+            device, subprobe.path(), Some(subvolume_path), Some(subvolume_id),
+            currently_mounted, false, "readonly no-replay Btrfs subvolume mount",
+        );
         let cleanup = subprobe.cleanup();
-        let clean = cleanup.error.is_none();
+        let clean = cleanup.is_clean();
         report.cleanup.push(cleanup);
         if !clean { report.rejected.push(rejected(path, "readonly subvolume probe cleanup failed".into())); continue; }
         match candidate {
-            Some(candidate) if candidate.root_subvolume.as_deref() == live.as_deref().map(|value| format!("/{value}")).as_deref() => report.excluded.push(excluded(path, "subvolume", "current Live root subvolume", candidate.root_subvolume.unwrap_or_else(|| "/".into()))),
             Some(candidate) => report.candidates.push(candidate),
             None => report.rejected.push(rejected(path, format!("Btrfs subvolume /{subvolume} is not a CatOS root"))),
         }
     }
+}
+
+fn normalise_subvolume_path(path: &Path) -> Option<String> {
+    let value = path.to_string_lossy();
+    let trimmed = value.trim_matches('/');
+    (!trimmed.is_empty()).then(|| format!("/{trimmed}"))
+}
+
+fn candidate_mount_membership(device: &BlockDevice, candidate_subvolume: Option<&str>) -> (bool, bool) {
+    let matches_candidate = |mount: &crate::model::MountObservation| match candidate_subvolume {
+        Some(subvolume) => normalise_subvolume_path(&mount.root).as_deref() == Some(subvolume),
+        None => mount.root == Path::new("/"),
+    };
+    let currently_mounted = device.mounts.iter().any(matches_candidate);
+    let running_environment_member = device.mounts.iter()
+        .any(|mount| mount.mount_point == Path::new("/") && matches_candidate(mount));
+    (currently_mounted, running_environment_member)
 }
 
 
@@ -259,14 +368,21 @@ fn parse_btrfs_subvolume_list(body: &str) -> Vec<(u64, String)> {
         .collect()
 }
 
-fn inspect_at(device: &BlockDevice, root: &Path, subvolume: Option<String>, subvolume_id: Option<u64>, live_root: Option<&Path>, probe_kind: &str) -> Option<TargetCandidate> {
+fn inspect_at(
+    device: &BlockDevice,
+    root: &Path,
+    subvolume: Option<String>,
+    subvolume_id: Option<u64>,
+    currently_mounted: bool,
+    running_environment_member: bool,
+    probe_kind: &str,
+) -> Option<TargetCandidate> {
     let root_text = root.to_str()?;
     let system_root = SystemRoot::from_user_input(root_text).ok()?;
     let mut warnings = Vec::new();
     let inspection = inspect_target(&RealFilesystem, &system_root, &mut warnings);
     if !inspection.is_catos_target.is_detected() { return None }
     let os_release = inspection.os_release?;
-    let running_environment_member = live_root.is_some_and(|live| live == root);
     let fstab_identity = RealFilesystem
         .rooted_read_to_string(root, Path::new("etc/fstab"))
         .ok()
@@ -277,20 +393,24 @@ fn inspect_at(device: &BlockDevice, root: &Path, subvolume: Option<String>, subv
                 .to_string()
         });
     let mut evidence = device.evidence.clone();
-    evidence.push(Evidence::new("CANDIDATE_OS_RELEASE", root.display().to_string(), "CatOS identity read from readonly candidate mount"));
-    evidence.push(Evidence::new("PROBE_MOUNT", root.display().to_string(), probe_kind));
+    evidence.push(Evidence::new(
+        "CANDIDATE_OS_RELEASE", root.display().to_string(), "CatOS identity read from candidate root",
+    ));
+    evidence.push(Evidence::new("PROBE_ROOT", root.display().to_string(), probe_kind));
+    if running_environment_member {
+        evidence.push(Evidence::new(
+            "RUNNING_ROOT_CANDIDATE", root.display().to_string(), "candidate is the current process root",
+        ));
+    }
     evidence.extend(warnings.into_iter().map(|warning| Evidence::new("CANDIDATE_WARNING", "candidate", warning)));
     Some(TargetCandidate {
         root_device: device.dev_path.clone()?, root_fstype: device.filesystem.clone()?, root_uuid: device.uuid.clone(),
-        root_subvolume: subvolume, root_subvolume_id: subvolume_id, filesystem_id: device.uuid.clone(), label: device.label.clone(), os_release,
-        fstab_identity, currently_mounted: !device.mounts.is_empty(), running_environment_member,
+        root_subvolume: subvolume, root_subvolume_id: subvolume_id, filesystem_id: device.uuid.clone(),
+        label: device.label.clone(), os_release, fstab_identity, currently_mounted, running_environment_member,
         confidence: RootCandidateConfidence::High, evidence,
     })
 }
 
-fn excluded(path: &Path, scope: &str, reason: &str, value: String) -> DiscoveryRejection {
-    DiscoveryRejection { source: path.display().to_string(), reason: reason.into(), evidence: vec![Evidence::new("LIVE_ROOT_EXCLUDED", path.display().to_string(), format!("excluded {scope}: {reason}")).with_value(value)] }
-}
 fn rejected(path: &Path, reason: String) -> DiscoveryRejection {
     DiscoveryRejection { source: path.display().to_string(), reason: reason.clone(), evidence: vec![Evidence::new("CANDIDATE_REJECTED", path.display().to_string(), reason)] }
 }
@@ -343,6 +463,60 @@ mod tests {
     fn ordering_is_stable_and_prefers_high_confidence() {
         let base = |path: &str, confidence| TargetCandidate { root_device: PathBuf::from(path), root_fstype: "ext4".into(), root_uuid: None, root_subvolume: None, root_subvolume_id: None, filesystem_id: None, label: None, os_release: OsRelease::default(), fstab_identity: None, currently_mounted: false, running_environment_member: false, confidence, evidence: Vec::new() };
         assert!(candidate_key(&base("/dev/sda2", RootCandidateConfidence::High)) < candidate_key(&base("/dev/sda1", RootCandidateConfidence::Medium)));
+    }
+
+    fn mounted_btrfs_device() -> BlockDevice {
+        BlockDevice {
+            name: "nvme0n1p2".into(), dev_path: Some(PathBuf::from("/dev/nvme0n1p2")),
+            major_minor: Some("259:2".into()), parent: "nvme0n1".into(),
+            class: crate::model::DeviceClass::Partition, disk_kind: crate::model::DiskKind::Unknown,
+            partition_role: crate::model::PartitionRole::LinuxFilesystem, partition_number: Some(2),
+            size_sectors: None, read_only: false, removable: false, filesystem: Some("btrfs".into()),
+            uuid: Some("fsid".into()), part_uuid: None, label: None, part_label: None,
+            mount_point: Some(PathBuf::from("/")),
+            mounts: vec![
+                crate::model::MountObservation { mount_point: PathBuf::from("/"), root: PathBuf::from("/@"), fstype: "btrfs".into(), read_only: false },
+                crate::model::MountObservation { mount_point: PathBuf::from("/home"), root: PathBuf::from("/@home"), fstype: "btrfs".into(), read_only: false },
+            ],
+            mounted_before_session: true, evidence: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn running_root_borrow_requires_matching_stable_identity() {
+        let device = mounted_btrfs_device();
+        let mut candidate = TargetCandidate {
+            root_device: device.dev_path.clone().unwrap(), root_fstype: "btrfs".into(),
+            root_uuid: device.uuid.clone(), root_subvolume: Some("/@".into()), root_subvolume_id: None,
+            filesystem_id: device.uuid.clone(), label: None, os_release: OsRelease::default(),
+            fstab_identity: None, currently_mounted: true, running_environment_member: true,
+            confidence: RootCandidateConfidence::High, evidence: Vec::new(),
+        };
+        let mountinfo = "36 25 259:2 /@ / ro,relatime - btrfs /dev/nvme0n1p2 ro,subvolid=256,subvol=/@\n";
+        let same_fixture_device = |left: &Path, right: &Path| left == right;
+        verify_running_root_candidate_with(&candidate, mountinfo, same_fixture_device).unwrap();
+        candidate.root_device = PathBuf::from("/dev/other");
+        assert!(verify_running_root_candidate_with(&candidate, mountinfo, same_fixture_device).is_err());
+        candidate.root_device = PathBuf::from("/dev/nvme0n1p2");
+        candidate.root_subvolume = Some("/@other".into());
+        assert!(verify_running_root_candidate_with(&candidate, mountinfo, same_fixture_device).is_err());
+    }
+
+    #[test]
+    fn equal_regular_paths_are_not_block_device_identity() {
+        let path = std::env::temp_dir().join(format!("catos-target-regular-file-{}", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        std::fs::write(&path, b"not a block device").unwrap();
+        assert!(!same_block_device(&path, &path));
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn btrfs_candidate_mount_membership_is_subvolume_specific() {
+        let device = mounted_btrfs_device();
+        assert_eq!(candidate_mount_membership(&device, Some("/@")), (true, true));
+        assert_eq!(candidate_mount_membership(&device, Some("/@home")), (true, false));
+        assert_eq!(candidate_mount_membership(&device, Some("/@snapshots/1/snapshot")), (false, false));
     }
 
     #[test]

@@ -11,7 +11,6 @@ pub mod fstab;
 pub mod model;
 pub mod mountinfo;
 pub mod path;
-pub mod plan;
 pub mod verify;
 pub mod view;
 

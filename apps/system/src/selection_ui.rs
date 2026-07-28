@@ -16,22 +16,50 @@ pub enum Selection {
     Unavailable(String),
 }
 
-pub fn select_target(report: &DiscoveryReport, program: &str) -> Selection {
-    if report.candidates.is_empty() {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TargetSelectionPolicy {
+    Any,
+    OfflineOnly,
+    PreferRunningRoot,
+}
+
+pub fn select_target_with_policy(report: &DiscoveryReport, program: &str, policy: TargetSelectionPolicy) -> Selection {
+    if policy == TargetSelectionPolicy::PreferRunningRoot {
+        let running = report.candidates.iter().filter(|candidate| candidate.running_environment_member).collect::<Vec<_>>();
+        match running.as_slice() {
+            [candidate] => { print_summary(candidate); return Selection::Selected(Box::new((*candidate).clone())); }
+            [] => {}
+            _ => return Selection::Unavailable("multiple candidates claim to be the current running root".into()),
+        }
+    }
+    let candidates = report.candidates.iter()
+        .filter(|candidate| policy != TargetSelectionPolicy::OfflineOnly || !candidate.running_environment_member)
+        .collect::<Vec<_>>();
+    if candidates.is_empty() {
         eprintln!("{program}: no diagnosable CatOS system was found");
+        if policy == TargetSelectionPolicy::OfflineOnly
+            && report.candidates.iter().any(|candidate| candidate.running_environment_member)
+        {
+            eprintln!("{program}: the current running root is CatOS but is not eligible for this offline operation");
+        }
         for item in report.excluded.iter().chain(&report.rejected) {
             eprintln!("{program}: {}: {}", item.source, item.reason);
         }
-        return Selection::Unavailable("no CatOS candidate".into());
+        let reason = if policy == TargetSelectionPolicy::OfflineOnly { "no offline CatOS candidate" } else { "no CatOS candidate" };
+        return Selection::Unavailable(reason.into());
     }
+    select_from_candidates(&candidates, program)
+}
+
+fn select_from_candidates(candidates: &[&TargetCandidate], program: &str) -> Selection {
     if !io::stdin().is_terminal() {
-        return match report.candidates.as_slice() {
-            [candidate] if candidate.confidence == RootCandidateConfidence::High => Selection::Selected(Box::new(candidate.clone())),
+        return match candidates {
+            [candidate] if candidate.confidence == RootCandidateConfidence::High => Selection::Selected(Box::new((*candidate).clone())),
             _ => Selection::Unavailable("multiple target candidates require an interactive terminal".into()),
         };
     }
-    if report.candidates.len() == 1 && report.candidates[0].confidence == RootCandidateConfidence::High {
-        let candidate = &report.candidates[0];
+    if candidates.len() == 1 && candidates[0].confidence == RootCandidateConfidence::High {
+        let candidate = candidates[0];
         print_summary(candidate);
         return match read_confirm(program, "Use this target?") {
             Ok(true) => Selection::Selected(Box::new(candidate.clone())),
@@ -40,17 +68,18 @@ pub fn select_target(report: &DiscoveryReport, program: &str) -> Selection {
         };
     }
     println!("Available CatOS targets:");
-    for (index, candidate) in report.candidates.iter().enumerate() {
+    for (index, candidate) in candidates.iter().enumerate() {
         println!("  [{index}] {}", summary(candidate));
     }
-    match read_index(program, report.candidates.len()) {
-        Ok(index) => { let candidate = report.candidates[index].clone(); print_summary(&candidate); Selection::Selected(Box::new(candidate)) }
+    match read_index(program, candidates.len()) {
+        Ok(index) => { let candidate = candidates[index].clone(); print_summary(&candidate); Selection::Selected(Box::new(candidate)) }
         Err(error) => Selection::Unavailable(error),
     }
 }
 
-/// Pick an encrypted container only when no mounted CatOS candidate exists.
-/// The unlocked mapper is subsequently re-discovered through `select_target`.
+/// Pick an encrypted container only when no eligible CatOS candidate exists.
+/// The unlocked mapper is subsequently re-discovered and passed through the
+/// caller's explicit target-selection policy.
 pub fn select_luks_device(devices: &[BlockDevice], program: &str) -> Result<Option<BlockDevice>, String> {
     let candidates = luks_candidates(devices);
     if candidates.is_empty() { return Ok(None); }
@@ -107,6 +136,37 @@ fn read_index(program: &str, count: usize) -> Result<usize, String> {
 mod tests {
     use super::*;
     use std::path::PathBuf;
+    fn candidate(path: &str, running: bool) -> TargetCandidate {
+        TargetCandidate { root_device: PathBuf::from(path), root_fstype: "btrfs".into(), root_uuid: Some(format!("uuid-{path}")), root_subvolume: Some("/@".into()), root_subvolume_id: Some(256), filesystem_id: Some("fsid".into()), label: None, os_release: crate::target::model::OsRelease { pretty_name: Some("CatOS".into()), ..Default::default() }, fstab_identity: None, currently_mounted: running, running_environment_member: running, confidence: RootCandidateConfidence::High, evidence: Vec::new() }
+    }
+
+    #[test]
+    fn prefer_running_root_selects_it_before_offline_candidates() {
+        let report = DiscoveryReport { candidates: vec![candidate("/dev/running", true), candidate("/dev/offline", false)], ..Default::default() };
+        match select_target_with_policy(&report, "catos-doctor", TargetSelectionPolicy::PreferRunningRoot) {
+            Selection::Selected(selected) => { assert_eq!(selected.root_device, PathBuf::from("/dev/running")); assert!(selected.running_environment_member); }
+            other => panic!("expected running root selection, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn offline_only_policy_never_returns_the_running_root() {
+        let report = DiscoveryReport { candidates: vec![candidate("/dev/running", true), candidate("/dev/offline", false)], ..Default::default() };
+        match select_target_with_policy(&report, "catos-chroot", TargetSelectionPolicy::OfflineOnly) {
+            Selection::Selected(selected) => { assert_eq!(selected.root_device, PathBuf::from("/dev/offline")); assert!(!selected.running_environment_member); }
+            other => panic!("expected offline selection, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn offline_only_policy_refuses_a_running_root_only_report() {
+        let report = DiscoveryReport { candidates: vec![candidate("/dev/running", true)], ..Default::default() };
+        match select_target_with_policy(&report, "catos-chroot", TargetSelectionPolicy::OfflineOnly) {
+            Selection::Unavailable(reason) => assert!(reason.contains("offline")),
+            other => panic!("expected unavailable selection, got {other:?}"),
+        }
+    }
+
     #[test]
     fn summary_includes_device_uuid_and_subvolume() {
         let candidate = TargetCandidate { root_device: PathBuf::from("/dev/nvme0n1p3"), root_fstype: "btrfs".into(), root_uuid: Some("uuid".into()), root_subvolume: Some("/@".into()), root_subvolume_id: Some(256), filesystem_id: Some("fsid".into()), label: None, os_release: crate::target::model::OsRelease { pretty_name: Some("CatOS".into()), ..Default::default() }, fstab_identity: None, currently_mounted: false, running_environment_member: false, confidence: RootCandidateConfidence::High, evidence: Vec::new() };

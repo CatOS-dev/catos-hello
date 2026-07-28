@@ -473,7 +473,7 @@ fn interactive_repair(context: CommandContext) -> Result<Option<i32>, String> {
         _ => unreachable!("menu returned an out-of-range repair action"),
     };
 
-    let Some(target) = choose_repair_target(context.program)? else {
+    let Some(target) = choose_repair_target(context.program, domain)? else {
         return Ok(None);
     };
     let args = repair_args(domain, &target);
@@ -483,7 +483,7 @@ fn interactive_repair(context: CommandContext) -> Result<Option<i32>, String> {
     Ok(Some(run_repair(context, &args)))
 }
 
-fn choose_repair_target(program: &str) -> Result<Option<InteractiveTarget>, String> {
+fn choose_repair_target(program: &str, domain: &str) -> Result<Option<InteractiveTarget>, String> {
     let choice = menu::choose(
         "Repair Target",
         &[
@@ -494,10 +494,18 @@ fn choose_repair_target(program: &str) -> Result<Option<InteractiveTarget>, Stri
     )?;
     match choice {
         None => Ok(None),
-        Some(0) => select_detected_target(program),
+        Some(0) => select_detected_target(program, repair_target_policy(domain)),
         Some(1) => Ok(Some(InteractiveTarget::Automatic)),
         Some(2) => prompt_manual_target(),
         Some(_) => unreachable!("menu returned an out-of-range repair target action"),
+    }
+}
+
+fn repair_target_policy(domain: &str) -> crate::selection_ui::TargetSelectionPolicy {
+    if domain == "fs" {
+        crate::selection_ui::TargetSelectionPolicy::OfflineOnly
+    } else {
+        crate::selection_ui::TargetSelectionPolicy::Any
     }
 }
 
@@ -511,13 +519,19 @@ fn choose_recovery_target(program: &str) -> Result<Option<InteractiveTarget>, St
     )?;
     match choice {
         None => Ok(None),
-        Some(0) => select_detected_target(program),
+        Some(0) => select_detected_target(
+            program,
+            crate::selection_ui::TargetSelectionPolicy::OfflineOnly,
+        ),
         Some(1) => prompt_manual_target(),
         Some(_) => unreachable!("menu returned an out-of-range recovery target action"),
     }
 }
 
-fn select_detected_target(program: &str) -> Result<Option<InteractiveTarget>, String> {
+fn select_detected_target(
+    program: &str,
+    policy: crate::selection_ui::TargetSelectionPolicy,
+) -> Result<Option<InteractiveTarget>, String> {
     crate::mount::execute::namespace::establish_private_namespace().map_err(|error| {
         format!("cannot establish a private mount namespace for target discovery: {error}")
     })?;
@@ -544,7 +558,7 @@ fn select_detected_target(program: &str) -> Result<Option<InteractiveTarget>, St
         ));
     }
 
-    match crate::selection_ui::select_target(&report, program) {
+    match crate::selection_ui::select_target_with_policy(&report, program, policy) {
         crate::selection_ui::Selection::Selected(candidate) => {
             Ok(Some(InteractiveTarget::Explicit {
                 device: candidate.root_device.display().to_string(),
@@ -1962,6 +1976,17 @@ mod tests {
             ..Default::default()
         };
         assert!(snapshot_menu_items(&report).is_empty());
+    }
+
+    #[test]
+    fn repair_target_policy_keeps_fs_offline_and_allows_supported_in_place_domains() {
+        use crate::selection_ui::TargetSelectionPolicy;
+        assert_eq!(
+            repair_target_policy("fs"),
+            TargetSelectionPolicy::OfflineOnly
+        );
+        assert_eq!(repair_target_policy("mount"), TargetSelectionPolicy::Any);
+        assert_eq!(repair_target_policy("boot"), TargetSelectionPolicy::Any);
     }
 
     #[test]

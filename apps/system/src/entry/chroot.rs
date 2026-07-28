@@ -63,7 +63,11 @@ pub fn run(argv: &[String], program: &str) -> i32 {
     }
 
     let mut opened_luks: Option<OpenedLuks> = None;
-    let selected_target = match crate::selection_ui::select_target(&discovery, program) {
+    let selected_target = match crate::selection_ui::select_target_with_policy(
+        &discovery,
+        program,
+        crate::selection_ui::TargetSelectionPolicy::OfflineOnly,
+    ) {
         crate::selection_ui::Selection::Selected(candidate) => *candidate,
         crate::selection_ui::Selection::Declined => {
             eprintln!("{program}: target selection declined");
@@ -102,7 +106,13 @@ pub fn run(argv: &[String], program: &str) -> i32 {
                         },
                     )
                 },
-                |report| crate::selection_ui::select_target(report, program),
+                |report| {
+                    crate::selection_ui::select_target_with_policy(
+                        report,
+                        program,
+                        crate::selection_ui::TargetSelectionPolicy::OfflineOnly,
+                    )
+                },
                 || opened.take().expect("opened LUKS token").close(),
             ) {
                 Ok((selected, fresh_inventory, warnings)) => {

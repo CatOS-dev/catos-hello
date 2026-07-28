@@ -14,11 +14,10 @@
 //! * Doctor NEVER writes to the target. The only resources it may
 //!   clean up are mounts it created itself inside its private mount
 //!   namespace. See [`DoctorCleanup`].
-//! * Target selection does not route through `repair`; Doctor resolves
-//!   the target via `target::plan` only. Section-level diagnosis still
-//!   consumes repair flows (`check_only_for`, `mount_repair::diagnose`,
-//!   `boot::diagnose::provider`) in read-only mode pending later phases that
-//!   will move those surfaces under the `target` capability.
+//! * Target selection does not route through `repair`; Doctor consumes the
+//!   shared `target::discovery` facts with an explicit runtime policy.
+//!   Section-level diagnosis still consumes repair flows (`check_only_for`,
+//!   `mount_repair::diagnose`, `boot::diagnose::provider`) in read-only mode.
 //! * Doctor NEVER invokes the boot provider's `execute` or `verify`
 //!   methods; it only consults the pure `detect()` function and
 //!   reads deployed asset files directly.
@@ -43,7 +42,7 @@ use crate::target::discovery::{ReadonlySession, TargetCandidate, TargetSession};
 use crate::target::Evidence;
 
 pub mod target_selection;
-use target_selection::{TargetDiscoveryErrorKind, TargetSelection};
+use target_selection::TargetDiscoveryErrorKind;
 
 /// The single selected target and its readonly lifetime.  Section code receives
 /// this context instead of independently rediscovering a target.
@@ -155,7 +154,7 @@ impl DoctorTargetContext {
                 if let Some(esp) = esp.take() {
                     cleanup.push(esp.root.cleanup());
                 }
-                cleanup.push(session.take().expect("target session").cleanup());
+                cleanup.extend(session.take().expect("target session").cleanup());
                 cleanup
             },
         )?;
@@ -223,7 +222,7 @@ impl DoctorTargetContext {
         if let Ok(Some(esp)) = self.esp {
             cleanup.push(esp.root.cleanup());
         }
-        cleanup.push(self.session.cleanup());
+        cleanup.extend(self.session.cleanup());
         cleanup
     }
 
@@ -266,7 +265,7 @@ fn context_open_error(
     if let Some(esp) = esp {
         cleanup.push(esp.root.cleanup());
     }
-    cleanup.push(session.cleanup());
+    cleanup.extend(session.cleanup());
     ContextOpenError { cause, cleanup }
 }
 
@@ -441,7 +440,7 @@ pub fn run_doctor() -> DoctorReport {
         Err(error) => {
             let mut report = DoctorReport {
                 environment,
-                target: TargetSelection::Identified(target).to_target_summary(),
+                target: target_selection::target_summary(&target),
                 ..DoctorReport::default()
             };
             report
@@ -563,32 +562,6 @@ fn cleanup_report(
     }
 }
 
-#[doc(hidden)]
-pub fn run_doctor_with<R: FsCommandRunner + ?Sized>(runner: &R) -> DoctorReport {
-    let mut report = DoctorReport::default();
-
-    let environment = sections::capture_environment();
-    report.environment = environment.clone();
-
-    let selection = target_selection::discover_target();
-    report.target = selection.to_target_summary();
-
-    let sections = match selection {
-        TargetSelection::None { reason } => handle_no_target(reason, &mut report),
-        TargetSelection::Ambiguous { candidates } => {
-            handle_ambiguous_target(candidates, &mut report)
-        }
-        TargetSelection::Identified(_) => {
-            run_sections(runner, None, None, &environment, &mut report)
-        }
-    };
-
-    report.sections = sections;
-    aggregate(&mut report);
-    report.cleanup = DoctorCleanup::not_required();
-    report
-}
-
 fn run_sections<R: FsCommandRunner + ?Sized>(
     runner: &R,
     context: Option<&DoctorTargetContext>,
@@ -635,11 +608,11 @@ fn handle_no_target(reason: String, report: &mut DoctorReport) -> Vec<DoctorSect
             DoctorSectionId::Storage,
             format!("no CatOS target identified: {reason}"),
         )
-        .with_recommendation(recommendation_code::BOOT_LIVE_ENVIRONMENT),
+        .with_recommendation(recommendation_code::MANUAL_REVIEW),
     );
     report.recommendations.push(DoctorRecommendation::new(
-        recommendation_code::BOOT_LIVE_ENVIRONMENT,
-        "no CatOS target was identified; boot a CatOS Live environment or specify the target explicitly",
+        recommendation_code::MANUAL_REVIEW,
+        "no CatOS target was identified; verify that installed-system storage is visible and unlocked, then rerun Doctor",
     ));
     sections.into_iter().map(|(_, s)| s).collect()
 }
@@ -858,15 +831,6 @@ pub mod tests {
             .any(|item| item.code == "DOCTOR_NAMESPACE_UNAVAILABLE"));
         assert!(report.cleanup.all_clean);
         assert!(report.doctor_failed());
-    }
-
-    #[test]
-    fn target_summary_for_no_target_uses_none_kind() {
-        let sel = TargetSelection::None {
-            reason: "test".into(),
-        };
-        let summary = sel.to_target_summary();
-        assert_eq!(summary.kind, DoctorTargetKind::None);
     }
 
     #[test]

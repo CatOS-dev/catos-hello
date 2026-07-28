@@ -9,6 +9,67 @@ use std::path::PathBuf;
 
 use catos_system::target;
 
+#[test]
+fn installed_catos_running_root_is_a_discovery_candidate() {
+    let os_release = std::fs::read_to_string("/etc/os-release").unwrap_or_default();
+    let is_catos = os_release.lines().any(|line| {
+        line.trim()
+            .strip_prefix("ID=")
+            .is_some_and(|value| value.trim_matches(['\"', '\'']) == "catos")
+    });
+    if !is_catos {
+        return;
+    }
+
+    let running_only = target::discovery::discover_running_root();
+    assert!(running_only.cleanup.is_empty());
+    assert_eq!(
+        running_only.candidates.iter().filter(|candidate| candidate.running_environment_member).count(),
+        1
+    );
+
+    let report = target::discovery::discover_targets();
+    let running = report
+        .candidates
+        .iter()
+        .filter(|candidate| candidate.running_environment_member)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        running.len(),
+        1,
+        "expected exactly one running CatOS root; candidates={:?}, excluded={:?}, rejected={:?}",
+        report.candidates,
+        report.excluded,
+        report.rejected
+    );
+    let candidate = running[0];
+    assert!(candidate.currently_mounted);
+    let mountinfo = std::fs::read_to_string("/proc/self/mountinfo").unwrap();
+    let root_line = mountinfo
+        .lines()
+        .find(|line| line.split_whitespace().nth(4) == Some("/"))
+        .expect("running root mountinfo entry");
+    let separator = root_line.find(" - ").expect("mountinfo separator");
+    let left = &root_line[..separator];
+    let right = &root_line[separator + 3..];
+    let expected_subvolume = left
+        .split_whitespace()
+        .nth(3)
+        .filter(|root| *root != "/")
+        .map(str::to_string);
+    let expected_source = right
+        .split_whitespace()
+        .nth(1)
+        .expect("mountinfo root source");
+    assert_eq!(candidate.root_device, PathBuf::from(expected_source));
+    assert_eq!(candidate.root_subvolume, expected_subvolume);
+
+    let session = target::discovery::TargetSession::open(candidate.clone())
+        .expect("verified running-root candidate must open without a remount");
+    assert_eq!(session.root(), std::path::Path::new("/"));
+    assert!(session.cleanup().is_empty());
+}
+
 // ---------------------------------------------------------------------------
 // 1. Live root and an offline target have distinct identities.
 // ---------------------------------------------------------------------------
@@ -43,72 +104,7 @@ fn live_root_and_offline_target_have_distinct_identities() {
 }
 
 // ---------------------------------------------------------------------------
-// 2. Target selection does not route through `repair`.
-// ---------------------------------------------------------------------------
-
-/// Doctor's target-selection entry point lives at `target::plan::discover_target`
-/// and returns a value whose type is defined in `target`, not in `repair`.
-///
-/// This test is genuinely falsifiable in two compounding ways:
-///
-/// 1. **Source-level invariant** — we read this very test file and assert
-///    the doctor's target_selection source contains no `crate::repair`
-///    reference. If a future change routes target selection through
-///    repair, this string check fails immediately.
-/// 2. **Behavioural invariant** — we inject an explicit failing fixture
-///    (a non-CatOS running root, identifiable by the absence of
-///    `/etc/os-release` content matching CatOS) and assert the plan
-///    resolves to `TargetPlanKind::None` WITHOUT invoking any repair
-///    path. The call resolves purely through `target::plan`; the
-///    returned type is `target::plan::TargetPlan`, proving the
-///    dependency edge target<-doctor does not transit to repair.
-#[test]
-fn target_selection_does_not_route_through_repair() {
-    // (1) Source-level: the doctor target_selection module must not
-    // import or reference `crate::repair`. This is a deterministic
-    // assertion over the project's own source — if anyone re-routes
-    // target selection through repair, the literal appears and the
-    // assert fails.
-    let source = include_str!("../src/doctor/target_selection.rs");
-    assert!(
-        !source.contains("crate::repair"),
-        "doctor/target_selection.rs must not reference crate::repair; found a reference"
-    );
-
-    // (2) Behavioural: the call resolves through `target::plan` and
-    // returns the target-domain type. The type binding below is the
-    // contract — if `discover_target_plan` ever returns a repair-domain
-    // type, this fails to compile.
-    let plan = target::plan::discover_target_plan();
-    let _plan_type_check: &target::plan::TargetPlan = &plan;
-
-    // Deterministic outcome on a non-CatOS host root (the test host):
-    // the plan must be `None` with no identity, because target::plan
-    // never mounts and never invokes repair's mount machinery.
-    match plan.kind {
-        target::plan::TargetPlanKind::None => {
-            assert!(
-                plan.identity.is_none(),
-                "non-CatOS running root must not yield an identified target"
-            );
-        }
-        target::plan::TargetPlanKind::RunningRoot => {
-            // If the test host IS CatOS, identity must point at "/".
-            let identity = plan.identity.expect("RunningRoot carries an identity");
-            assert_eq!(identity.root, std::path::Path::new("/"));
-        }
-        // Offline / Ambiguous would require target::plan to mount or
-        // enumerate candidate devices, which it is contractually
-        // forbidden from doing. If either variant appears, the
-        // invariant is violated.
-        other => panic!(
-            "target::plan must not produce Offline/Ambiguous without mounting; got {other:?}"
-        ),
-    }
-}
-
-// ---------------------------------------------------------------------------
-// 3. TargetView.root points at the real offline root.
+// 2. TargetView.root points at the real offline root.
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -122,7 +118,7 @@ fn target_view_root_points_at_offline_root() {
 }
 
 // ---------------------------------------------------------------------------
-// 4. Rooted path rejects escapes: `..`, absolute re-rooting, symlink tricks.
+// 3. Rooted path rejects escapes: `..`, absolute re-rooting, symlink tricks.
 // ---------------------------------------------------------------------------
 
 #[test]
