@@ -162,6 +162,9 @@ pub fn finalize_secure_boot<R: TargetRunner>(
                     let password_generated = parsed.enrollment_password.is_some();
                     let password_path =
                         password_generated.then(|| inputs.enrollment_password_path.clone());
+                    let outcome = parsed
+                        .enrollment_pending
+                        .then_some(BootRepairOutcome::PartiallyRepaired);
                     (
                         SecureBootReport {
                             target_policy_present: true,
@@ -176,7 +179,7 @@ pub fn finalize_secure_boot<R: TargetRunner>(
                             raw_payload: sanitise_payload(&payload),
                             ..SecureBootReport::default()
                         },
-                        None,
+                        outcome,
                         Some(audited_result),
                     )
                 }
@@ -363,7 +366,7 @@ mod tests {
             ..SecureBootInputs::default()
         };
         let (report, outcome, action) = finalize_secure_boot(&runner, &inputs);
-        assert_eq!(outcome, None);
+        assert_eq!(outcome, Some(BootRepairOutcome::PartiallyRepaired));
         assert!(report.enable_invoked);
         assert_eq!(report.certificate_fingerprint.as_deref(), Some(FINGERPRINT));
         assert!(report.enrollment_pending);
@@ -479,7 +482,10 @@ mod tests {
             target_policy_present: true,
             ..SecureBootInputs::default()
         };
-        let _ = finalize_secure_boot(&runner, &inputs);
+        let (report, outcome, _) = finalize_secure_boot(&runner, &inputs);
+        assert_eq!(outcome, None);
+        assert!(!report.enrollment_pending);
+        assert!(!report.enrollment_password_generated);
         let invocations = runner.invocations();
         assert_eq!(invocations.len(), 1);
         assert_eq!(invocations[0].binary, "catos-secureboot");

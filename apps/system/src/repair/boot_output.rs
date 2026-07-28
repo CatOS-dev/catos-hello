@@ -262,6 +262,7 @@ mod tests {
         let human = String::from_utf8(human).unwrap();
         assert!(human.contains("SEKRET1234"));
         assert!(human.contains("/var/lib/catos-secureboot/enrollment-password"));
+        assert!(human.contains("enter the one-time password in MokManager"));
 
         let json = render_boot_repair_json(&report, "catos-repair boot", std::path::Path::new("/"))
             .unwrap();
