@@ -917,7 +917,16 @@ pub fn target_secureboot_policy_evidence(
         ));
     }
 
-    validate_secureboot_state(&state, &paths.state_path)?;
+    let state_fingerprint = validate_secureboot_state(&state, &paths.state_path)?;
+    let certificate_path = rooted_child(&paths.key_dir, "machine.der")?;
+    let certificate_der = read_optional_target_file(target_root, &certificate_path)?
+        .ok_or_else(|| format!("target Secure Boot certificate {certificate_path} disappeared"))?;
+    let certificate_fingerprint = certificate_der_fingerprint(&certificate_der);
+    if !state_fingerprint.eq_ignore_ascii_case(&certificate_fingerprint) {
+        return Err(format!(
+            "target Secure Boot state fingerprint does not match {certificate_path}"
+        ));
+    }
     Ok(SecureBootPolicyEvidence {
         present: true,
         enrollment_password_path: paths.enrollment_password_path,
@@ -1072,7 +1081,16 @@ pub(crate) fn certificate_fingerprint_is_valid(value: &str) -> bool {
     value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
-fn validate_secureboot_state(bytes: &[u8], path: &str) -> Result<(), String> {
+pub(crate) fn certificate_der_fingerprint(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+
+    Sha256::digest(bytes)
+        .iter()
+        .map(|byte| format!("{byte:02X}"))
+        .collect()
+}
+
+fn validate_secureboot_state(bytes: &[u8], path: &str) -> Result<String, String> {
     let value: serde_json::Value = serde_json::from_slice(bytes)
         .map_err(|error| format!("target Secure Boot state {path} is invalid JSON: {error}"))?;
     let object = value
@@ -1101,7 +1119,7 @@ fn validate_secureboot_state(bytes: &[u8], path: &str) -> Result<(), String> {
             "target Secure Boot state {path} has no boolean enrollment_pending field"
         ));
     }
-    Ok(())
+    Ok(fingerprint.to_string())
 }
 
 #[cfg(test)]

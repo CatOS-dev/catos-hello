@@ -12,4 +12,5 @@ catos-target = { path = "../catos-target" }
 catos-mount = { path = "../catos-mount" }
 serde = { version = "1", default-features = false, features = ["std", "derive"] }
 serde_json = { version = "1", default-features = false, features = ["std"] }
+sha2 = { version = "0.10", default-features = false }
 libc = { version = "0.2", default-features = false }

@@ -740,21 +740,22 @@ mod tests {
     }
 
     fn write_secureboot_policy(root: &Path, state_path: &str, key_dir: &str, version: u64) {
+        let certificate_der = b"test-machine-der";
+        let fingerprint = crate::diagnose::target::certificate_der_fingerprint(certificate_der);
         let state = root.join(state_path.trim_start_matches('/'));
         fs::create_dir_all(state.parent().unwrap()).unwrap();
         fs::write(
             &state,
             format!(
-                "{{\"version\":{version},\"enrollment_pending\":true,\"certificate_fingerprint\":\"{}\",\"last_error\":\"\",\"updated_at\":\"2026-07-28T00:00:00+00:00\"}}\n",
-                "A".repeat(64)
+                "{{\"version\":{version},\"enrollment_pending\":true,\"certificate_fingerprint\":\"{fingerprint}\",\"last_error\":\"\",\"updated_at\":\"2026-07-28T00:00:00+00:00\"}}\n"
             ),
         )
         .unwrap();
         let keys = root.join(key_dir.trim_start_matches('/'));
         fs::create_dir_all(&keys).unwrap();
-        for name in ["machine.key", "machine.crt", "machine.der"] {
-            fs::write(keys.join(name), b"key-material").unwrap();
-        }
+        fs::write(keys.join("machine.key"), b"private-key").unwrap();
+        fs::write(keys.join("machine.crt"), b"certificate-pem").unwrap();
+        fs::write(keys.join("machine.der"), certificate_der).unwrap();
     }
 
     fn btrfs_target() -> MountTargetIdentity {
@@ -1524,6 +1525,27 @@ key_dir = "/var/lib/catos-secureboot/keys"
 
         let error = target_secureboot_policy_present(&target_root.path).unwrap_err();
         assert!(error.contains("absolute non-root path"));
+    }
+
+    #[test]
+    fn secureboot_state_fingerprint_must_match_machine_certificate() {
+        let target_root = TempTargetRoot::new();
+        write_secureboot_policy(
+            &target_root.path,
+            "/var/lib/catos-secureboot/state.json",
+            "/var/lib/catos-secureboot/keys",
+            1,
+        );
+        fs::write(
+            target_root
+                .path
+                .join("var/lib/catos-secureboot/keys/machine.der"),
+            b"different-certificate",
+        )
+        .unwrap();
+
+        let error = target_secureboot_policy_present(&target_root.path).unwrap_err();
+        assert!(error.contains("fingerprint does not match"));
     }
 
     #[test]
