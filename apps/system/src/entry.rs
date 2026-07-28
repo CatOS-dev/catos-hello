@@ -594,7 +594,7 @@ fn choose_repair_target(program: &str, domain: &str) -> Result<Option<Interactiv
         None => Ok(None),
         Some(0) => select_detected_target(program, repair_target_policy(domain)),
         Some(1) => Ok(Some(InteractiveTarget::Automatic)),
-        Some(2) => prompt_manual_target(),
+        Some(2) => prompt_manual_target(program),
         Some(_) => unreachable!("menu returned an out-of-range repair target action"),
     }
 }
@@ -621,7 +621,7 @@ fn choose_recovery_target(program: &str) -> Result<Option<InteractiveTarget>, St
             program,
             crate::selection_ui::TargetSelectionPolicy::OfflineOnly,
         ),
-        Some(1) => prompt_manual_target(),
+        Some(1) => prompt_manual_target(program),
         Some(_) => unreachable!("menu returned an out-of-range recovery target action"),
     }
 }
@@ -668,14 +668,29 @@ fn select_detected_target(
     }
 }
 
-fn prompt_manual_target() -> Result<Option<InteractiveTarget>, String> {
-    let Some(device) = menu::prompt("Root device, for example /dev/nvme0n1p2")? else {
-        return Ok(None);
-    };
-    Ok(Some(InteractiveTarget::Explicit {
+fn prompt_manual_target(program: &str) -> Result<Option<InteractiveTarget>, String> {
+    loop {
+        let Some(device) = menu::prompt("Root device, for example /dev/nvme0n1p2")? else {
+            return Ok(None);
+        };
+        match manual_target_from_device(device) {
+            Ok(target) => return Ok(Some(target)),
+            Err(error) => eprintln!("{program}: {error}"),
+        }
+    }
+}
+
+fn manual_target_from_device(device: String) -> Result<InteractiveTarget, String> {
+    if !validate_repair_device_arg(std::path::Path::new(&device)) {
+        return Err(
+            "root device must be an absolute /dev/... path without .. or prefix components"
+                .into(),
+        );
+    }
+    Ok(InteractiveTarget::Explicit {
         device,
         root_subvolume: None,
-    }))
+    })
 }
 
 fn repair_args(domain: &str, target: &InteractiveTarget) -> Vec<String> {
@@ -738,7 +753,8 @@ fn load_recovery_choices(
     });
     match outcome {
         crate::recovery::RecoveryOutcome::List(report) => Ok(report),
-        crate::recovery::RecoveryOutcome::Error(error) => {
+        crate::recovery::RecoveryOutcome::ArgumentError(error)
+        | crate::recovery::RecoveryOutcome::Error(error) => {
             Err(format!("cannot enumerate recovery choices: {error}"))
         }
         _ => unreachable!("recovery list returned a non-list outcome"),
@@ -849,7 +865,8 @@ fn load_recovery_status(
     });
     match outcome {
         crate::recovery::RecoveryOutcome::Status(report) => Ok(*report),
-        crate::recovery::RecoveryOutcome::Error(error) => Err(format!(
+        crate::recovery::RecoveryOutcome::ArgumentError(error)
+        | crate::recovery::RecoveryOutcome::Error(error) => Err(format!(
             "cannot inspect recovery transaction {transaction:?}: {error}"
         )),
         _ => unreachable!("recovery status returned a non-status outcome"),
@@ -859,7 +876,9 @@ fn load_recovery_status(
 fn load_interactive_recovery_plan(
     path: &str,
 ) -> Result<crate::snapshot::model::RecoveryPlan, String> {
-    crate::snapshot::store::load_plan(std::path::Path::new(path))
+    let validated = crate::cli::parse_plan_file_path(path, "Recovery plan file")
+        .map_err(|error| error.to_string())?;
+    crate::snapshot::store::load_plan(&validated)
         .map_err(|error| format!("cannot load recovery plan {path:?}: {error}"))
 }
 
@@ -2149,6 +2168,20 @@ mod tests {
     }
 
     #[test]
+    fn manual_target_rejects_paths_outside_dev_before_discovery() {
+        assert!(manual_target_from_device("relative".into()).is_err());
+        assert!(manual_target_from_device("/tmp/disk".into()).is_err());
+        assert!(manual_target_from_device("/dev/../tmp/disk".into()).is_err());
+        assert_eq!(
+            manual_target_from_device("/dev/mapper/catos-root".into()).unwrap(),
+            InteractiveTarget::Explicit {
+                device: "/dev/mapper/catos-root".into(),
+                root_subvolume: None,
+            }
+        );
+    }
+
+    #[test]
     fn repair_target_policy_keeps_fs_offline_and_allows_supported_in_place_domains() {
         use crate::selection_ui::TargetSelectionPolicy;
         assert_eq!(
@@ -2177,6 +2210,26 @@ mod tests {
             ]
         );
         assert_eq!(repair_args("boot", &InteractiveTarget::Automatic), ["boot"]);
+    }
+
+    #[test]
+    fn interactive_recovery_plan_rejects_relative_path_before_loading() {
+        let error = load_interactive_recovery_plan("relative-plan.json").unwrap_err();
+        assert!(error.contains("must be an absolute path"));
+
+        let error = load_interactive_recovery_plan("/tmp/../plan.json").unwrap_err();
+        assert!(error.contains("unsafe path component"));
+    }
+
+    #[test]
+    fn invalid_manual_recovery_transaction_is_reported_without_panicking() {
+        let target = InteractiveTarget::Explicit {
+            device: "/dev/does-not-exist".into(),
+            root_subvolume: None,
+        };
+        let error = load_recovery_status(&target, "not-a-transaction").unwrap_err();
+        assert!(error.contains("cannot inspect recovery transaction"));
+        assert!(error.contains("recovery id must start with tx-"));
     }
 
     #[test]

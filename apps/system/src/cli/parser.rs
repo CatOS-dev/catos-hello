@@ -337,7 +337,7 @@ fn parse_opaque_id(value: &str, option: &str) -> Result<String, Error> {
     Ok(cleaned.to_string())
 }
 
-fn parse_plan_file_path(value: &str, option: &str) -> Result<PathBuf, Error> {
+pub(crate) fn parse_plan_file_path(value: &str, option: &str) -> Result<PathBuf, Error> {
     let path = Path::new(value);
     if value.is_empty() || value.contains('\0') {
         return Err(Error::InvalidArgument {
