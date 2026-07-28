@@ -7,6 +7,7 @@
 
 use std::collections::VecDeque;
 use std::fs;
+use std::os::unix::fs::{symlink, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -45,6 +46,16 @@ fn scratch(label: &str) -> PathBuf {
     let _ = fs::remove_dir_all(&path);
     fs::create_dir_all(&path).unwrap();
     path
+}
+
+fn write_valid_arch_chroot_shell(root: &Path) {
+    fs::create_dir_all(root.join("usr/bin")).unwrap();
+    if !root.join("bin").exists() {
+        symlink("usr/bin", root.join("bin")).unwrap();
+    }
+    let bash = root.join("usr/bin/bash");
+    fs::write(&bash, b"synthetic-bash").unwrap();
+    fs::set_permissions(&bash, fs::Permissions::from_mode(0o755)).unwrap();
 }
 
 fn mountinfo_for_plan(root: &Path, plan: &ChrootPlan) -> String {
@@ -1023,13 +1034,12 @@ fn execution_uses_typed_authorization_and_cleans_up_after_shell_failure() {
     let authorization = authorize(ChrootPrivilegeEvidence::EffectiveUid(0)).unwrap();
     let session_root = scratch("execute");
     fs::create_dir_all(session_root.join("etc")).unwrap();
-    fs::create_dir_all(session_root.join("usr/bin")).unwrap();
+    write_valid_arch_chroot_shell(&session_root);
     fs::write(
         session_root.join("etc/os-release"),
         b"ID=catos\nNAME=CatOS\n",
     )
     .unwrap();
-    fs::write(session_root.join("usr/bin/bash"), b"synthetic").unwrap();
     let mountinfo = mountinfo_for_plan(&session_root, &plan);
 
     let mut effects = RecordedEffects {
@@ -1083,9 +1093,8 @@ fn successful_shell_with_failed_unmount_is_cleanup_incomplete() {
     let authorization = authorize(ChrootPrivilegeEvidence::EffectiveUid(0)).unwrap();
     let session_root = scratch("cleanup-incomplete");
     fs::create_dir_all(session_root.join("etc")).unwrap();
-    fs::create_dir_all(session_root.join("usr/bin")).unwrap();
+    write_valid_arch_chroot_shell(&session_root);
     fs::write(session_root.join("etc/os-release"), b"ID=catos\n").unwrap();
-    fs::write(session_root.join("usr/bin/bash"), b"synthetic").unwrap();
     let mountinfo = mountinfo_for_plan(&session_root, &plan);
 
     let mut effects = RecordedEffects {
@@ -1330,9 +1339,8 @@ fn assembled_verification_rejects_wrong_btrfs_subvolume_identity() {
     .unwrap();
     let root = scratch("verify-subvolume");
     fs::create_dir_all(root.join("etc")).unwrap();
-    fs::create_dir_all(root.join("usr/bin")).unwrap();
+    write_valid_arch_chroot_shell(&root);
     fs::write(root.join("etc/os-release"), b"ID=catos\n").unwrap();
-    fs::write(root.join("usr/bin/bash"), b"synthetic").unwrap();
     let mountinfo = mountinfo_for_plan(&root, &plan).replace("subvolid=257", "subvolid=999");
 
     let verification = verify_assembled_target(&root, &plan, &mountinfo);
@@ -1359,9 +1367,8 @@ fn assembled_verification_rejects_wrong_mount_source() {
     .unwrap();
     let root = scratch("verify-source");
     fs::create_dir_all(root.join("etc")).unwrap();
-    fs::create_dir_all(root.join("usr/bin")).unwrap();
+    write_valid_arch_chroot_shell(&root);
     fs::write(root.join("etc/os-release"), b"ID=catos\n").unwrap();
-    fs::write(root.join("usr/bin/bash"), b"synthetic").unwrap();
     let mountinfo = mountinfo_for_plan(&root, &plan).replace("/dev/vda2", "/dev/vda9");
 
     let verification = verify_assembled_target(&root, &plan, &mountinfo);
@@ -1388,9 +1395,8 @@ fn assembled_verification_requires_all_runtime_mounts() {
     .unwrap();
     let root = scratch("verify-runtime");
     fs::create_dir_all(root.join("etc")).unwrap();
-    fs::create_dir_all(root.join("usr/bin")).unwrap();
+    write_valid_arch_chroot_shell(&root);
     fs::write(root.join("etc/os-release"), b"ID=catos\n").unwrap();
-    fs::write(root.join("usr/bin/bash"), b"synthetic").unwrap();
     let missing_run = root.join("run").display().to_string();
     let mountinfo = mountinfo_for_plan(&root, &plan)
         .lines()
@@ -1410,8 +1416,6 @@ fn assembled_verification_requires_all_runtime_mounts() {
 
 #[test]
 fn verification_rejects_symlinked_target_identity() {
-    use std::os::unix::fs::symlink;
-
     let root = scratch("verify-symlink");
     fs::create_dir_all(root.join("etc")).unwrap();
     fs::create_dir_all(root.join("usr/bin")).unwrap();

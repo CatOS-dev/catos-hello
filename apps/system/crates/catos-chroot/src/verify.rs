@@ -3,7 +3,10 @@
 use std::path::{Path, PathBuf};
 
 use crate::model::{ChrootMount, ChrootPlan, ChrootVerification};
-use catos_target::execute::confined::{read_rooted_file, rooted_regular_file_size};
+use catos_target::execute::confined::{
+    read_rooted_file, rooted_path_kind, rooted_regular_file_mode, rooted_regular_file_size,
+    RootedPathKind,
+};
 use catos_target::model::OsRelease;
 use catos_target::mountinfo::{self, MountInfo};
 use catos_target::FsError;
@@ -49,27 +52,94 @@ pub fn verify_target_root(root: &Path) -> ChrootVerification {
         reasons.push("target os-release was not found".into());
     }
 
-    let shell = ["/usr/bin/bash", "/usr/bin/sh"]
-        .into_iter()
-        .find_map(|path| match rooted_regular_file_size(root, path) {
-            Ok(Some(_)) => Some(path.to_string()),
-            Ok(None) | Err(FsError::NotFound) => None,
-            Err(error) => {
-                reasons.push(format!("cannot inspect target shell {path}: {error}"));
-                None
-            }
-        });
-    if let Some(path) = shell {
-        checks.push(format!("target shell: {path}"));
-    } else if !reasons.iter().any(|reason| reason.contains("target shell")) {
-        reasons.push("target shell was not found under /usr/bin".into());
-    }
+    verify_arch_chroot_shell(root, &mut checks, &mut reasons);
 
     ChrootVerification {
         ready: reasons.is_empty(),
         checks,
         reasons,
     }
+}
+
+fn verify_arch_chroot_shell(root: &Path, checks: &mut Vec<String>, reasons: &mut Vec<String>) {
+    let bash_path = match rooted_path_kind(root, "/bin") {
+        Ok(Some(RootedPathKind::Directory)) => "/bin/bash",
+        Ok(Some(RootedPathKind::Symlink)) => {
+            let link = match std::fs::read_link(root.join("bin")) {
+                Ok(link) => link,
+                Err(error) => {
+                    reasons.push(format!(
+                        "cannot inspect target /bin symlink required by /bin/bash: {error}"
+                    ));
+                    return;
+                }
+            };
+            if link != Path::new("usr/bin") && link != Path::new("/usr/bin") {
+                reasons.push(format!(
+                    "target /bin symlink resolves to {}, not usr/bin required for /bin/bash",
+                    link.display()
+                ));
+                return;
+            }
+            "/usr/bin/bash"
+        }
+        Ok(Some(_)) => {
+            reasons.push("target /bin is neither a directory nor the merged-/usr symlink".into());
+            return;
+        }
+        Ok(None) | Err(FsError::NotFound) => {
+            reasons.push("target /bin required for /bin/bash is missing".into());
+            return;
+        }
+        Err(error) => {
+            reasons.push(format!("cannot inspect target /bin for /bin/bash: {error}"));
+            return;
+        }
+    };
+
+    let size = match rooted_regular_file_size(root, bash_path) {
+        Ok(Some(size)) => size,
+        Ok(None) | Err(FsError::NotFound) => {
+            reasons.push(format!(
+                "target /bin/bash entrypoint is missing ({bash_path} not found)"
+            ));
+            return;
+        }
+        Err(error) => {
+            reasons.push(format!(
+                "cannot inspect target /bin/bash at {bash_path}: {error}"
+            ));
+            return;
+        }
+    };
+    if size == 0 {
+        reasons.push(format!(
+            "target /bin/bash entrypoint at {bash_path} is empty"
+        ));
+        return;
+    }
+    let mode = match rooted_regular_file_mode(root, bash_path) {
+        Ok(Some(mode)) => mode,
+        Ok(None) | Err(FsError::NotFound) => {
+            reasons.push(format!(
+                "target /bin/bash entrypoint at {bash_path} disappeared"
+            ));
+            return;
+        }
+        Err(error) => {
+            reasons.push(format!(
+                "cannot inspect target /bin/bash permissions at {bash_path}: {error}"
+            ));
+            return;
+        }
+    };
+    if mode & 0o111 == 0 {
+        reasons.push(format!(
+            "target /bin/bash entrypoint at {bash_path} is not executable"
+        ));
+        return;
+    }
+    checks.push(format!("target /bin/bash entrypoint: {bash_path}"));
 }
 
 pub fn verify_assembled_target(
@@ -291,4 +361,71 @@ fn target_path(root: &Path, mount_point: &str) -> PathBuf {
 
 fn normalize_subvolume(value: &str) -> &str {
     value.trim_start_matches('/')
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::os::unix::fs::{symlink, PermissionsExt};
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+    struct TempRoot(PathBuf);
+
+    impl TempRoot {
+        fn new() -> Self {
+            let path = std::env::temp_dir().join(format!(
+                "catos-chroot-verify-{}-{}",
+                std::process::id(),
+                SEQUENCE.fetch_add(1, Ordering::Relaxed)
+            ));
+            fs::create_dir_all(path.join("usr/lib")).unwrap();
+            fs::create_dir_all(path.join("usr/bin")).unwrap();
+            fs::write(path.join("usr/lib/os-release"), "ID=catos\nNAME=CatOS\n").unwrap();
+            Self(path)
+        }
+    }
+
+    impl Drop for TempRoot {
+        fn drop(&mut self) {
+            fs::remove_dir_all(&self.0).unwrap();
+        }
+    }
+
+    #[test]
+    fn usr_bin_sh_does_not_satisfy_arch_chroot_default_entrypoint() {
+        let root = TempRoot::new();
+        fs::write(root.0.join("usr/bin/sh"), b"#!/bin/sh\n").unwrap();
+        fs::set_permissions(root.0.join("usr/bin/sh"), fs::Permissions::from_mode(0o755)).unwrap();
+
+        let verification = verify_target_root(&root.0);
+        assert!(!verification.ready);
+        assert!(verification
+            .reasons
+            .iter()
+            .any(|reason| reason.contains("/bin/bash")));
+    }
+
+    #[test]
+    fn merged_usr_bash_must_be_nonempty_and_executable() {
+        let root = TempRoot::new();
+        symlink("usr/bin", root.0.join("bin")).unwrap();
+        fs::write(root.0.join("usr/bin/bash"), b"").unwrap();
+        fs::set_permissions(
+            root.0.join("usr/bin/bash"),
+            fs::Permissions::from_mode(0o644),
+        )
+        .unwrap();
+        assert!(!verify_target_root(&root.0).ready);
+
+        fs::write(root.0.join("usr/bin/bash"), b"ELF").unwrap();
+        fs::set_permissions(
+            root.0.join("usr/bin/bash"),
+            fs::Permissions::from_mode(0o755),
+        )
+        .unwrap();
+        assert!(verify_target_root(&root.0).ready);
+    }
 }

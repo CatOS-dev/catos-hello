@@ -117,10 +117,10 @@ assert_not_contains() {
 ROOT_UUID=aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee
 TREE=$WORKDIR/tree
 mkdir -p \
-    "$TREE/@/etc" "$TREE/@/bin" "$TREE/@/usr/bin" "$TREE/@/home" "$TREE/@/root" \
+    "$TREE/@/etc" "$TREE/@/usr/bin" "$TREE/@/home" "$TREE/@/root" \
     "$TREE/@/srv" "$TREE/@/var/cache" "$TREE/@/var/tmp" \
     "$TREE/@/var/log" "$TREE/@/.snapshots" "$TREE/@/proc" \
-    "$TREE/@/sys" "$TREE/@/dev" "$TREE/@/run" \
+    "$TREE/@/sys" "$TREE/@/dev/pts" "$TREE/@/dev/shm" "$TREE/@/run" "$TREE/@/tmp" \
     "$TREE/@home" "$TREE/@root" "$TREE/@srv" "$TREE/@cache" \
     "$TREE/@tmp" "$TREE/@log" "$TREE/@snapshots" \
     "$TREE/@snapshots/1/snapshot/etc"
@@ -154,13 +154,13 @@ OS_RELEASE
 cat > "$TREE/@snapshots/1/snapshot/etc/fstab" <<FSTAB
 UUID=$ROOT_UUID / btrfs defaults,subvol=/@snapshots/1/snapshot 0 0
 FSTAB
-cp "$BUSYBOX" "$TREE/@/bin/busybox"
-cp "$BUSYBOX" "$TREE/@/usr/bin/sh"
-chmod +x "$TREE/@/bin/busybox" "$TREE/@/usr/bin/sh"
+cp "$BUSYBOX" "$TREE/@/usr/bin/busybox"
+chmod +x "$TREE/@/usr/bin/busybox"
+ln -s usr/bin "$TREE/@/bin"
 for applet in sh cat grep test readlink; do
-    ln -sf busybox "$TREE/@/bin/$applet"
+    ln -sf busybox "$TREE/@/usr/bin/$applet"
 done
-cat > "$TREE/@/bin/chroot-acceptance" <<'TARGET'
+cat > "$TREE/@/usr/bin/chroot-acceptance" <<'TARGET'
 #!/bin/sh
 set -eu
 [ "$(cat /home/.catos-home-marker)" = home-subvolume ]
@@ -176,7 +176,17 @@ set -eu
 [ -d /run ]
 echo __CHROOT_TARGET_VERIFIED__
 TARGET
-chmod +x "$TREE/@/bin/chroot-acceptance"
+chmod +x "$TREE/@/usr/bin/chroot-acceptance"
+cat > "$TREE/@/usr/bin/bash" <<'TARGET_BASH'
+#!/usr/bin/sh
+set -eu
+echo "__ARCH_CHROOT_BASH_ARGC__=$#"
+echo "__ARCH_CHROOT_BASH_ARG1__=${1-}"
+[ "$#" -eq 1 ]
+[ "$1" = -i ]
+exec /usr/bin/chroot-acceptance
+TARGET_BASH
+chmod +x "$TREE/@/usr/bin/bash"
 
 truncate -s 384M "$BASE_IMAGE"
 mkfs.btrfs -q -f -U "$ROOT_UUID" -L catos-chroot -r "$TREE" \
@@ -198,8 +208,8 @@ cp "$BUSYBOX" "$INITRAMFS/bin/busybox"
 cp "$BIN" "$INITRAMFS/bin/catos-system"
 chmod +x "$INITRAMFS/bin/busybox" "$INITRAMFS/bin/catos-system"
 ln -s catos-system "$INITRAMFS/bin/catos-chroot"
-for applet in sh mount umount chroot cat echo printf sleep poweroff mkdir grep awk \
-              find sync sed head tr insmod script timeout chmod ln readlink; do
+for applet in sh cat echo printf sleep poweroff mkdir grep awk \
+              find sync sed head tr insmod script timeout chmod ln readlink rm touch; do
     ln -sf /bin/busybox "$INITRAMFS/bin/$applet"
 done
 ln -sf /bin/busybox "$INITRAMFS/sbin/poweroff"
@@ -216,18 +226,10 @@ copy_tool_with_deps() {
         cp -L "$library" "$INITRAMFS$library"
     done < <(ldd "$src" 2>/dev/null | awk '/=> \/[^ ]+/ {print $3} $1 ~ /^\// {print $1}')
 }
-copy_tool_with_deps btrfs
-copy_tool_with_deps blkid
-
-cat > "$INITRAMFS/usr/bin/arch-chroot" <<'ARCH_CHROOT'
-#!/bin/sh
-set -eu
-if [ "${1:-}" = -S ]; then shift; fi
-root=${1:?missing chroot root}
-echo "__ARCH_CHROOT_ROOT__=$root"
-exec /bin/chroot "$root" /bin/chroot-acceptance
-ARCH_CHROOT
-chmod +x "$INITRAMFS/usr/bin/arch-chroot"
+for tool in btrfs blkid bash mount umount chroot unshare mountpoint arch-chroot; do
+    copy_tool_with_deps "$tool"
+done
+ln -sf /usr/bin/bash "$INITRAMFS/bin/bash"
 
 MODULE_LIST=$INITRAMFS/etc/modules.load
 : > "$MODULE_LIST"
@@ -259,8 +261,8 @@ cat > "$INITRAMFS/bin/chroot-child" <<'CHILD'
 #!/bin/sh
 scenario=$1
 case "$scenario" in
-    default) /bin/catos-chroot ;;
-    show_snapshots) /bin/catos-chroot --show-btrfs-dot-snapshots ;;
+    default) /bin/catos-chroot --no-systemd-chroot ;;
+    show_snapshots) /bin/catos-chroot --no-systemd-chroot --show-btrfs-dot-snapshots ;;
     *) echo "unknown scenario $scenario" >&2; exit 2 ;;
 esac
 echo $? > /tmp/chroot.rc
@@ -274,7 +276,7 @@ export PATH
 mount -t proc proc /proc
 mount -t sysfs sysfs /sys
 mount -t devtmpfs devtmpfs /dev
-mkdir -p /dev/pts /run /tmp
+mkdir -p /dev/pts /dev/shm /run /tmp
 mount -t devpts devpts /dev/pts
 mount -t tmpfs -o mode=0755 tmpfs /run
 chmod 1777 /tmp
@@ -353,7 +355,8 @@ run_qemu() {
     assert_contains "$LAST_LOG" "__CHROOT_END__" "$scenario"
     assert_contains "$LAST_LOG" "__CHROOT_RC__=0" "$scenario"
     assert_contains "$LAST_LOG" "__CHROOT_TARGET_VERIFIED__" "$scenario"
-    assert_contains "$LAST_LOG" "__ARCH_CHROOT_ROOT__=/run/catos-system/sessions/" "$scenario"
+    assert_contains "$LAST_LOG" "__ARCH_CHROOT_BASH_ARGC__=1" "$scenario"
+    assert_contains "$LAST_LOG" "__ARCH_CHROOT_BASH_ARG1__=-i" "$scenario"
     assert_contains "$LAST_LOG" "__NO_RESIDUAL_CHROOT_MOUNTS__" "$scenario"
     assert_contains "$LAST_LOG" "__NO_RESIDUAL_CHROOT_SESSIONS__" "$scenario"
     assert_not_contains "$LAST_LOG" "__RESIDUAL_CHROOT_MOUNT__" "$scenario"
@@ -375,4 +378,4 @@ assert_contains "$LAST_LOG" "CatOS Historical Snapshot" show_snapshots
 assert_contains "$LAST_LOG" "subvol=/@snapshots/1/snapshot" show_snapshots
 assert_contains "$LAST_LOG" "Selected target: CatOS Chroot QEMU Fixture" show_snapshots
 
-echo "pass: Chroot QEMU acceptance exercised /bin/catos-chroot, target selection, snapshot visibility, same-filesystem Btrfs subvolume assembly, mount verification, target chroot entry, reverse cleanup and session removal"
+echo "pass: Chroot QEMU acceptance exercised /bin/catos-chroot, the host arch-chroot implementation, its /bin/bash -i default entrypoint, target selection, snapshot visibility, same-filesystem Btrfs subvolume assembly, mount verification, reverse cleanup and session removal"

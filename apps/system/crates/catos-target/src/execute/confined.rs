@@ -485,13 +485,15 @@ pub fn rooted_path_kind(
     rooted_path: &str,
 ) -> Result<Option<RootedPathKind>, FsError> {
     let entry = open_rooted_parent(top_level, rooted_path, false)?;
-    Ok(match entry_type(entry.parent.as_raw_fd(), &entry.name, &entry.display)? {
-        None => None,
-        Some(libc::S_IFREG) => Some(RootedPathKind::RegularFile),
-        Some(libc::S_IFDIR) => Some(RootedPathKind::Directory),
-        Some(libc::S_IFLNK) => Some(RootedPathKind::Symlink),
-        Some(_) => Some(RootedPathKind::Other),
-    })
+    Ok(
+        match entry_type(entry.parent.as_raw_fd(), &entry.name, &entry.display)? {
+            None => None,
+            Some(libc::S_IFREG) => Some(RootedPathKind::RegularFile),
+            Some(libc::S_IFDIR) => Some(RootedPathKind::Directory),
+            Some(libc::S_IFLNK) => Some(RootedPathKind::Symlink),
+            Some(_) => Some(RootedPathKind::Other),
+        },
+    )
 }
 
 /// Return the size of a regular file below `top_level` without reading its
@@ -538,6 +540,44 @@ pub fn rooted_regular_file_size(
             Ok(Some(stat.st_size.max(0) as u64))
         }
     }
+}
+
+/// Return the complete mode bits of a regular file below `top_level` without
+/// following symlinks. Missing paths return `Ok(None)`.
+pub fn rooted_regular_file_mode(
+    top_level: &Path,
+    rooted_path: &str,
+) -> Result<Option<u32>, FsError> {
+    let entry = open_rooted_parent(top_level, rooted_path, false)?;
+    let c_name = cstring(&entry.name, &entry.display)?;
+    let mut stat = std::mem::MaybeUninit::<libc::stat>::zeroed();
+    let rc = unsafe {
+        libc::fstatat(
+            entry.parent.as_raw_fd(),
+            c_name.as_ptr(),
+            stat.as_mut_ptr(),
+            libc::AT_SYMLINK_NOFOLLOW,
+        )
+    };
+    if rc != 0 {
+        let error = std::io::Error::last_os_error();
+        if error.raw_os_error() == Some(libc::ENOENT) {
+            return Ok(None);
+        }
+        return Err(map_path_error(
+            &entry.display,
+            "inspect rooted regular file mode",
+            error,
+        ));
+    }
+    let stat = unsafe { stat.assume_init() };
+    if stat.st_mode & libc::S_IFMT != libc::S_IFREG {
+        return Err(unsafe_path(
+            &entry.display,
+            "rooted object is not a regular file",
+        ));
+    }
+    Ok(Some(stat.st_mode))
 }
 
 /// Read a regular file below a mounted filesystem top-level without
