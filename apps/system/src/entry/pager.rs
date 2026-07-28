@@ -17,6 +17,13 @@ pub fn present(text: &str) -> io::Result<()> {
     write_paginated(text, rows, &mut output, &mut input)
 }
 
+pub fn output_columns() -> usize {
+    if !io::stdout().is_terminal() {
+        return 78;
+    }
+    terminal_size().1
+}
+
 fn should_page(
     stdin_is_tty: bool,
     stdout_is_tty: bool,
@@ -63,6 +70,10 @@ fn write_paginated<W: Write, R: BufRead>(
 }
 
 fn terminal_rows() -> usize {
+    terminal_size().0
+}
+
+fn terminal_size() -> (usize, usize) {
     let mut size = libc::winsize {
         ws_row: 0,
         ws_col: 0,
@@ -72,10 +83,21 @@ fn terminal_rows() -> usize {
     // SAFETY: TIOCGWINSZ only writes the supplied winsize structure for the
     // stdout file descriptor. Failure leaves the zero-initialised structure.
     let result = unsafe { libc::ioctl(libc::STDOUT_FILENO, libc::TIOCGWINSZ, &mut size) };
-    if result == 0 && size.ws_row > 0 {
-        usize::from(size.ws_row)
+    if result == 0 {
+        (
+            if size.ws_row > 0 {
+                usize::from(size.ws_row)
+            } else {
+                24
+            },
+            if size.ws_col > 0 {
+                usize::from(size.ws_col)
+            } else {
+                78
+            },
+        )
     } else {
-        24
+        (24, 78)
     }
 }
 

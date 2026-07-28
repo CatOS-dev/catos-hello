@@ -15,7 +15,12 @@ pub fn effective_uid() -> u32 {
 /// Non-interactive callers are left alone so JSON and automation paths retain
 /// their existing structured failure behavior.
 pub fn elevate_interactive_if_needed(role: &str, argv: &[String], program: &str) -> Option<i32> {
-    if effective_uid() == 0 || !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
+    if effective_uid() == 0
+        || !privilege_prompt_available(
+            std::io::stdin().is_terminal(),
+            std::io::stdout().is_terminal(),
+        )
+    {
         return None;
     }
     Some(reexec_as_root(role, argv, program, true))
@@ -32,7 +37,10 @@ pub fn require_root_or_reexec(role: &str, argv: &[String], program: &str) -> Opt
 }
 
 fn reexec_as_root(role: &str, argv: &[String], program: &str, interactive_only: bool) -> i32 {
-    if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
+    if !privilege_prompt_available(
+        std::io::stdin().is_terminal(),
+        std::io::stdout().is_terminal(),
+    ) {
         if interactive_only {
             return exit_code::PERMISSION_DENIED;
         }
@@ -40,15 +48,15 @@ fn reexec_as_root(role: &str, argv: &[String], program: &str, interactive_only: 
         eprintln!("Run `sudo catos-system {role}` from an interactive terminal.");
         return exit_code::PERMISSION_DENIED;
     }
-    let Some(tool) = crate::update::su::pick_su_cmd() else {
+    let Some(tool_path) = crate::update::su::pick_su_cmd() else {
         eprintln!("{program}: administrator privileges are required");
         eprintln!("No supported elevation tool was found. Run `catos-system {role}` as root.");
         return exit_code::PERMISSION_DENIED;
     };
-    let Some(tool_path) = catos_process::trusted_tool_path(&tool) else {
-        eprintln!("{program}: the selected elevation tool disappeared: {tool}");
-        return exit_code::PERMISSION_DENIED;
-    };
+    let tool = tool_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("elevation tool");
     let executable = match std::env::current_exe() {
         Ok(path) => path,
         Err(error) => {
@@ -56,8 +64,8 @@ fn reexec_as_root(role: &str, argv: &[String], program: &str, interactive_only: 
             return exit_code::PROBE_FAILED;
         }
     };
-    println!("Administrator privileges are required. Starting {tool}...");
-    let mut command = Command::new(tool_path);
+    eprintln!("Administrator privileges are required. Starting {tool}...");
+    let mut command = Command::new(&tool_path);
     for argument in reexec_arguments(&executable, role, argv) {
         command.arg(argument);
     }
@@ -68,6 +76,10 @@ fn reexec_as_root(role: &str, argv: &[String], program: &str, interactive_only: 
             exit_code::PROBE_FAILED
         }
     }
+}
+
+fn privilege_prompt_available(stdin_is_tty: bool, _stdout_is_tty: bool) -> bool {
+    stdin_is_tty
 }
 
 fn reexec_arguments(executable: &Path, role: &str, argv: &[String]) -> Vec<String> {
@@ -100,5 +112,12 @@ mod tests {
             reexec_arguments(Path::new("/usr/lib/catos/catos-system"), "doctor", &[]),
             ["/usr/lib/catos/catos-system", "doctor"]
         );
+    }
+
+    #[test]
+    fn redirected_stdout_does_not_disable_privilege_prompting() {
+        assert!(privilege_prompt_available(true, false));
+        assert!(!privilege_prompt_available(false, true));
+        assert!(!privilege_prompt_available(false, false));
     }
 }

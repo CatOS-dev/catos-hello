@@ -19,19 +19,44 @@ use crate::error::Error;
 /// not by rendering success. A render I/O failure is surfaced via
 /// `Error::SerializeFailed` so the caller can still observe it.
 pub fn render_doctor_human(report: &DoctorReport, out: &mut dyn Write) -> Result<(), Error> {
+    render_doctor_human_with_columns(report, out, 78)
+}
+
+pub fn render_doctor_human_with_columns(
+    report: &DoctorReport,
+    out: &mut dyn Write,
+    columns: usize,
+) -> Result<(), Error> {
+    let layout = TableLayout::for_columns(columns);
     if let Some(failure) = startup_failure(report) {
-        writeln!(out, "CatOS Doctor could not start").map_err(io_err)?;
-        writeln!(out, "Error: {}", fit(&failure.message, 73)).map_err(io_err)?;
+        writeln!(
+            out,
+            "{}",
+            fit("CatOS Doctor could not start", layout.total_width)
+        )
+        .map_err(io_err)?;
+        writeln!(
+            out,
+            "Error: {}",
+            fit(&failure.message, layout.total_width.saturating_sub(7))
+        )
+        .map_err(io_err)?;
         if let Some(residual) = report.cleanup.residual.first() {
-            writeln!(out, "Cleanup: {}", fit(residual, 71)).map_err(io_err)?;
+            writeln!(
+                out,
+                "Cleanup: {}",
+                fit(residual, layout.total_width.saturating_sub(9))
+            )
+            .map_err(io_err)?;
         }
         return Ok(());
     }
 
     writeln!(out, "CatOS Doctor").map_err(io_err)?;
-    render_table_header(out, "Item", "Status", "Details")?;
+    render_table_header(out, &layout, "Item", "Status", "Details")?;
     render_row(
         out,
+        &layout,
         "Overall",
         report.overall_status.as_str(),
         &format!(
@@ -47,6 +72,7 @@ pub fn render_doctor_human(report: &DoctorReport, out: &mut dyn Write) -> Result
     for section in &report.sections {
         render_row(
             out,
+            &layout,
             section.id.heading(),
             section_status_label(section.status),
             &section_summary(report, section),
@@ -56,10 +82,11 @@ pub fn render_doctor_human(report: &DoctorReport, out: &mut dyn Write) -> Result
     if has_findings(report) {
         writeln!(out).map_err(io_err)?;
         writeln!(out, "Findings").map_err(io_err)?;
-        render_table_header(out, "Area", "Level", "Finding")?;
+        render_table_header(out, &layout, "Area", "Level", "Finding")?;
         for issue in &report.issues {
             render_row(
                 out,
+                &layout,
                 issue.section.heading(),
                 severity_label(issue.severity),
                 &format!("{}: {}", issue.code, issue.message),
@@ -68,81 +95,111 @@ pub fn render_doctor_human(report: &DoctorReport, out: &mut dyn Write) -> Result
         for limitation in &report.limitations {
             render_row(
                 out,
+                &layout,
                 limitation.section.heading(),
                 "limited",
                 &format!("{}: {}", limitation.code, limitation.message),
             )?;
         }
         for warning in &report.warnings {
-            render_row(out, "General", "warn", warning)?;
+            render_row(out, &layout, "General", "warn", warning)?;
         }
         for residual in &report.cleanup.residual {
-            render_row(out, "Cleanup", "error", residual)?;
+            render_row(out, &layout, "Cleanup", "error", residual)?;
         }
     }
 
     if !report.recommendations.is_empty() {
         writeln!(out).map_err(io_err)?;
         writeln!(out, "Actions").map_err(io_err)?;
-        render_table_header(out, "Action", "Type", "Command or next step")?;
+        render_table_header(out, &layout, "Action", "Type", "Command or next step")?;
         for (index, recommendation) in report.recommendations.iter().enumerate() {
             let (kind, detail) = match recommendation.command.as_deref() {
                 Some(command) => ("run", command.to_string()),
                 None => ("review", recommendation.message.clone()),
             };
-            render_wrapped_row(out, &format!("{}", index + 1), kind, &detail)?;
+            render_wrapped_row(out, &layout, &format!("{}", index + 1), kind, &detail)?;
         }
     }
 
     Ok(())
 }
 
-const ITEM_WIDTH: usize = 13;
-const STATUS_WIDTH: usize = 10;
-const DETAIL_WIDTH: usize = 49;
+#[derive(Debug, Clone, Copy)]
+struct TableLayout {
+    item_width: usize,
+    status_width: usize,
+    detail_width: usize,
+    total_width: usize,
+}
+
+impl TableLayout {
+    fn for_columns(columns: usize) -> Self {
+        let total_width = columns.clamp(24, 78);
+        let item_width = if total_width >= 50 { 13 } else { 8 };
+        let status_width = if total_width >= 42 { 10 } else { 6 };
+        let detail_width = total_width
+            .saturating_sub(item_width + status_width + 6)
+            .max(4);
+        Self {
+            item_width,
+            status_width,
+            detail_width,
+            total_width: item_width + status_width + detail_width + 6,
+        }
+    }
+}
 
 fn render_table_header(
     out: &mut dyn Write,
+    layout: &TableLayout,
     item: &str,
     status: &str,
     details: &str,
 ) -> Result<(), Error> {
-    render_row(out, item, status, details)?;
+    render_row(out, layout, item, status, details)?;
     writeln!(
         out,
         "{}-+-{}-+-{}",
-        "-".repeat(ITEM_WIDTH),
-        "-".repeat(STATUS_WIDTH),
-        "-".repeat(DETAIL_WIDTH)
+        "-".repeat(layout.item_width),
+        "-".repeat(layout.status_width),
+        "-".repeat(layout.detail_width)
     )
     .map_err(io_err)
 }
 
-fn render_row(out: &mut dyn Write, item: &str, status: &str, details: &str) -> Result<(), Error> {
+fn render_row(
+    out: &mut dyn Write,
+    layout: &TableLayout,
+    item: &str,
+    status: &str,
+    details: &str,
+) -> Result<(), Error> {
     writeln!(
         out,
         "{:<item_width$} | {:<status_width$} | {}",
-        fit(item, ITEM_WIDTH),
-        fit(status, STATUS_WIDTH),
-        fit(details, DETAIL_WIDTH),
-        item_width = ITEM_WIDTH,
-        status_width = STATUS_WIDTH,
+        fit(item, layout.item_width),
+        fit(status, layout.status_width),
+        fit(details, layout.detail_width),
+        item_width = layout.item_width,
+        status_width = layout.status_width,
     )
     .map_err(io_err)
 }
 
 fn render_wrapped_row(
     out: &mut dyn Write,
+    layout: &TableLayout,
     item: &str,
     status: &str,
     details: &str,
 ) -> Result<(), Error> {
-    let lines = wrap_words(details, DETAIL_WIDTH);
+    let lines = wrap_words(details, layout.detail_width);
     for (index, line) in lines.iter().enumerate() {
         if index == 0 {
-            render_row(out, item, status, line)?;
+            render_row(out, layout, item, status, line)?;
         } else {
-            render_row(out, "", "", line)?;
+            render_row(out, layout, "", "", line)?;
         }
     }
     Ok(())
@@ -511,6 +568,20 @@ mod tests {
             out.lines().all(|line| line.chars().count() <= 80),
             "line exceeds 80 columns:\n{out}"
         );
+    }
+
+    #[test]
+    fn sixty_column_terminal_never_receives_wider_rows() {
+        let report = sample_report();
+        let mut buf = Vec::new();
+        render_doctor_human_with_columns(&report, &mut buf, 60).unwrap();
+        let out = String::from_utf8(buf).unwrap();
+        assert!(
+            out.lines().all(|line| line.chars().count() <= 60),
+            "line exceeds terminal width:\n{out}"
+        );
+        assert!(out.contains("FS_CORRUPTION_DETECTED"), "{out}");
+        assert!(out.contains("catos-repair fs"), "{out}");
     }
 
     #[test]

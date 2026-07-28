@@ -2,9 +2,14 @@
 //!
 //! The menu deliberately uses plain terminal I/O rather than a full-screen
 //! TUI. It remains usable in an initramfs console, over a serial terminal,
-//! through `script`, and when stdin is a pipe. EOF is treated as cancel.
+//! through `script`. Public menu entry points require both stdin and stdout to
+//! be terminals; the generic helpers remain stream-based for unit testing.
 
-use std::io::{self, BufRead, Write};
+use std::io::{self, BufRead, IsTerminal, Write};
+
+pub fn is_interactive() -> bool {
+    io::stdin().is_terminal() && io::stdout().is_terminal()
+}
 
 pub fn choose(title: &str, items: &[&str]) -> Result<Option<usize>, String> {
     let stdin = io::stdin();

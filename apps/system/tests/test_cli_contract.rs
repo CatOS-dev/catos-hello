@@ -28,21 +28,13 @@ fn run(args: &[&str]) -> (bool, i32, String, String) {
 }
 
 #[test]
-fn no_args_opens_the_maintenance_menu_instead_of_failing() {
+fn no_args_without_a_terminal_rejects_the_interactive_menu() {
     let (ok, code, stdout, stderr) = run(&[]);
-    assert!(ok, "exit {code}: {stderr}");
-    assert_eq!(code, 0);
-    assert!(stdout.contains("CatOS System Tools"), "stdout={stdout:?}");
-    for action in [
-        "Check system health",
-        "Open installed system",
-        "Repair",
-        "Recover",
-        "Update",
-    ] {
-        assert!(stdout.contains(action), "menu missing {action:?}: {stdout}");
-    }
-    assert!(!stderr.contains("argument error"), "stderr={stderr:?}");
+    assert!(!ok);
+    assert_eq!(code, 2);
+    assert!(stdout.is_empty(), "stdout={stdout:?}");
+    assert!(stderr.contains("interactive terminal"), "stderr={stderr:?}");
+    assert!(stderr.contains("catos-system doctor"), "stderr={stderr:?}");
 }
 
 #[test]
@@ -246,17 +238,11 @@ fn public_help_describes_user_actions_not_implementation_layers() {
 
 #[test]
 fn catos_system_routes_every_primary_user_command() {
-    for (command, expected) in [
-        ("doctor", "catos-doctor"),
-        ("chroot", "catos-chroot"),
-        ("repair", "catos-repair"),
-        ("recovery", "catos-recovery"),
-        ("update", "catos-update"),
-    ] {
+    for command in ["doctor", "chroot", "repair", "recovery", "update"] {
         let (ok, code, stdout, stderr) = run(&[command, "--help"]);
         assert!(ok, "catos-system {command} --help exited {code}: {stderr}");
         assert!(
-            stdout.starts_with(expected),
+            stdout.starts_with(&format!("catos-system {command}")),
             "wrong help for {command}: {stdout}"
         );
         assert!(

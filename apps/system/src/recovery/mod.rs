@@ -110,6 +110,31 @@ pub fn run_recovery(args: RecoveryArgs) -> RecoveryOutcome {
     }
 }
 
+/// Whether a write-capable recovery invocation has passed every static CLI
+/// check that must precede privilege elevation. Invalid invocations continue
+/// through the normal renderer so `--json` callers receive the established
+/// structured error instead of a premature permission failure.
+pub(crate) fn write_cli_contract_is_valid(args: &RecoveryArgs) -> bool {
+    match args.subcommand {
+        RecoverySubcommand::Apply => {
+            args.plan_id.is_some()
+                && args.confirm.is_some()
+                && args.plan_file.is_some()
+                && args.require_target_selection().is_ok()
+        }
+        RecoverySubcommand::Resume => {
+            args.require_target_selection().is_ok()
+                && require_transaction_id(args.transaction.as_deref(), "resume").is_ok()
+        }
+        RecoverySubcommand::Revert => {
+            args.require_target_selection().is_ok()
+                && require_transaction_id(args.transaction.as_deref(), "revert").is_ok()
+                && args.confirm.is_some()
+        }
+        _ => false,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Exit-code mapping
 // ---------------------------------------------------------------------------

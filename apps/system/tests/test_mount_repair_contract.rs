@@ -680,7 +680,7 @@ fn cli_mount_help_exits_zero_and_describes_the_real_command() {
     let stdout = String::from_utf8_lossy(&out.stdout);
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(out.status.success(), "stderr={stderr}");
-    assert!(stdout.contains("catos-repair"));
+    assert!(stdout.starts_with("catos-system repair"), "stdout={stdout}");
     assert!(stdout.contains("repair fstab and the mount layout"));
     assert!(stdout.contains("--root-device"));
     assert!(stdout.contains("--root-subvolume"));
@@ -688,7 +688,10 @@ fn cli_mount_help_exits_zero_and_describes_the_real_command() {
 }
 
 #[test]
-fn cli_mount_routes_to_the_repair_engine_without_touching_a_target() {
+fn cli_mount_requires_privilege_before_touching_a_target() {
+    if unsafe { libc::geteuid() } == 0 {
+        return;
+    }
     let out = Command::new(bin_path())
         .args([
             "repair",
@@ -700,14 +703,14 @@ fn cli_mount_routes_to_the_repair_engine_without_touching_a_target() {
         .output()
         .unwrap();
     assert!(!out.status.success());
+    assert_eq!(out.status.code(), Some(4));
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(!stderr.contains("unknown command"), "stderr={stderr}");
-    let stdout = String::from_utf8(out.stdout).unwrap();
-    let report: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap_or_else(|error| {
-        panic!("mount repair did not emit JSON: {error}; stdout={stdout:?}")
-    });
-    assert_eq!(report["kind"], "repair_mount");
-    assert_eq!(report["payload"]["final_outcome"], "ambiguous_target");
+    assert!(
+        stderr.contains("administrator privileges are required"),
+        "stderr={stderr}"
+    );
+    assert!(out.stdout.is_empty());
 }
 
 #[test]

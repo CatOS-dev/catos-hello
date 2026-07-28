@@ -37,8 +37,13 @@ catos-system catos-repair --help   # rejected
 
 ## User commands
 
-Running `catos-system` without arguments opens a numbered maintenance menu.
-The same actions are available directly for scripts and experienced users:
+Running `catos-system` without arguments from an interactive terminal opens a
+numbered maintenance menu. Successful actions return to the main menu so an
+operator can perform several maintenance tasks in one session. With redirected
+stdin or stdout, no-argument menu entry points fail with exit code 2 instead of
+printing a prompt and reporting a false success. Scripts must name the command
+they intend to run. The same actions are available directly for scripts and
+experienced users:
 
 | Command | Purpose |
 |---|---|
@@ -50,16 +55,27 @@ The same actions are available directly for scripts and experienced users:
 | `catos-system advanced` | Low-level read-only inspection and target-mount tools. |
 
 `catos-repair` and `catos-recovery` also open interactive submenus when run
-without a command. Interactive repair and recovery can select a detected CatOS
-installation instead of requiring the operator to type a block-device path.
-Recovery lists detected snapshots and transactions, interactive Apply loads
-the plan ID and confirmation token from the validated plan file, and
-interactive Revert obtains its state-bound token from a fresh status check.
+without a command and attached to a terminal. Interactive repair and recovery
+can select a detected CatOS installation instead of requiring the operator to
+type a block-device path. Recovery lists detected snapshots and transactions,
+interactive Apply loads the plan ID and confirmation token from the validated
+plan file, and interactive Revert obtains its state-bound token from a fresh
+status check.
 
-`catos-system chroot` requests administrator privileges automatically through
-a trusted `sudo`, `sudo-rs`, `doas`, or `run0` executable when invoked from an
-interactive terminal. In non-interactive use it fails immediately with an
-explicit command to run rather than waiting for a password prompt.
+Doctor, chroot, all Repair commands, and the write-capable Recovery commands
+(`apply`, `resume`, and `revert`) request administrator privileges through an
+absolute trusted `sudo`, `sudo-rs`, `doas`, or `run0` path before privileged
+probing begins. Redirecting stdout does not disable password prompting when
+stdin remains a terminal. In non-interactive use, an unprivileged invocation
+fails immediately with exit code 4 rather than waiting for a password prompt or
+probing the requested device first.
+
+`catos-update` resolves `checkupdates`, `pacman`, and the elevation program only
+from fixed trusted system directories. `checkupdates` exit code 2 means that no
+updates are available; timeout, truncation, exit code 1, signals, or an
+inconsistent empty successful result are reported as failures rather than as
+"system is up to date". Update-list and confirmation-prompt write failures stop
+the workflow with exit code 6 before package installation begins.
 
 ## Read/write boundary
 
@@ -113,6 +129,9 @@ catos-system
 catos-repair
 catos-recovery
 ```
+
+These no-argument forms require both stdin and stdout to be terminals. Use the
+explicit commands below for redirected or automated execution.
 
 ### Primary commands
 
@@ -690,16 +709,17 @@ catos-doctor
   GUI/front-end consumption; the public entry point intentionally does not
   expose it.
 * `--help` / `--version` work as on every other entry point.
-* In an interactive terminal, Doctor requests administrator privileges through
-  a trusted `sudo`, `sudo-rs`, `doas`, or `run0` executable before creating a
-  private mount namespace. A non-interactive unprivileged invocation fails
-  before diagnosis and writes no empty report to stdout.
-* The terminal report is a fixed-width table designed for an 80-column TTY.
-  Each diagnostic domain occupies one summary row; findings and actions appear
-  only when needed. Reports longer than the current terminal height use a
-  built-in pager (`Enter` advances, `q` quits), so Doctor does not depend on
-  `less`, a shell, or a desktop session. Action commands may wrap onto aligned
-  continuation rows but are never truncated.
+* With interactive stdin, Doctor requests administrator privileges through an
+  absolute trusted `sudo`, `sudo-rs`, `doas`, or `run0` executable before
+  creating a private mount namespace. Stdout may be redirected to a report
+  file without disabling this prompt. A non-interactive unprivileged invocation
+  fails before diagnosis and writes no empty report to stdout.
+* The terminal report adapts its table to the current terminal width, up to 78
+  columns. Each diagnostic domain occupies one summary row; findings and
+  actions appear only when needed. Reports longer than the current terminal
+  height use a built-in pager (`Enter` advances, `q` quits), so Doctor does not
+  depend on `less`, a shell, or a desktop session. Action commands may wrap
+  onto aligned continuation rows but are never truncated.
 * The package installs one `catos-system` binary and five role-specific
   symlinks (`catos-update`, `catos-recovery`, `catos-doctor`, `catos-repair`,
   and `catos-chroot`). All six command names resolve to the same inode.

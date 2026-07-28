@@ -10,10 +10,9 @@
 
 use std::env;
 use std::fs;
-use std::io::Write;
 use std::os::unix::fs::symlink;
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
+use std::process::Command;
 
 fn bin_path() -> PathBuf {
     // Injected by cargo for the `catos-system` binary target.
@@ -388,120 +387,121 @@ fn recovery_subcommands_route_directly() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn aggregate_menu_reaches_repair_target_selection() {
+fn aggregate_without_a_tty_rejects_the_interactive_menu() {
     let bin = bin_path();
-    let mut child = Command::new(&bin)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("spawn catos-system");
-    child
-        .stdin
-        .take()
-        .expect("piped stdin")
-        .write_all(b"3\n2\n0\n0\n")
-        .expect("write menu input");
-    let output = child.wait_with_output().expect("wait for catos-system");
-    assert!(
-        output.status.success(),
-        "stderr={}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("CatOS System Tools"), "stdout={stdout}");
-    assert!(stdout.contains("Repair Target"), "stdout={stdout}");
-    assert!(
-        stdout.contains("Choose a detected CatOS installation"),
-        "stdout={stdout}"
-    );
+    let output = Command::new(&bin).output().expect("spawn catos-system");
+    assert_eq!(output.status.code(), Some(2));
+    assert!(output.stdout.is_empty());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("interactive terminal"), "stderr={stderr}");
 }
 
 #[test]
-fn repair_menu_requires_target_selection_before_execution() {
+fn role_menus_without_a_tty_fail_instead_of_reporting_success() {
     let bin = bin_path();
-    let tmp = TempDir::new("catos-repair-target-menu").unwrap();
-    let link = link_to(&bin, &tmp, "catos-repair");
-    let mut child = Command::new(&link)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("spawn catos-repair");
-    child
-        .stdin
-        .take()
-        .expect("piped stdin")
-        .write_all(b"2\n0\n")
-        .expect("write menu input");
-    let output = child.wait_with_output().expect("wait for catos-repair");
-    assert!(
-        output.status.success(),
-        "stderr={}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("Repair Target"), "stdout={stdout}");
-    assert!(
-        stdout.contains("Choose a detected CatOS installation"),
-        "stdout={stdout}"
-    );
-    assert!(
-        stdout.contains("Enter a root device manually"),
-        "stdout={stdout}"
-    );
-}
-
-#[test]
-fn recovery_menu_requires_target_selection_before_execution() {
-    let bin = bin_path();
-    let tmp = TempDir::new("catos-recovery-target-menu").unwrap();
-    let link = link_to(&bin, &tmp, "catos-recovery");
-    let mut child = Command::new(&link)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("spawn catos-recovery");
-    child
-        .stdin
-        .take()
-        .expect("piped stdin")
-        .write_all(b"1\n0\n")
-        .expect("write menu input");
-    let output = child.wait_with_output().expect("wait for catos-recovery");
-    assert!(
-        output.status.success(),
-        "stderr={}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("Recovery Target"), "stdout={stdout}");
-    assert!(
-        stdout.contains("Choose a detected CatOS installation"),
-        "stdout={stdout}"
-    );
-    assert!(
-        stdout.contains("Enter a root device manually"),
-        "stdout={stdout}"
-    );
-}
-
-#[test]
-fn repair_without_args_opens_an_interactive_menu() {
-    let bin = bin_path();
-    let tmp = TempDir::new("catos-repair-no-args").unwrap();
-    let link = link_to(&bin, &tmp, "catos-repair");
-    let (ok, code, stdout, stderr) = run_via(&link, &[]);
-    assert!(ok, "exit {code}: {stderr}");
-    assert_eq!(code, 0);
-    assert!(stdout.contains("Repair"), "stdout={stdout}");
-    for action in ["filesystem", "mount layout", "boot setup"] {
+    let tmp = TempDir::new("catos-role-menu-no-tty").unwrap();
+    for name in ["catos-repair", "catos-recovery"] {
+        let link = link_to(&bin, &tmp, name);
+        let (ok, code, stdout, stderr) = run_via(&link, &[]);
+        assert!(!ok, "{name} unexpectedly succeeded: {stdout}");
+        assert_eq!(code, 2, "{name}: stderr={stderr}");
+        assert!(stdout.is_empty(), "{name}: stdout={stdout}");
         assert!(
-            stdout.to_ascii_lowercase().contains(action),
-            "repair menu must mention {action}: {stdout}"
+            stderr.contains("interactive terminal"),
+            "{name}: stderr={stderr}"
         );
     }
+}
+
+#[test]
+fn aggregate_help_and_errors_preserve_the_aggregate_command_name() {
+    let bin = bin_path();
+    for (args, expected, forbidden) in [
+        (
+            ["help", "doctor"].as_slice(),
+            "catos-system doctor",
+            "catos-doctor",
+        ),
+        (
+            ["help", "repair"].as_slice(),
+            "catos-system repair",
+            "catos-repair",
+        ),
+        (
+            ["help", "recovery"].as_slice(),
+            "catos-system recovery",
+            "catos-recovery",
+        ),
+        (
+            ["help", "chroot"].as_slice(),
+            "catos-system chroot",
+            "catos-chroot",
+        ),
+        (
+            ["help", "update"].as_slice(),
+            "catos-system update",
+            "catos-update",
+        ),
+    ] {
+        let output = Command::new(&bin).args(args).output().expect("run help");
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.contains(expected), "args={args:?}: {stdout}");
+        assert!(
+            !stdout
+                .lines()
+                .next()
+                .unwrap_or_default()
+                .contains(forbidden),
+            "args={args:?}: {stdout}"
+        );
+    }
+
+    for (args, expected_prefix) in [
+        (["repair", "nonsense"].as_slice(), "catos-system repair:"),
+        (
+            ["recovery", "nonsense"].as_slice(),
+            "catos-system recovery:",
+        ),
+        (["chroot", "--nonsense"].as_slice(), "catos-system chroot:"),
+        (["update", "--nonsense"].as_slice(), "catos-system update:"),
+    ] {
+        let output = Command::new(&bin).args(args).output().expect("run error");
+        assert_eq!(output.status.code(), Some(2));
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.starts_with(expected_prefix), "stderr={stderr}");
+    }
+}
+
+#[test]
+fn direct_write_commands_fail_at_the_privilege_boundary_before_probing() {
+    if unsafe { libc::geteuid() } == 0 {
+        return;
+    }
+    let bin = bin_path();
+    let tmp = TempDir::new("catos-direct-write-elevation").unwrap();
+    let repair = link_to(&bin, &tmp, "catos-repair");
+    let recovery = link_to(&bin, &tmp, "catos-recovery");
+
+    let (_, repair_code, repair_stdout, repair_stderr) =
+        run_via(&repair, &["fs", "/dev/does-not-exist"]);
+    assert_eq!(repair_code, 4, "stderr={repair_stderr}");
+    assert!(repair_stdout.is_empty());
+    assert!(repair_stderr.contains("administrator privileges are required"));
+
+    let (_, recovery_code, recovery_stdout, recovery_stderr) = run_via(
+        &recovery,
+        &[
+            "resume",
+            "--root-device",
+            "/dev/does-not-exist",
+            "--transaction",
+            "tx-00000000000000000000000000000004",
+        ],
+    );
+    assert_eq!(recovery_code, 4, "stderr={recovery_stderr}");
+    assert!(recovery_stdout.is_empty());
+    assert!(recovery_stderr.contains("administrator privileges are required"));
 }
 
 #[test]
