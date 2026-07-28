@@ -27,6 +27,12 @@ pub struct FirmwareProvider {
 impl BootProviderExecutor for FirmwareProvider {
     fn execute(&self, ctx: &ProviderCtx<'_>, runner: &dyn TargetRunner) -> ProviderExecutionResult {
         let mut result = ProviderExecutionResult::default();
+        if self.efi_device.is_none() {
+            result.failure = Some(
+                "firmware boot execution requires verified ESP disk and partition facts".into(),
+            );
+            return result;
+        }
         record_config_write(
             &mut result.actions,
             "/etc/kernel/cmdline",
@@ -223,6 +229,25 @@ mod tests {
     }
 
     #[test]
+    fn missing_efi_identity_runs_no_firmware_command() {
+        let runner = RecordedTargetRunner::new();
+        let provider = FirmwareProvider {
+            method: FirmwareMethod::Uki,
+            efi_device: None,
+        };
+
+        let result = provider.execute(&ctx(), &runner);
+
+        assert!(result
+            .failure
+            .as_deref()
+            .is_some_and(|failure| failure.contains("verified ESP disk and partition")));
+        assert!(result.actions.is_empty());
+        assert!(result.command_results.is_empty());
+        runner.assert_consumed();
+    }
+
+    #[test]
     fn failed_force_update_records_failure() {
         let runner = RecordedTargetRunner::new().expect_raw(
             "catos-firmware-boot-update",
@@ -233,7 +258,7 @@ mod tests {
         );
         let provider = FirmwareProvider {
             method: FirmwareMethod::Uki,
-            efi_device: None,
+            efi_device: Some(("/dev/nvme0n1".to_string(), 1)),
         };
         let result = provider.execute(&ctx(), &runner);
         assert!(result.failure.is_some());

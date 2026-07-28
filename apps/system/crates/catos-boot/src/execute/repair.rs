@@ -381,6 +381,12 @@ pub fn run_boot_repair(
     };
 
     let efi_device = derive_efi_device(target, storage_devices);
+    if matches!(provider, crate::model::ProviderId::Uki | crate::model::ProviderId::Efistub) && efi_device.is_none() {
+        return preflight_failure(
+            "EFI_DEVICE_FACTS_INCOMPLETE",
+            "firmware boot repair requires verified ESP disk and partition facts".into(),
+        );
+    }
     let snapshot_state = match snapshot_repair_state(
         target_root,
         provider,
@@ -1156,6 +1162,38 @@ mod tests {
             derive_bios_install_disk(&target, &[root, disk]).as_deref(),
             Some("/dev/nvme0n1")
         );
+    }
+
+    #[test]
+    fn firmware_provider_refuses_missing_efi_identity_before_target_io() {
+        let target = btrfs_target();
+        let report = run_boot_repair(
+            &target,
+            efi_x86_64_gpt(),
+            Path::new("/definitely/missing/target"),
+            Some(Path::new("/definitely/missing/target/boot/efi")),
+            &DetectionInputs {
+                firmware_boot_conf: Some("[boot]\nmethod = uki\n".into()),
+                ..DetectionInputs::default()
+            },
+            None,
+            &[],
+            &[],
+            &BootCmdlineFacts::default(),
+        );
+
+        assert_eq!(
+            report.final_outcome,
+            BootRepairOutcome::ManualInterventionRequired
+        );
+        assert!(report.actions.is_empty());
+        assert!(report.evidence.iter().any(|evidence| {
+            evidence.code == "EFI_DEVICE_FACTS_INCOMPLETE"
+        }));
+        assert!(!report.evidence.iter().any(|evidence| {
+            evidence.code == "MKINITCPIO_CONFIG_MISSING"
+                || evidence.code == "MKINITCPIO_CONFIG_UNREADABLE"
+        }));
     }
 
     #[test]
