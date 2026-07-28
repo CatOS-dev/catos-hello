@@ -1068,6 +1068,10 @@ fn target_nonempty_regular_file_present(target_root: &Path, rooted: &str) -> Res
     }
 }
 
+pub(crate) fn certificate_fingerprint_is_valid(value: &str) -> bool {
+    value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
 fn validate_secureboot_state(bytes: &[u8], path: &str) -> Result<(), String> {
     let value: serde_json::Value = serde_json::from_slice(bytes)
         .map_err(|error| format!("target Secure Boot state {path} is invalid JSON: {error}"))?;
@@ -1083,7 +1087,7 @@ fn validate_secureboot_state(bytes: &[u8], path: &str) -> Result<(), String> {
         .get("certificate_fingerprint")
         .and_then(serde_json::Value::as_str)
         .ok_or_else(|| format!("target Secure Boot state {path} has no certificate fingerprint"))?;
-    if fingerprint.len() != 64 || !fingerprint.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+    if !certificate_fingerprint_is_valid(fingerprint) {
         return Err(format!(
             "target Secure Boot state {path} has an invalid SHA-256 certificate fingerprint"
         ));

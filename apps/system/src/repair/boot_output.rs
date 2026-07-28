@@ -251,7 +251,7 @@ mod tests {
                 enrollment_password_path: Some(
                     "/var/lib/catos-secureboot/enrollment-password".into(),
                 ),
-                enrollment_password: Some(SensitiveString::new("SEKRET123")),
+                enrollment_password: Some(SensitiveString::new("SEKRET1234")),
                 ..SecureBootReport::default()
             }),
             ..BootRepairReport::default()
@@ -260,12 +260,12 @@ mod tests {
         let mut human = Vec::new();
         render_boot_repair_human(&report, &mut human).unwrap();
         let human = String::from_utf8(human).unwrap();
-        assert!(human.contains("SEKRET123"));
+        assert!(human.contains("SEKRET1234"));
         assert!(human.contains("/var/lib/catos-secureboot/enrollment-password"));
 
         let json = render_boot_repair_json(&report, "catos-repair boot", std::path::Path::new("/"))
             .unwrap();
-        assert!(!json.contains("SEKRET123"));
+        assert!(!json.contains("SEKRET1234"));
         assert!(json.contains("enrollment_password_generated"));
         assert!(json.contains("/var/lib/catos-secureboot/enrollment-password"));
     }

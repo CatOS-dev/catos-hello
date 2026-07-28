@@ -221,6 +221,9 @@ fn parse_secure_boot_payload(payload: &str) -> Result<ParsedPayload, String> {
         .get("fingerprint")
         .and_then(|value| value.as_str())
         .ok_or_else(|| "catos-secureboot did not return a certificate fingerprint".to_string())?;
+    if !crate::diagnose::target::certificate_fingerprint_is_valid(fingerprint) {
+        return Err("catos-secureboot returned an invalid SHA-256 certificate fingerprint".into());
+    }
     let enrollment_pending = object
         .get("enrollment_pending")
         .and_then(|value| value.as_bool())
@@ -228,8 +231,12 @@ fn parse_secure_boot_payload(payload: &str) -> Result<ParsedPayload, String> {
     let enrollment_password = object
         .get("enrollment_password")
         .and_then(|value| value.as_str())
-        .filter(|value| !value.is_empty())
         .map(str::to_string);
+    if let Some(password) = enrollment_password.as_deref() {
+        if !generated_enrollment_password_is_valid(password) {
+            return Err("catos-secureboot returned an invalid generated enrollment password".into());
+        }
+    }
     if enrollment_pending && enrollment_password.is_none() {
         return Err(
             "catos-secureboot reported pending enrollment without a one-time password".into(),
@@ -245,6 +252,13 @@ fn parse_secure_boot_payload(payload: &str) -> Result<ParsedPayload, String> {
         enrollment_pending,
         enrollment_password,
     })
+}
+
+fn generated_enrollment_password_is_valid(value: &str) -> bool {
+    value.len() == 10
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit())
 }
 
 fn redact_secure_boot_stdout(
@@ -275,6 +289,9 @@ fn sanitise_payload(payload: &str) -> Option<String> {
 mod tests {
     use super::*;
     use crate::execute::target::RecordedTargetRunner;
+
+    const FINGERPRINT: &str =
+        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
 
     fn inputs(provider: ProviderId) -> SecureBootInputs {
         SecureBootInputs {
@@ -333,8 +350,10 @@ mod tests {
             "catos-secureboot",
             ["enable", "--generate-enrollment-password", "--json"],
             0,
-            br#"{"fingerprint":"AA:BB","enrollment_pending":true,"enrollment_password":"SEKRET123"}"#
-                .to_vec(),
+            format!(
+                r#"{{"fingerprint":"{FINGERPRINT}","enrollment_pending":true,"enrollment_password":"SEKRET1234"}}"#
+            )
+            .into_bytes(),
             b"".to_vec(),
         );
         let inputs = SecureBootInputs {
@@ -346,10 +365,10 @@ mod tests {
         let (report, outcome, action) = finalize_secure_boot(&runner, &inputs);
         assert_eq!(outcome, None);
         assert!(report.enable_invoked);
-        assert_eq!(report.certificate_fingerprint.as_deref(), Some("AA:BB"));
+        assert_eq!(report.certificate_fingerprint.as_deref(), Some(FINGERPRINT));
         assert!(report.enrollment_pending);
         assert!(report.enrollment_password_generated);
-        assert_eq!(report.enrollment_password.as_deref(), Some("SEKRET123"));
+        assert_eq!(report.enrollment_password.as_deref(), Some("SEKRET1234"));
         assert_eq!(
             report.enrollment_password_path.as_deref(),
             Some("/var/lib/catos-secureboot/enrollment-password")
@@ -358,10 +377,10 @@ mod tests {
             .raw_payload
             .as_deref()
             .unwrap_or_default()
-            .contains("SEKRET123"));
+            .contains("SEKRET1234"));
         let action = action.expect("secure boot command action");
         let audited_stdout = String::from_utf8(action.stdout).unwrap();
-        assert!(!audited_stdout.contains("SEKRET123"));
+        assert!(!audited_stdout.contains("SEKRET1234"));
         assert!(audited_stdout.contains("fingerprint"));
         assert!(runner.invoked_binary("catos-secureboot"));
         runner.assert_consumed();
@@ -370,7 +389,7 @@ mod tests {
     #[test]
     fn enrollment_password_and_pending_state_must_be_consistent() {
         let missing = match parse_secure_boot_payload(
-            r#"{"fingerprint":"AA","enrollment_pending":true}"#,
+            r#"{"fingerprint":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","enrollment_pending":true}"#,
         ) {
             Ok(_) => panic!("pending enrollment without a password was accepted"),
             Err(error) => error,
@@ -378,12 +397,31 @@ mod tests {
         assert!(missing.contains("without a one-time password"));
 
         let unexpected = match parse_secure_boot_payload(
-            r#"{"fingerprint":"AA","enrollment_pending":false,"enrollment_password":"SEKRET123"}"#,
+            r#"{"fingerprint":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","enrollment_pending":false,"enrollment_password":"SEKRET1234"}"#,
         ) {
             Ok(_) => panic!("a password without pending enrollment was accepted"),
             Err(error) => error,
         };
         assert!(unexpected.contains("without pending enrollment"));
+    }
+
+    #[test]
+    fn malformed_fingerprint_or_generated_password_is_rejected() {
+        let fingerprint = match parse_secure_boot_payload(
+            r#"{"fingerprint":"AA:BB","enrollment_pending":false}"#,
+        ) {
+            Ok(_) => panic!("malformed fingerprint was accepted"),
+            Err(error) => error,
+        };
+        assert!(fingerprint.contains("invalid SHA-256"));
+
+        let password = match parse_secure_boot_payload(&format!(
+            r#"{{"fingerprint":"{FINGERPRINT}","enrollment_pending":true,"enrollment_password":"bad\nvalue"}}"#
+        )) {
+            Ok(_) => panic!("malformed generated password was accepted"),
+            Err(error) => error,
+        };
+        assert!(password.contains("invalid generated enrollment password"));
     }
 
     #[test]
@@ -433,7 +471,7 @@ mod tests {
             "catos-secureboot",
             ["enable", "--generate-enrollment-password", "--json"],
             0,
-            br#"{"fingerprint":"AA:BB","enrollment_pending":false}"#.to_vec(),
+            format!(r#"{{"fingerprint":"{FINGERPRINT}","enrollment_pending":false}}"#).into_bytes(),
             b"".to_vec(),
         );
         let inputs = SecureBootInputs {

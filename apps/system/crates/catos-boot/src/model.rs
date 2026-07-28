@@ -707,16 +707,16 @@ mod tests {
         let report = SecureBootReport {
             enrollment_password_generated: true,
             enrollment_password_path: Some("/var/lib/catos-secureboot/enrollment-password".into()),
-            enrollment_password: Some(SensitiveString::new("SEKRET123")),
+            enrollment_password: Some(SensitiveString::new("SEKRET1234")),
             ..SecureBootReport::default()
         };
 
         let debug = format!("{report:?}");
-        assert!(!debug.contains("SEKRET123"));
+        assert!(!debug.contains("SEKRET1234"));
         assert!(debug.contains("<redacted>"));
 
         let json = serde_json::to_string(&report).unwrap();
-        assert!(!json.contains("SEKRET123"));
+        assert!(!json.contains("SEKRET1234"));
         assert!(!json.contains("\"enrollment_password\""));
         assert!(json.contains("enrollment_password_generated"));
         assert!(json.contains("enrollment_password_path"));
