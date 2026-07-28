@@ -4,8 +4,9 @@ use std::path::Path;
 
 use crate::boot::diagnose::provider::{detect, DetectionInputs, DetectionVerdict};
 use crate::doctor::model::{
-    issue_code, recommendation_code, DoctorIssue, DoctorLimitation, DoctorRecommendation,
-    DoctorReport, DoctorSection, DoctorSectionId, DoctorSectionStatus, DoctorSeverity,
+    issue_code, recommendation_code, DoctorEnvironment, DoctorIssue, DoctorLimitation,
+    DoctorRecommendation, DoctorReport, DoctorSection, DoctorSectionId, DoctorSectionStatus,
+    DoctorSeverity,
 };
 use crate::target::Evidence;
 
@@ -611,6 +612,7 @@ fn push_boot_evidence(
 pub(in crate::doctor) fn run_secure_boot_section(
     sections: &mut [(DoctorSectionId, DoctorSection)],
     context: Option<&DoctorTargetContext>,
+    env: &DoctorEnvironment,
     report: &mut DoctorReport,
 ) -> Result<(), ()> {
     let id = DoctorSectionId::SecureBoot;
@@ -703,6 +705,56 @@ pub(in crate::doctor) fn run_secure_boot_section(
             "the Live environment firmware state is not evidence for the selected offline target",
         ));
         return Ok(());
+    }
+
+    if !firmware_runtime_is_target_evidence(&env.primary_mode) {
+        let status = if env.primary_mode == "unknown" {
+            DoctorSectionStatus::Unknown
+        } else {
+            DoctorSectionStatus::Skipped
+        };
+        set_section(sections, id, status);
+        report.limitations.push(DoctorLimitation::new(
+            id,
+            "RUNTIME_FIRMWARE_NOT_TARGET_EVIDENCE",
+            format!(
+                "runtime mode {} cannot use the host firmware state as evidence for the selected target",
+                env.primary_mode
+            ),
+        ));
+        return Ok(());
+    }
+
+    match detect_current_firmware_mode(Path::new("/")) {
+        Ok(CurrentFirmwareMode::Bios) => {
+            let section = set_section(sections, id, DoctorSectionStatus::NotApplicable);
+            section.evidence.push(Evidence::new(
+                "FIRMWARE_MODE",
+                "doctor::secure_boot",
+                "current machine booted without EFI; Secure Boot does not apply",
+            ));
+            return Ok(());
+        }
+        Ok(CurrentFirmwareMode::Efi) => {
+            push_evidence(
+                sections,
+                id,
+                Evidence::new(
+                    "FIRMWARE_MODE",
+                    "doctor::secure_boot",
+                    "current machine booted through EFI",
+                ),
+            );
+        }
+        Err(error) => {
+            set_section(sections, id, DoctorSectionStatus::Unknown);
+            report.limitations.push(DoctorLimitation::new(
+                id,
+                "FIRMWARE_MODE_UNAVAILABLE",
+                error,
+            ));
+            return Ok(());
+        }
     }
 
     let firmware_sb_body = match read_optional_target_bytes(
@@ -815,6 +867,29 @@ pub(in crate::doctor) fn run_secure_boot_section(
     Ok(())
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CurrentFirmwareMode {
+    Bios,
+    Efi,
+}
+
+fn firmware_runtime_is_target_evidence(primary_mode: &str) -> bool {
+    primary_mode == "running_system"
+}
+
+fn detect_current_firmware_mode(root: &Path) -> Result<CurrentFirmwareMode, String> {
+    use crate::target::execute::confined::{rooted_path_kind, RootedPathKind};
+
+    match rooted_path_kind(root, "/sys/firmware/efi") {
+        Ok(None) | Err(crate::target::error::FsError::NotFound) => Ok(CurrentFirmwareMode::Bios),
+        Ok(Some(RootedPathKind::Directory)) => Ok(CurrentFirmwareMode::Efi),
+        Ok(Some(kind)) => Err(format!(
+            "/sys/firmware/efi has unexpected target path kind {kind:?}"
+        )),
+        Err(error) => Err(format!("cannot inspect /sys/firmware/efi: {error}")),
+    }
+}
+
 fn read_optional_target_bytes(root: &Path, relative: &str) -> Result<Option<Vec<u8>>, String> {
     let rooted = format!("/{}", relative.trim_start_matches('/'));
     match crate::target::execute::confined::read_rooted_file(root, &rooted) {
@@ -839,13 +914,40 @@ fn secure_boot_enabled_from_efivar(body: &[u8]) -> Option<bool> {
 #[cfg(test)]
 mod tests {
     use super::{
-        efi_asset, pacman_package_name, provider_firmware_asset_present,
-        read_optional_target_bytes, secure_boot_enabled_from_efivar,
-        secure_boot_policy_consistent, valid_grub_config, valid_limine_config,
-        valid_systemd_loader,
+        detect_current_firmware_mode, efi_asset, firmware_runtime_is_target_evidence,
+        pacman_package_name, provider_firmware_asset_present, read_optional_target_bytes,
+        secure_boot_enabled_from_efivar, secure_boot_policy_consistent, valid_grub_config,
+        valid_limine_config, valid_systemd_loader, CurrentFirmwareMode,
     };
     use crate::boot::model::ProviderId;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn only_a_running_system_can_use_current_firmware_as_target_evidence() {
+        assert!(firmware_runtime_is_target_evidence("running_system"));
+        for mode in ["chroot", "live_environment", "initramfs", "unknown"] {
+            assert!(!firmware_runtime_is_target_evidence(mode), "mode={mode}");
+        }
+    }
+
+    #[test]
+    fn firmware_mode_distinguishes_bios_from_efi() {
+        let bios = scratch("firmware-bios");
+        std::fs::create_dir_all(&bios).unwrap();
+        assert_eq!(
+            detect_current_firmware_mode(&bios).unwrap(),
+            CurrentFirmwareMode::Bios
+        );
+
+        let efi = scratch("firmware-efi");
+        std::fs::create_dir_all(efi.join("sys/firmware/efi")).unwrap();
+        assert_eq!(
+            detect_current_firmware_mode(&efi).unwrap(),
+            CurrentFirmwareMode::Efi
+        );
+        std::fs::remove_dir_all(bios).unwrap();
+        std::fs::remove_dir_all(efi).unwrap();
+    }
 
     #[test]
     fn secure_boot_efivar_reader_preserves_binary_payload() {

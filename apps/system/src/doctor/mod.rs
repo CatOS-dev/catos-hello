@@ -591,7 +591,7 @@ fn run_sections<R: FsCommandRunner + ?Sized>(
     let _ = sections::run_filesystem_section(runner, &mut sections, context, report);
     let _ = sections::run_mount_section(&mut sections, context, report);
     let _ = sections::run_boot_section(&mut sections, context, report);
-    let _ = sections::run_secure_boot_section(&mut sections, context, report);
+    let _ = sections::run_secure_boot_section(&mut sections, context, env, report);
     let _ = sections::run_recovery_section(&mut sections, context, recovery_options, report);
 
     sections.into_iter().map(|(_, s)| s).collect()

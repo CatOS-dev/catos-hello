@@ -762,6 +762,8 @@ assert_contains "$LAST_LOG" "Storage       | healthy    | /dev/vda; btrfs; /@" r
 assert_not_contains "$LAST_LOG" "target=offline" running_root
 assert_not_contains "$LAST_LOG" "TARGET_NOT_FOUND" running_root
 assert_not_contains "$LAST_LOG" "OFFLINE_FIRMWARE_STATE_UNAVAILABLE" running_root
+assert_contains "$LAST_LOG" "Secure Boot   | n/a" running_root
+assert_not_contains "$LAST_LOG" "FIRMWARE_SECURE_BOOT_UNAVAILABLE" running_root
 assert_not_contains "$LAST_LOG" "__RUNNING_ROOT_PREPARE_FAILED__" running_root
 
 echo "=== scenario: decline-target ==="
