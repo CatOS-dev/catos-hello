@@ -1,49 +1,71 @@
 # catos-system
 
-`catos-system` is the shared static backend for CatOS system utilities.
-The package installs one binary:
+`catos-system` is the CatOS system-maintenance utility. It is designed for the
+running system, LiveCD, initramfs, and recovery environments without requiring
+a shell script framework or a graphical session.
+
+The package installs one static binary:
 
 ```text
 /usr/lib/catos/catos-system
 ```
 
-and four role-specific entry points:
+and five role-specific symlinks:
 
 ```text
 /usr/bin/catos-update   -> ../lib/catos/catos-system
 /usr/bin/catos-recovery -> ../lib/catos/catos-system
 /usr/bin/catos-doctor   -> ../lib/catos/catos-system
 /usr/bin/catos-repair   -> ../lib/catos/catos-system
+/usr/bin/catos-chroot   -> ../lib/catos/catos-system
 ```
 
-Their public responsibilities are intentionally small:
+All six command names share the same inode. `argv[0]` selects the independent
+entry point; it does not grant permission. These are the two valid command
+shapes:
 
-- `catos-doctor` takes no functional arguments and prints the diagnosis. It
-  has no `inspect` or `preflight` subcommands.
-- `catos-recovery` handles Btrfs snapshot recovery.
-- `catos-repair` is the fs, mount, and boot repair entry point.
-- `catos-update` remains a separate public entry point. This change does not
-  define or expand its behaviour.
+```text
+catos-repair mount --help
+catos-system repair mount --help
+```
 
-All entry points share the same inode. `argv[0]` selects the user-facing role
-only and never grants permission.
+Putting an entry-point name in the aggregate command position is invalid:
 
-## Six-stage product plan
+```text
+catos-system catos-repair --help   # rejected
+```
 
-| Stage | Scope | Current state |
-|---|---|---|
-| 1 | Environment, device and CatOS target discovery | Implemented; read-only |
-| 2 | Safe read-only target mount planning and temporary mount sessions | Implemented; read-only |
-| 3 | Transactional mount-configuration repair | Implemented for CatOS Btrfs and plain ext2/3/4, XFS, and F2FS roots |
-| 4 | Transactional Btrfs root-snapshot recovery | Implemented, including direct public recovery commands and cleanup persistence |
-| 5 | Bootloader-provider repair (`catos-repair boot`) | Implemented (GRUB, Limine, systemd-boot, UKI, EFI Stub); contract tests in place, full QEMU matrix pending OVMF/Secure Boot CI |
-| 5+ | Aggregated `catos-doctor` diagnosis | Implemented; read-only; scheme-B exit codes; real-QEMU byte-hash acceptance in place |
-| 6 | Live/Polkit/GUI integration, `catos-update` workflow | Not implemented |
+## User commands
 
-## Current read/write boundary
+Running `catos-system` without arguments opens a numbered maintenance menu.
+The same actions are available directly for scripts and experienced users:
 
-Stages 1 and the discovery/mount-planning part of stage 2 remain read-only.
-State-changing operations require an explicit repair or recovery entry point:
+| Command | Purpose |
+|---|---|
+| `catos-system doctor` / `catos-doctor` | Check an installed CatOS system and explain detected problems. |
+| `catos-system chroot` / `catos-chroot` | Discover an installed system, mount it safely, and open a maintenance shell. |
+| `catos-system repair` / `catos-repair` | Repair a filesystem, fstab/mount layout, or boot setup. |
+| `catos-system recovery` / `catos-recovery` | Inspect, apply, resume, or revert Btrfs snapshot recovery. |
+| `catos-system update` / `catos-update` | Check for and apply package updates on the running system. |
+| `catos-system advanced` | Low-level read-only inspection and target-mount tools. |
+
+`catos-repair` and `catos-recovery` also open interactive submenus when run
+without a command. Interactive repair and recovery can select a detected CatOS
+installation instead of requiring the operator to type a block-device path.
+Recovery lists detected snapshots and transactions, interactive Apply loads
+the plan ID and confirmation token from the validated plan file, and
+interactive Revert obtains its state-bound token from a fresh status check.
+
+`catos-system chroot` requests administrator privileges automatically through
+a trusted `sudo`, `sudo-rs`, `doas`, or `run0` executable when invoked from an
+interactive terminal. In non-interactive use it fails immediately with an
+explicit command to run rather than waiting for a password prompt.
+
+## Read/write boundary
+
+Diagnosis, storage discovery, target planning, and read-only target inspection
+do not modify the selected installation. State-changing operations require an
+explicit repair, recovery, update, or chroot action:
 
 ```text
 catos-repair fs
@@ -52,6 +74,8 @@ catos-repair boot
 catos-recovery apply
 catos-recovery resume
 catos-recovery revert
+catos-update
+catos-chroot
 ```
 
 `catos-repair fs` delegates to the official filesystem tools after target,
@@ -60,14 +84,14 @@ commands have no short default deadline, and capped output is drained to EOF
 so a verbose repair process is not terminated by `SIGPIPE`.
 
 `catos-repair mount` uses the target's own fstab and os-release, binds the
-plan to target identity and an fstab digest, writes through confined dirfd
-operations, atomically replaces fstab, verifies the complete resulting mount
-layout, and rolls back the original fstab plus newly-created empty objects on
-failure. It never unmounts the running root or a pre-existing mount.
+operation to target identity and an fstab digest, writes through confined
+dirfd operations, verifies the resulting mount layout, and restores the
+original fstab plus newly-created empty objects when verification fails. It
+never unmounts the running root or a pre-existing mount.
 
 Snapshot recovery mounts the Btrfs top level read-write inside a private mount
-namespace, validates the immutable plan and target identity, performs the
-root exchange, and persists every transaction state. Filesystem repair, mount
+namespace, validates the immutable plan and target identity, performs the root
+exchange, and persists every transaction state. Filesystem repair, mount
 repair, and recovery share a block-device lock so they cannot write the same
 target concurrently.
 
@@ -78,106 +102,77 @@ target concurrently.
 - An exclusive filesystem lock prevents concurrent recovery transactions.
 - The pre-recovery root is preserved as a read-only backup.
 - `apply`, `resume`, and `revert` do not execute package management commands.
-- Recovery never performs automatic boot repair or automatic root selection.
+- Recovery never performs automatic boot repair.
 
 ## CLI
 
-`catos-doctor` is intentionally argumentless. Stage 5 replaces the
-phase-1-only `inspect` delegation with an aggregated diagnosis that
-covers environment, storage, filesystem, mount layout, boot, Secure
-Boot, and recovery in a single human-readable report:
+### Interactive entry
+
+```text
+catos-system
+catos-repair
+catos-recovery
+```
+
+### Primary commands
+
+```text
+catos-system doctor
+catos-system chroot
+catos-system repair fs [DEVICE]
+catos-system repair mount [--root-device /dev/...] [--root-subvolume /@]
+catos-system repair boot  [--root-device /dev/...] [--root-subvolume /@]
+catos-system recovery <list|inspect|plan|apply|status|resume|revert> [OPTIONS]
+catos-system update [--check]
+```
+
+The role-specific aliases use the same command tail without the aggregate
+role name:
 
 ```text
 catos-doctor
+catos-chroot
+catos-repair mount --root-device /dev/nvme0n1p2
+catos-recovery status --root-device /dev/nvme0n1p2 --transaction ID
+catos-update --check
 ```
 
-The canonical backend commands below remain available through the
-canonical binary for tooling that needs structured JSON:
+### Advanced read-only commands
 
-```
-# Stage 1 — read-only environment + target inspection
-catos-system environment  [--root PATH] [--json]
-catos-system capabilities [--root PATH] [--json]
-catos-system inspect      [--root PATH] [--json]
+These commands are retained for diagnostics and automation but do not dominate
+the normal help screen:
 
-# Stage 2 — read-only storage discovery + safe RO target mount
-catos-system storage scan                [--root PATH] [--json]
-catos-system target plan                 [--root PATH] [--json]
-    [--root-device /dev/...] [--root-subvolume PATH] [--esp-device /dev/...]
-catos-system target mount                [--root PATH] [--json]
-    [--root-device /dev/...] [--root-subvolume PATH] [--esp-device /dev/...]
-
-# Stage 4 — durable, crash-resumable Btrfs root-snapshot recovery
-catos-system recovery list              [--json]
-    [--root-device /dev/...]
-catos-system recovery inspect           [--json]
-    [--root-device /dev/...] [--root-subvolume PATH]
-    [--snapshot-subvolume PATH]
-catos-system recovery plan              [--json]
-    [--root-device /dev/...] [--root-subvolume PATH]
-    [--snapshot-subvolume PATH]
-catos-system recovery apply             [--json]
-    --root-device /dev/... --root-subvolume PATH
-    --snapshot-subvolume PATH
-    --plan-id ID --confirm TOKEN --plan-file PATH
-catos-system recovery status            [--json]
-    --root-device /dev/... --transaction ID
-catos-system recovery resume            [--json]
-    --root-device /dev/... --root-subvolume PATH
-    --snapshot-subvolume PATH --transaction ID
-catos-system recovery revert            [--json]
-    --root-device /dev/... --transaction ID --confirm TOKEN
-
-# Stage 3 — mount-config repair (fstab + standard subvolume layout)
-catos-repair mount [--json]
-    [--root-device /dev/...] [--root-subvolume PATH]
-    [--esp-device /dev/...]
-
-catos-system --version
-catos-system --help
+```text
+catos-system advanced inspect [--root PATH] [--json]
+catos-system advanced environment [--root PATH] [--json]
+catos-system advanced capabilities [--root PATH] [--json]
+catos-system advanced storage scan [--json]
+catos-system advanced target plan [OPTIONS]
+catos-system advanced target mount [OPTIONS]
 ```
 
-The canonical backend commands below are implementation surfaces; they do not
-create `catos-doctor inspect` or `catos-doctor preflight` public syntax. The
-selected canonical subcommand controls which report sections are rendered:
+The legacy direct spellings remain compatible:
 
-- `environment`: runtime facts only
-- `capabilities`: capability results only
-- `inspect`: runtime, capabilities, and target inspection
-- `storage scan`: walks `/sys/class/block`, `/proc/self/mountinfo`, the udev
-  database, and a fixed trusted `blkid` path. With `CAP_SYS_ADMIN`, unmounted
-  candidates are briefly mounted in a private namespace for content-based
-  root/ESP identification. Btrfs is mounted at `subvolid=5`, subvolumes are
-  enumerated, and obvious snapshots are excluded from root candidates.
-- `target plan`: reads the selected target's own fstab through confined
-  `openat2` access and builds a `MountPlan`; **does not leave any mount**.
-  For an unmounted LiveCD/initramfs target, `--root-device` performs a
-  short-lived read-only probe to obtain that device's fstab. Optional
-  `--root-subvolume` and `--esp-device` override ambiguous choices.
-- `target mount`: performs a one-shot `mount -> inspect -> cleanup` flow in
-  a private mount namespace (`unshare(CLONE_NEWNS)` plus
-  `MS_REC|MS_PRIVATE`). The returned session is the truthful final state
-  (`finished` or `cleanup_incomplete`), not a stale active snapshot.
-
-```
+```text
 catos-system inspect --json
-catos-recovery environment --json
-catos-recovery storage scan --json
-catos-recovery target plan --json
+catos-system --json inspect
+catos-system storage scan --json
+catos-system target plan --root-device /dev/nvme0n1p2 --json
 ```
+
+Low-level inspection commands belong only to `catos-system`; forms such as
+`catos-recovery environment` and `catos-chroot inspect` are rejected.
 
 ### Exit codes
 
-Stable values, defined in `src/error.rs` and documented in `--help`:
-
-| Code | Meaning                                                    |
-|------|------------------------------------------------------------|
-| 0    | success                                                    |
-| 2    | argument error (unknown flag, missing value, etc.)         |
-| 3    | `--root` invalid (does not exist, not a directory)         |
-| 4    | permission denied reading a critical path                  |
-| 5    | probe failed; could not produce a report                   |
-| 6    | JSON serialisation failed                                  |
+| Code | Meaning |
+|---|---|
+| 0 | The requested command completed. For Doctor, this means a report was produced; health severity is reported separately. |
+| 2 | The command, option, target selection, or requested operation was invalid. |
+| 3 | A supplied target root was invalid. |
+| 4 | Administrator privileges or access to a critical path were unavailable. |
+| 5 | Diagnosis, repair, recovery, mount, shell entry, or cleanup could not complete. |
+| 6 | Structured output could not be serialised or written. |
 
 ## JSON contract
 
@@ -239,8 +234,8 @@ Stable invariants of the JSON contract:
 5. Adding fields to nested objects is allowed and is considered
    backward-compatible. Consumers MUST ignore unknown fields.
 6. JSON output never contains ANSI colour escapes, log lines, or progress
-   text. Phase-1 argument/probe errors use stderr. Phase-2 commands in
-   `--json` mode return a structured `{ "kind": "error", ... }` envelope
+   text. Inspection argument/probe errors use stderr. Storage and target-mount
+   commands in `--json` mode return a structured `{ "kind": "error", ... }` envelope
    on stdout, preserving mount errno, completed steps, cleanup status, and
    residual mounts.
 7. `targetRoot` is the exact string the user supplied via `--root` (default
@@ -259,106 +254,52 @@ becomes valuable, a schema file can be added without breaking this contract.
 
 ## Architecture
 
-```
+The application layer is organised by user responsibility rather than by
+implementation chronology:
+
+```text
 src/
-  main.rs            binary entry; forwards to entry::run
-  lib.rs             exposes API for unit + integration tests
-  entry.rs           multicall argv[0] dispatch + top-level wiring
-  cli.rs             hand-rolled arg parser + exit codes
-  error.rs           Error + FsError + stable exit codes
-  process.rs         fixed-path, bounded, timed external-tool runner
-  system_root.rs     validated display/canonical target-root paths
-  phase2.rs          phase-2 orchestrators: storage scan / target plan / target mount
-  phase3.rs          phase-3 orchestrators: recovery list/inspect/plan/apply/status/resume/revert
-  model/             pure data + serde; no I/O
-    evidence.rs        Evidence: code/source/message/value
-    runtime.rs         Detection, DetectionStatus, RuntimeFacts, PrimaryRuntimeMode
-    capability.rs      Capability, CapabilityKind, CapabilityStatus
-    inspection.rs      TargetInspection, OsRelease, ToolPath, Warning, InspectionReport
-    storage.rs         phase 2: devices, mount observations, Btrfs subvolumes, candidates
-    mount.rs           phase 2: MountError taxonomy, MountPlan, MountSession, CleanupReport
-    recovery.rs        phase 3: RecoveryPlan, TransactionState, RecoveryErrorKind, DiskFacts
-    repair.rs          phase 2: FsRepairReport, FsRepairOutcome, attempts, exit interpretation
-    mount_repair.rs    phase 3: MountRepairReport, MountRepairPlan, TargetIdentity, FstabDigest
-    fstab.rs           re-exports of parse::fstab types
-  parse/             pure parsers; no I/O
-    fstab.rs           /etc/fstab parser + malformed-line diagnostics
-    mountinfo.rs       /proc/self/mountinfo parser (octal escapes, VFS vs superblock options)
-    blkid.rs           blkid udev + human-format parser (ID_FS_*, ID_PART_ENTRY_*)
-  probe/             reads the world via FilesystemProbe trait
-    fs_probe.rs        filesystem abstraction + confined target-root access (openat2)
-    runtime.rs         detect_runtime + six detectors (initramfs/chroot/live/snapshot/systemd/ro)
-    target.rs          inspect_target + os-release parsing + tool probes
-    capability.rs      detect_capabilities (14 foundation capabilities)
-    block.rs           sysfs + mountinfo + udev DB + trusted blkid supplement
-    candidate.rs       phase 2: evidence-driven root/ESP candidate identification
-  mount/             state-changing layer (phase 2); only read-only mounts
-    syscall.rs         raw FFI for mount/umount2/unshare + errno→MountErrorKind table
-    namespace.rs       unshare(CLONE_NEWNS) + MS_REC|MS_PRIVATE on / + verify
-    plan.rs            per-fstype RO option table + MountPlan builder
-    probe.rs           short-lived root/ESP probes + Btrfs subvolume discovery
-    session.rs         private namespace + ordered mounts + reverse-order rollback
-  recovery/          phase-3 transaction layer; only place that writes to target btrfs
-    state.rs           pure state machine: transition(), happy_path_successor(), reconcile_with_disk_facts()
-    identity.rs        SubvolumePath validation, IdentityDrift, confirmation token verification
-    plan.rs            PlanInputs, schema-v4 SHA-256 plan digest and confirmation binding
-    confined.rs        openat2-confined records, Btrfs snapshot ioctl, dirfd root exchange
-    lock.rs            non-blocking per-FSID flock
-    store.rs           schema checks and durable confined state/plan persistence
-    external.rs        trusted read-only btrfs-progs wrapper with bounded execution
-    boot.rs            read-only BootConsistencyReport and external boot-resource gate
-    engine.rs          begin/load/drive/revert, state persistence and fault injection
-  repair/            stage-2 fsck orchestration + stage-3 mount-config repair
-    safety.rs          stage-2 target selection + safety refusals (RunningRoot / Mounted / Ambiguous)
-    runner.rs          CommandRunner trait (TrustedRunner + RecordedRunner for tests)
-    runners.rs         per-fstype flows (e2fsck / fsck.fat / fsck.f2fs / xfs_repair / btrfs)
-    orchestrator.rs    stage-2 fsck orchestrator
-    verify.rs          stage-2 post-repair verification mount
-    fstab_edit.rs      stage-3 structure-preserving /etc/fstab line editor
-    subvol_decision.rs stage-3 CatOS standard subvolume rebuild authorisation
-    path_safety.rs     stage-3 mount-point path safety policy (pure)
-    mount_repair.rs    stage-3 mount-config orchestrator + diagnosis
-  output/            renders model
-    human.rs           plain ASCII human output (phase 1)
-    json.rs            serde_json wrapper (phase 1, single source of JSON contract)
-    phase2.rs          phase 2: human + JSON for StorageReport / MountPlan / MountSession
-    recovery.rs        phase 3: human + JSON for RecoveryPlan / TransactionRecord / RecoveryError
-    repair.rs          stage 2: human + JSON for FsRepairReport
-    mount_repair.rs    stage 3: human + JSON for MountRepairReport
+  main.rs                 process entry; resolves argv[0]
+  entry.rs                aggregate and role-specific command routing
+  entry/menu.rs           line-oriented interactive menus
+  entry/chroot.rs         privilege elevation and chroot application flow
+  cli/                    low-level inspection parser and help
+  selection_ui.rs         detected-target presentation and selection
+  doctor/                 aggregated read-only diagnosis
+  repair/                 filesystem, mount-layout, and boot repair wiring
+  recovery/               snapshot recovery command orchestration
+  system/                 storage scan and read-only target inspection
+  update/                 package-update workflow
+  output/                 human and JSON rendering
+```
+
+Reusable capabilities live in separate crates:
+
+```text
+crates/
+  catos-target/           confined target reads, discovery, identity, fstab
+  catos-mount/            mount planning, namespaces, sessions, verification
+  catos-fs/               filesystem safety, command plans, repair verification
+  catos-boot/             boot-provider detection, planning, execution, verification
+  catos-snapshot/         durable Btrfs recovery state machine and storage
+  catos-chroot/           chroot plans, assembly, shell preflight, cleanup
+  catos-process/          trusted executable resolution and bounded processes
 ```
 
 Layering rules:
 
-- `model/*` is pure data + serde. No I/O, no side effects.
-- `parse/*` is pure functions of bytes-in, model-out. No I/O.
-- `probe/*` reads the world via `FilesystemProbe` and returns structured
-  models. It never prints or mounts. Optional external metadata helpers
-  are launched only through `process.rs`, with a fixed trusted path,
-  minimal environment, timeout, and output limits.
-- `mount/*` is the ONLY place that issues mount/umount/unshare syscalls.
-  It receives a fully-built `MountPlan` from `mount::plan` and a
-  pre-snapshotted pre-existing-mount set from `mount::session`. Probe mounts
-  are short-lived and clean before returning; target mounts inspect before
-  reverse-order cleanup.
-- `output/*` consumes models. It never probes.
-- `phase2.rs` orchestrates between `entry.rs` and the probe/mount layers.
-- `phase3.rs` orchestrates between `entry.rs` and the recovery layer.
-  It enters a private mount namespace, mounts the btrfs top-level
-  read-write, and hands control to `recovery::engine::Engine`. Every
-  persistent state transition is fsynced before the next action runs.
-- `recovery/*` is the ONLY place that writes to the target btrfs
-  filesystem. It uses `recovery::external` for trusted btrfs-progs
-  invocations (subcommand allow-list, fixed paths, bounded execution)
-  and a raw `renameat2(RENAME_EXCHANGE)` syscall for the root swap.
-- Every detection carries an `Evidence` trail (code, source, message,
-  optional value).
-- Probes that cannot gather enough evidence MUST return `Unknown`, never
-  `NotDetected` and never a guess.
-- Real target-root reads use Linux `openat2(2)` with `RESOLVE_IN_ROOT` and
-  `RESOLVE_NO_MAGICLINKS`. Absolute symlinks are interpreted inside the
-  selected target root, and magic-link escapes are rejected. Kernels without
-  `openat2` are handled fail-closed: target-root probes return `unknown`
-  instead of falling back to a race-prone pathname check.
+- Capability crates do not parse the public command line or ask interactive
+  questions.
+- Target-side reads use confined Linux path resolution and fail closed on
+  unsafe paths.
+- External tools are resolved only from trusted system directories and are
+  executed with explicit argv, bounded output, and controlled timeouts.
+- Mounts are created inside private namespaces where required and are cleaned
+  in reverse order. Pre-existing mounts are never unmounted.
+- Repair and recovery hold shared device locks before persistent changes.
+- Renderers consume structured models; they do not probe or mutate systems.
+- Every uncertain detection remains `unknown` rather than being converted to
+  a false assertion.
 
 ## Build
 
@@ -431,23 +372,23 @@ The following surfaces are wired into CTest when `-DBUILD_TESTS=ON`:
 
 | Test                              | What it guards against                                |
 |-----------------------------------|-------------------------------------------------------|
-| `catos-system-cargo-test`         | Rust unit + integration tests. Includes runtime/capability fixtures, target-root confinement, mount policy, fstab diagnostics, candidate evidence, Btrfs parsing, structured errors, CLI and multicall contracts, phase-3 recovery state machine, transaction durability, SHA-256 plan/token binding, confined path attacks, boot-consistency gating, crash-resumable transaction flow, stage-3 mount-repair fstab-editor preservation, subvolume-rebuild authorisation rules, path-safety refusals, and identity/drift detection. |
-| `catos-system-cargo-clippy`       | All Rust targets and features remain warning-free at the declared MSRV contract. |
+| `catos-system-cargo-test`         | Rust unit + integration tests. Includes runtime/capability fixtures, target-root confinement, mount policy, fstab diagnostics, candidate evidence, Btrfs parsing, structured errors, CLI and multicall contracts, snapshot-recovery state machine, transaction durability, SHA-256 plan/token binding, confined path attacks, boot-consistency gating, crash-resumable transaction flow, mount-repair fstab-editor preservation, subvolume-rebuild authorisation rules, path-safety refusals, and identity/drift detection. |
+| `catos-system-cargo-clippy`       | Runs Clippy for the workspace targets configured by CMake. The application crate is also checked separately with warnings denied during CLI changes. |
 | `catos-system-static-check`       | The musl binary silently regressing to dynamic linking (would break initramfs and recovery use). |
 | `catos-system-initramfs-smoke-bare` | The static binary refusing to start in a minimal Linux user space without systemd, dbus, network, or `/usr`. |
 | `catos-system-initramfs-smoke-with-marker` | Runtime detection failing to identify a mkinitcpio-style initramfs containing `/etc/initrd-release`. |
 | `catos-system-storage-qemu-smoke` | A real writable ext4 root, FAT ESP, and Btrfs `@`/snapshot image: discovery, explicit planning, mount-inspect-cleanup, snapshot exclusion, session cleanup, and byte-for-byte no-write verification. |
 | `catos-system-recovery-qemu-smoke` | Authoritative real-Btrfs acceptance in QEMU. Exercises the happy path, all three fault windows, resume reconciliation, Completed revert including the reverse-swap crash window, non-default source identity, guest-side data/backup/readonly assertions, nested-layout refusal, external-ESP refusal, and byte-for-byte ESP no-write verification. Once QEMU starts, skipped assertions are hard failures. |
-| `catos-system-repair-qemu-smoke` | Stage-2 real-filesystem repair acceptance in QEMU. It repairs deliberately damaged ext4 and FAT images, damages one metadata-DUP root-tree mirror and proves Btrfs escalates from the checksum diagnostic to `--repair` and a clean recheck, exercises normal XFS repair, and creates a real unclean XFS journal by killing a writer VM before proving `xfs_repair -L` reports `repaired_with_risk`. |
-| `catos-system-mount-repair-qemu-smoke` | Stage-3 state-changing acceptance in QEMU. It exercises all six `/boot`/ESP layouts, a Btrfs `@boot`, an independent ext4 `/boot`, a plain ext4 target, the currently-running ext4 root without unmounting it, complete fstab mount verification, and empty-subvolume rollback after an induced verification failure. |
-| `catos-system-doctor-qemu-smoke` | Stage-5 read-only Doctor acceptance in QEMU. Builds real CatOS btrfs target images (healthy, fs-corrupt, mount-break, ambiguous, doctor-fail), runs `catos-doctor` against each, asserts exit code 0 per scheme B for every unhealthy scenario, asserts non-zero exit only for doctor-fail, AND verifies byte-for-byte by `sha256` that no target image was written. Once QEMU starts, skipped assertions are hard failures. |
+| `catos-system-repair-qemu-smoke` | Real-filesystem repair acceptance in QEMU. It repairs deliberately damaged ext4 and FAT images, damages one metadata-DUP root-tree mirror and proves Btrfs escalates from the checksum diagnostic to `--repair` and a clean recheck, exercises normal XFS repair, and creates a real unclean XFS journal by killing a writer VM before proving `xfs_repair -L` reports `repaired_with_risk`. |
+| `catos-system-mount-repair-qemu-smoke` | State-changing mount-repair acceptance in QEMU. It exercises all six `/boot`/ESP layouts, a Btrfs `@boot`, an independent ext4 `/boot`, a plain ext4 target, the currently-running ext4 root without unmounting it, complete fstab mount verification, and empty-subvolume rollback after an induced verification failure. |
+| `catos-system-doctor-qemu-smoke` | Read-only Doctor acceptance in QEMU. Builds real CatOS btrfs target images (healthy, fs-corrupt, mount-break, ambiguous, doctor-fail), runs `catos-doctor` against each, asserts exit code 0 under the documented Doctor exit semantics for every unhealthy scenario, asserts non-zero exit only for doctor-fail, AND verifies byte-for-byte by `sha256` that no target image was written. Once QEMU starts, skipped assertions are hard failures. |
 
 The two minimal initramfs tests are opt-in through
 `-DCATOS_SYSTEM_INITRAMFS_SMOKE=ON`. The real storage test is enabled with
-`-DCATOS_SYSTEM_STORAGE_SMOKE=ON`. The phase-3 recovery crash/resume
+`-DCATOS_SYSTEM_STORAGE_SMOKE=ON`. The recovery crash/resume
 test is enabled with `-DCATOS_SYSTEM_RECOVERY_SMOKE=ON` and additionally
 requires `mkfs.btrfs`, `mkfs.vfat`, `mtools` (`mmd`, `mcopy`), `cpio`,
-`gzip`, `zstd`, and `modinfo`. The stage-2 repair test is enabled with
+`gzip`, `zstd`, and `modinfo`. The filesystem-repair test is enabled with
 `-DCATOS_SYSTEM_REPAIR_SMOKE=ON` and additionally requires `mkfs.ext4`,
 `mkfs.vfat`, `mkfs.btrfs`, `e2fsck`, `fsck.fat`, `btrfs`,
 `btrfs-map-logical`, and `debugfs`;
@@ -509,8 +450,8 @@ info: binary size 1036992 bytes (1012 KiB)
 RESULT: OK (binary is fully static)
 ```
 
-The Stage-4 snapshot-recovery backend (currently implemented in
-`src/phase3.rs`) includes the recovery transaction layer, identity
+Snapshot recovery is implemented by `src/recovery/` and the
+`catos-snapshot` crate. It includes the recovery transaction layer, identity
 drift detection, SHA-256-bound plan and confirmation records, confined
 openat2 storage, durable transaction persistence, Btrfs ioctl snapshot
 creation, the renameat2 root exchange, read-only boot consistency
@@ -518,7 +459,7 @@ reporting, and JSON + human renderers for all snapshot-recovery outcomes. Static
 size is checked by `verify-static.sh` against the 4 MiB warning
 threshold; the exact binary size depends on the current toolchain.
 
-## `catos-repair mount` (stage 3)
+## `catos-repair mount`
 
 `catos-repair mount` repairs the target's `/etc/fstab`, CatOS standard Btrfs
 subvolume layout, mount-point directories, independent `/boot`, and ESP mount
@@ -605,11 +546,11 @@ assemble LVM/mdraid, migrate ordinary-directory data, rebuild Snapper config,
 modify snapshot contents, install a bootloader, change Secure Boot state, or
 run arbitrary target commands.
 
-## `catos-repair boot` (stage 4)
+## `catos-repair boot`
 
 `catos-repair boot` re-applies the target's currently-selected bootloader
 provider recipe. It is a behaviour port of the Calamares `bootloadu` module to
-the static Rust backend; it does not invent a new bootloader architecture or a
+the static Rust implementation; it does not invent a new bootloader architecture or a
 parallel transaction framework.
 
 ```text
@@ -668,8 +609,7 @@ replaces `libcalamares.utils.target_env_call` with a much narrower contract:
   form, no shell expansion, no environment mutation surface.
 - **Bounded output drain.** stdout/stderr are drained to EOF (verbose tools
   are not killed by SIGPIPE) but capped per stream; truncation is reported.
-- **No mount cleanup.** The executor never unmounts anything; the stage 1–3
-  mount session owns all cleanup.
+- **No mount cleanup.** The executor never unmounts anything; the shared target mount session owns all cleanup.
 
 ### Secure Boot
 
@@ -726,11 +666,11 @@ a provider based on the live host's installed tools, open LUKS, repartition
 devices, run arbitrary target commands outside the fixed allow-list, or claim
 atomic rollback for EFI NVRAM / MOK / signature operations.
 
-## `catos-doctor` (stage 5)
+## `catos-doctor`
 
 `catos-doctor` is the read-only aggregated diagnosis entry point. It takes no
 functional arguments and produces a single human-readable report that
-summarises every diagnostic domain stages 1–4 already cover:
+summarises every diagnostic domain the maintenance capabilities cover:
 
 ```text
 catos-doctor
@@ -750,27 +690,37 @@ catos-doctor
   GUI/front-end consumption; the public entry point intentionally does not
   expose it.
 * `--help` / `--version` work as on every other entry point.
-* All five public entry points (`catos-system`, `catos-update`,
-  `catos-recovery`, `catos-doctor`, `catos-repair`) install as symlinks to
-  the same single static binary.
+* In an interactive terminal, Doctor requests administrator privileges through
+  a trusted `sudo`, `sudo-rs`, `doas`, or `run0` executable before creating a
+  private mount namespace. A non-interactive unprivileged invocation fails
+  before diagnosis and writes no empty report to stdout.
+* The terminal report is a fixed-width table designed for an 80-column TTY.
+  Each diagnostic domain occupies one summary row; findings and actions appear
+  only when needed. Reports longer than the current terminal height use a
+  built-in pager (`Enter` advances, `q` quits), so Doctor does not depend on
+  `less`, a shell, or a desktop session. Action commands may wrap onto aligned
+  continuation rows but are never truncated.
+* The package installs one `catos-system` binary and five role-specific
+  symlinks (`catos-update`, `catos-recovery`, `catos-doctor`, `catos-repair`,
+  and `catos-chroot`). All six command names resolve to the same inode.
 
-### Exit-code semantics (scheme B)
+### Exit-code semantics
 
 `overall_status` and the process exit code are independent:
 
 | Exit code | Meaning |
 |---|---|
-| `0` | Doctor completed the diagnosis and produced a report. The target may be healthy, degraded, unhealthy, critical, or unknown — the severity is in the report. |
-| `!= 0` | Doctor itself could not complete the diagnosis (broken invariant, serialisation failure, private-namespace failure for a required offline probe, internal crash). |
+| `0` | Doctor selected a target, completed the diagnosis, and cleaned up its resources. The target may still be degraded, unhealthy, critical, or partially unknown; severity remains in the report. |
+| `4` | Administrator privileges were unavailable before diagnosis. |
+| `5` | No unique target was selected, the private namespace or target session could not be established, or Doctor cleanup was incomplete. |
+| other non-zero | Argument, serialisation, or output failure. |
 
-These are NOT Doctor execution failures and MUST return 0:
-
-* the target is unhealthy;
-* the target is ambiguous or missing;
-* a read-only check tool is missing;
-* the current root is mounted RW so an offline fsck is impossible;
-* the boot provider cannot be uniquely identified;
-* a recovery transaction is interrupted.
+Target health does not change a completed Doctor invocation into a process
+failure. Filesystem corruption, a broken fstab, an interrupted recovery
+transaction, a missing optional read-only tool, or an ambiguous boot provider
+remain report findings and return 0 after a target was selected. By contrast,
+missing/ambiguous target selection is an invocation failure because no target
+was diagnosed.
 
 ### Diagnostic sections
 
@@ -817,7 +767,7 @@ mismatch is a hard failure.
 
 ### Issue codes
 
-Stable snake_case codes are emitted for every issue
+Stable uppercase symbolic codes are emitted for every issue
 (`FS_CORRUPTION_DETECTED`, `FSTAB_ROOT_SOURCE_MISMATCH`,
 `STANDARD_SUBVOLUME_MISSING`, `ESP_AMBIGUOUS`,
 `BOOT_PROVIDER_AMBIGUOUS`, `BOOT_PROVIDER_CONFLICT`,
@@ -832,18 +782,21 @@ Stable snake_case codes are emitted for every issue
 
 ## What is not implemented yet
 
-- `catos-update`: the entry point is reserved but no update workflow exists.
+- AUR-helper, Flatpak, distribution-news, and desktop notification integration
+  for `catos-update`.
 - Automatic deletion of recovery backups; they remain available for revert or
   explicit operator removal.
 - Complete boot-and-reboot QEMU acceptance for every provider/firmware
-  combination (the contract-test layer is in place; the full matrix needs
-  OVMF Secure Boot certificates and the provider toolchain in CI).
-- A TUI/GUI, long-running daemon, and network operations.
+  combination. The full matrix needs OVMF Secure Boot certificates and the
+  provider toolchain in CI.
+- A graphical frontend and long-running maintenance daemon. The shipped
+  interface is the command line plus its line-oriented interactive menus.
 
-## Removed from the implementation plan
+## Deliberate exclusions
 
 - a bundled static pacman/libalpm replacement
 - an independent repository database, package solver, keyring, or package
   repair runtime
-- arbitrary chroot, shell, or target-command execution
+- arbitrary or unconfined target command execution; Chroot and boot repair use
+  fixed, audited workflows
 - formatting, partition-table editing, automatic fsck, LVM, or mdraid repair
