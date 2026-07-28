@@ -723,15 +723,6 @@ pub(in crate::doctor) fn run_secure_boot_section(
             return Ok(());
         }
     };
-    let firmware_boot_conf = match read_target_file(&root, "etc/catos/firmware-boot.conf") {
-        Ok(value) => value,
-        Err(error) => {
-            set_section(sections, id, DoctorSectionStatus::Unknown);
-            report.limitations.push(DoctorLimitation::new(id, "SECURE_BOOT_POLICY_INCOMPLETE", format!("cannot read target firmware boot policy: {error}")));
-            return Ok(());
-        }
-    };
-
     push_evidence(
         sections,
         id,
@@ -762,7 +753,6 @@ pub(in crate::doctor) fn run_secure_boot_section(
             format!("/etc/catos/secureboot present: {target_marker}"),
         ),
     );
-
     if firmware_sb_on.is_none() {
         set_section(sections, id, DoctorSectionStatus::Unknown);
         report.limitations.push(DoctorLimitation::new(
@@ -781,18 +771,8 @@ pub(in crate::doctor) fn run_secure_boot_section(
         ));
         return Ok(());
     }
-    if firmware_boot_conf.is_none() {
-        set_section(sections, id, DoctorSectionStatus::Unknown);
-        report.limitations.push(DoctorLimitation::new(
-            id,
-            "SECURE_BOOT_POLICY_INCOMPLETE",
-            "target Secure Boot policy configuration is unavailable; absence is not treated as disabled",
-        ));
-        return Ok(());
-    }
-
-    let policy_inconsistent = target_marker != firmware_sb_on.expect("checked firmware Secure Boot state")
-        || (target_marker && firmware_boot_conf.is_none());
+    let firmware_sb_on = firmware_sb_on.expect("checked firmware Secure Boot state");
+    let policy_inconsistent = !secure_boot_policy_consistent(firmware_sb_on, target_marker);
     if policy_inconsistent {
         let section = set_section(sections, id, DoctorSectionStatus::Unhealthy);
         section.issues.push(DoctorIssue::new(
@@ -821,15 +801,31 @@ pub(in crate::doctor) fn run_secure_boot_section(
     Ok(())
 }
 
+fn secure_boot_policy_consistent(firmware_enabled: bool, target_marker: bool) -> bool {
+    firmware_enabled == target_marker
+}
+
 fn secure_boot_enabled_from_efivar(body: &[u8]) -> Option<bool> {
     body.get(4).map(|b| *b != 0)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{pacman_package_name, provider_firmware_asset_present, valid_grub_config, valid_limine_config, valid_systemd_loader, efi_asset};
+    use super::{
+        efi_asset, pacman_package_name, provider_firmware_asset_present,
+        secure_boot_policy_consistent, valid_grub_config, valid_limine_config,
+        valid_systemd_loader,
+    };
     use crate::boot::model::ProviderId;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn secure_boot_policy_does_not_depend_on_firmware_provider_config() {
+        assert!(secure_boot_policy_consistent(true, true));
+        assert!(secure_boot_policy_consistent(false, false));
+        assert!(!secure_boot_policy_consistent(true, false));
+        assert!(!secure_boot_policy_consistent(false, true));
+    }
 
     #[test]
     fn uki_requires_uki_config_and_an_efi_file_in_efi_linux() {
