@@ -4,7 +4,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use crate::doctor::model::{
-    issue_code, recommendation_code, DoctorIssue, DoctorRecommendation, DoctorReport,
+    issue_code, recommendation_code, DoctorIssue, DoctorReport,
     DoctorSection, DoctorSectionId, DoctorSectionStatus, DoctorSeverity,
 };
 use crate::mount::diagnose::subvolume::{CatosConfirmation, SubvolFacts, SubvolObservation};
@@ -16,7 +16,7 @@ use crate::target::model::TargetIdentity;
 use crate::target::Evidence;
 
 use super::{
-    push_evidence, push_issue, set_section, target_bound_repair_command, target_root_path,
+    push_evidence, push_issue, set_section, target_repair_recommendation, target_root_path,
 };
 use crate::doctor::DoctorTargetContext;
 
@@ -68,8 +68,6 @@ pub(in crate::doctor) fn run_mount_section(
         .ok()
         .and_then(|esp| esp.as_ref())
         .map(|esp| esp.device.as_path());
-    let repair_command =
-        target_bound_repair_command("catos-repair mount", &context.target, esp_device);
     if problems.iter().any(|p| {
         matches!(
             p,
@@ -78,27 +76,27 @@ pub(in crate::doctor) fn run_mount_section(
                 | MountProblem::MissingStandardEntry { .. }
         )
     }) {
-        let recommendation = DoctorRecommendation::new(
+        report.recommendations.push(target_repair_recommendation(
+            "catos-repair mount",
+            &context.target,
+            esp_device,
             recommendation_code::RUN_CATOS_REPAIR_MOUNT,
             "mount layout is missing standard entries or subvolumes; catos-repair mount can recreate them when authorised",
-        );
-        report.recommendations.push(match repair_command.as_ref() {
-            Some(command) => recommendation.with_command(command.clone()),
-            None => recommendation,
-        });
+            "mount layout needs repair, but automatic mount repair supports only the CatOS standard Btrfs root /@; review this nonstandard root manually",
+        ));
     }
     if problems
         .iter()
         .any(|p| matches!(p, MountProblem::RootUuidMismatch { .. }))
     {
-        let recommendation = DoctorRecommendation::new(
+        report.recommendations.push(target_repair_recommendation(
+            "catos-repair mount",
+            &context.target,
+            esp_device,
             recommendation_code::RUN_CATOS_REPAIR_MOUNT,
             "root UUID in fstab does not match the discovered device",
-        );
-        report.recommendations.push(match repair_command {
-            Some(command) => recommendation.with_command(command),
-            None => recommendation,
-        });
+            "root UUID in fstab needs repair, but automatic mount repair supports only the CatOS standard Btrfs root /@; review this nonstandard root manually",
+        ));
     }
     Ok(())
 }

@@ -7,7 +7,10 @@ mod recovery;
 
 use std::path::{Path, PathBuf};
 
-use crate::doctor::model::{DoctorIssue, DoctorSection, DoctorSectionId, DoctorSectionStatus};
+use crate::doctor::model::{
+    recommendation_code, DoctorIssue, DoctorRecommendation, DoctorSection, DoctorSectionId,
+    DoctorSectionStatus,
+};
 use crate::target::Evidence;
 
 pub(in crate::doctor) use boot::{run_boot_section, run_secure_boot_section};
@@ -60,11 +63,24 @@ pub(in crate::doctor) fn target_root_path(
     target.root.clone()
 }
 
+pub(in crate::doctor) fn target_supports_standard_root_repair(
+    target: &crate::target::model::TargetIdentity,
+) -> bool {
+    match target.root_fstype.as_deref() {
+        Some("btrfs") => target.root_subvol.as_deref() == Some("/@"),
+        Some(_) => true,
+        None => false,
+    }
+}
+
 pub(in crate::doctor) fn target_bound_repair_command(
     program: &str,
     target: &crate::target::model::TargetIdentity,
     esp_device: Option<&Path>,
 ) -> Option<String> {
+    if !target_supports_standard_root_repair(target) {
+        return None;
+    }
     let root_device = target.root_device.as_deref()?;
     let mut command = format!(
         "{program} --root-device {}",
@@ -79,6 +95,27 @@ pub(in crate::doctor) fn target_bound_repair_command(
         command.push_str(&esp_device.display().to_string());
     }
     Some(command)
+}
+
+pub(in crate::doctor) fn target_repair_recommendation(
+    program: &str,
+    target: &crate::target::model::TargetIdentity,
+    esp_device: Option<&Path>,
+    supported_code: &str,
+    supported_message: impl Into<String>,
+    unsupported_message: impl Into<String>,
+) -> DoctorRecommendation {
+    if !target_supports_standard_root_repair(target) {
+        return DoctorRecommendation::new(
+            recommendation_code::MANUAL_REVIEW,
+            unsupported_message,
+        );
+    }
+    let recommendation = DoctorRecommendation::new(supported_code, supported_message);
+    match target_bound_repair_command(program, target, esp_device) {
+        Some(command) => recommendation.with_command(command),
+        None => recommendation,
+    }
 }
 
 pub(in crate::doctor) fn read_target_file(
@@ -128,9 +165,10 @@ pub(in crate::doctor) fn is_device_mounted_rw(device: &Path) -> Result<MountStat
 #[cfg(test)]
 mod tests {
     use super::{
-        device_mount_state, read_target_file, target_bound_repair_command, target_root_path,
-        MountState,
+        device_mount_state, read_target_file, target_bound_repair_command,
+        target_repair_recommendation, target_root_path, MountState,
     };
+    use crate::doctor::model::recommendation_code;
     use crate::target::model::TargetIdentity;
     use std::path::PathBuf;
 
@@ -148,10 +186,11 @@ mod tests {
     }
 
     #[test]
-    fn repair_command_preserves_selected_root_subvolume_and_esp() {
+    fn repair_command_preserves_supported_standard_root_and_esp() {
         let target = TargetIdentity {
             root_device: Some(PathBuf::from("/dev/dm-0")),
-            root_subvol: Some("/@root".into()),
+            root_fstype: Some("btrfs".into()),
+            root_subvol: Some("/@".into()),
             ..TargetIdentity::default()
         };
         assert_eq!(
@@ -162,9 +201,31 @@ mod tests {
             )
             .as_deref(),
             Some(
-                "catos-repair mount --root-device /dev/dm-0 --root-subvolume /@root --esp-device /dev/nvme0n1p1"
+                "catos-repair mount --root-device /dev/dm-0 --root-subvolume /@ --esp-device /dev/nvme0n1p1"
             )
         );
+    }
+
+    #[test]
+    fn nonstandard_btrfs_root_uses_manual_review_without_command() {
+        let target = TargetIdentity {
+            root_device: Some(PathBuf::from("/dev/dm-0")),
+            root_fstype: Some("btrfs".into()),
+            root_subvol: Some("/@root".into()),
+            ..TargetIdentity::default()
+        };
+        assert!(target_bound_repair_command("catos-repair mount", &target, None).is_none());
+        let recommendation = target_repair_recommendation(
+            "catos-repair mount",
+            &target,
+            None,
+            recommendation_code::RUN_CATOS_REPAIR_MOUNT,
+            "repair automatically",
+            "review manually",
+        );
+        assert_eq!(recommendation.code, recommendation_code::MANUAL_REVIEW);
+        assert_eq!(recommendation.message, "review manually");
+        assert!(recommendation.command.is_none());
     }
 
     #[test]

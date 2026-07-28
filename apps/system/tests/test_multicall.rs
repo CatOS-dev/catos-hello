@@ -624,6 +624,32 @@ fn update_help_does_not_advertise_unsupported_noop_flags() {
 }
 
 #[test]
+fn repair_rejects_nonstandard_root_subvolume_before_elevation() {
+    let bin = bin_path();
+    for domain in ["mount", "boot"] {
+        let output = Command::new(&bin)
+            .args([
+                "repair",
+                domain,
+                "--root-device",
+                "/dev/does-not-exist",
+                "--root-subvolume",
+                "/@root",
+            ])
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(2), "domain={domain}");
+        assert!(output.stdout.is_empty(), "domain={domain}");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains("supports only"), "domain={domain}: {stderr}");
+        assert!(
+            !stderr.contains("administrator privileges"),
+            "domain={domain}: {stderr}"
+        );
+    }
+}
+
+#[test]
 fn repair_top_level_help_defers_to_command_specific_options() {
     let bin = bin_path();
     let tmp = TempDir::new("catos-repair-help-surface").unwrap();

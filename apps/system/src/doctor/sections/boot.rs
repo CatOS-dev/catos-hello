@@ -10,7 +10,8 @@ use crate::doctor::model::{
 use crate::target::Evidence;
 
 use super::{
-    push_evidence, read_target_file, set_section, target_bound_repair_command, target_root_path,
+    push_evidence, read_target_file, set_section, target_repair_recommendation,
+    target_root_path, target_supports_standard_root_repair,
 };
 use crate::doctor::DoctorTargetContext;
 
@@ -118,6 +119,13 @@ pub(in crate::doctor) fn run_boot_section(
                 set_section(sections, id, DoctorSectionStatus::Healthy);
             } else {
                 let section = set_section(sections, id, DoctorSectionStatus::Unhealthy);
+                let repair_recommendation_code = if target_supports_standard_root_repair(
+                    &context.target,
+                ) {
+                    recommendation_code::RUN_CATOS_REPAIR_BOOT
+                } else {
+                    recommendation_code::MANUAL_REVIEW
+                };
                 section.issues.push(
                     DoctorIssue::new(
                         issue_code::BOOT_ASSET_MISSING,
@@ -128,7 +136,7 @@ pub(in crate::doctor) fn run_boot_section(
                             provider.as_str()
                         ),
                     )
-                    .with_recommendation(recommendation_code::RUN_CATOS_REPAIR_BOOT),
+                    .with_recommendation(repair_recommendation_code),
                 );
                 let esp_device = context
                     .esp
@@ -136,23 +144,20 @@ pub(in crate::doctor) fn run_boot_section(
                     .ok()
                     .and_then(|esp| esp.as_ref())
                     .map(|esp| esp.device.as_path());
-                let recommendation = DoctorRecommendation::new(
+                report.recommendations.push(target_repair_recommendation(
+                    "catos-repair boot",
+                    &context.target,
+                    esp_device,
                     recommendation_code::RUN_CATOS_REPAIR_BOOT,
                     format!(
                         "provider {} is missing required assets; re-apply the selected target's boot recipe",
                         provider.as_str()
                     ),
-                );
-                report.recommendations.push(
-                    match target_bound_repair_command(
-                        "catos-repair boot",
-                        &context.target,
-                        esp_device,
-                    ) {
-                        Some(command) => recommendation.with_command(command),
-                        None => recommendation,
-                    },
-                );
+                    format!(
+                        "provider {} is missing required assets, but automatic boot repair supports only the CatOS standard Btrfs root /@; review this nonstandard root manually",
+                        provider.as_str()
+                    ),
+                ));
             }
         }
         DetectionVerdict::Conflict {
@@ -796,26 +801,20 @@ pub(in crate::doctor) fn run_secure_boot_section(
             id,
             "Secure Boot policy is inconsistent across firmware runtime, target marker, and firmware-boot configuration",
         ));
-        let recommendation = DoctorRecommendation::new(
-            recommendation_code::RUN_CATOS_REPAIR_BOOT,
-            "Secure Boot policy is inconsistent; catos-repair boot can re-apply the target's existing policy",
-        );
         let esp_device = context
             .esp
             .as_ref()
             .ok()
             .and_then(|esp| esp.as_ref())
             .map(|esp| esp.device.as_path());
-        report.recommendations.push(
-            match target_bound_repair_command(
-                "catos-repair boot",
-                &context.target,
-                esp_device,
-            ) {
-                Some(command) => recommendation.with_command(command),
-                None => recommendation,
-            },
-        );
+        report.recommendations.push(target_repair_recommendation(
+            "catos-repair boot",
+            &context.target,
+            esp_device,
+            recommendation_code::RUN_CATOS_REPAIR_BOOT,
+            "Secure Boot policy is inconsistent; catos-repair boot can re-apply the target's existing policy",
+            "Secure Boot policy is inconsistent, but automatic boot repair supports only the CatOS standard Btrfs root /@; review this nonstandard root manually",
+        ));
     } else {
         set_section(sections, id, DoctorSectionStatus::Healthy);
     }

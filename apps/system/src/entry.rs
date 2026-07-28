@@ -1415,6 +1415,13 @@ fn run_repair_mount(context: CommandContext, argv: &[String]) -> i32 {
         }
     }
 
+    if let Some(exit) = reject_unsupported_standard_root_subvolume(
+        context.program,
+        root_subvolume.as_deref(),
+    ) {
+        return exit;
+    }
+
     if let Some(rd) = root_device.as_deref() {
         if !validate_repair_device_arg(std::path::Path::new(rd)) {
             eprintln!(
@@ -1578,6 +1585,13 @@ fn run_repair_boot(context: CommandContext, argv: &[String]) -> i32 {
         }
     }
 
+    if let Some(exit) = reject_unsupported_standard_root_subvolume(
+        context.program,
+        root_subvolume.as_deref(),
+    ) {
+        return exit;
+    }
+
     if let Some(rd) = root_device.as_deref() {
         if !validate_repair_device_arg(std::path::Path::new(rd)) {
             eprintln!(
@@ -1644,6 +1658,20 @@ fn boot_outcome_exit_code(outcome: crate::boot::model::BootRepairOutcome) -> i32
         | O::ManualInterventionRequired
         | O::Unknown => exit_code::PROBE_FAILED,
     }
+}
+
+fn reject_unsupported_standard_root_subvolume(
+    program: &str,
+    root_subvolume: Option<&str>,
+) -> Option<i32> {
+    let subvolume = root_subvolume?;
+    if subvolume == "/@" {
+        return None;
+    }
+    eprintln!(
+        "{program}: --root-subvolume supports only the CatOS standard Btrfs root /@"
+    );
+    Some(exit_code::ARG_ERROR)
 }
 
 /// Validate the positional `<device>` argument: absolute, under
@@ -1722,7 +1750,7 @@ USAGE:
 
 OPTIONS:
     --root-device /dev/...    Select an offline root device.
-    --root-subvolume PATH     Select its Btrfs root subvolume.
+    --root-subvolume /@       Select the CatOS standard Btrfs root; other paths are unsupported.
     --esp-device /dev/...     Select the EFI System Partition.
     --json                    Emit machine-readable JSON.
     -h, --help                Show this help message.
@@ -1739,7 +1767,7 @@ USAGE:
 
 OPTIONS:
     --root-device /dev/...    Select an offline root device.
-    --root-subvolume PATH     Select its Btrfs root subvolume.
+    --root-subvolume /@       Select the CatOS standard Btrfs root; other paths are unsupported.
     --esp-device /dev/...     Select the EFI System Partition.
     --json                    Emit machine-readable JSON.
     -h, --help                Show this help message.
