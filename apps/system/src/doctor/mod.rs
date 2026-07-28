@@ -58,6 +58,7 @@ pub(crate) struct DoctorTargetContext {
     pub boot: Result<Option<ReadonlySession>, String>,
     top_level: Result<Option<ReadonlySession>, String>,
     pub recovery_options: Result<Option<crate::snapshot::execute::engine::EngineOptions>, String>,
+    discovery_cleanup: Vec<crate::target::discovery::ProbeCleanup>,
     session: TargetSession,
 }
 
@@ -77,20 +78,41 @@ pub(crate) struct DoctorEsp {
 }
 
 impl DoctorTargetContext {
-    fn new(target: crate::target::model::TargetIdentity, session: TargetSession) -> Result<Self, ContextOpenError> {
+    fn new(
+        target: crate::target::model::TargetIdentity,
+        session: TargetSession,
+        devices: Vec<crate::target::model::BlockDevice>,
+        discovery_cleanup: Vec<crate::target::discovery::ProbeCleanup>,
+    ) -> Result<Self, ContextOpenError> {
         let mut session = Some(session);
         let session_ref = || session.as_ref().expect("target session remains owned during context open");
         let candidate = session_ref().candidate().clone();
-        let fstab = std::fs::read_to_string(target.root.join("etc/fstab"))
-            .map_err(|error| format!("cannot read selected target fstab: {error}"));
-        let fstab = match fstab {
-            Ok(value) => value,
-            Err(error) => return Err(context_open_error(error, session.take().expect("target session"), None, None, None)),
+        let fstab = match sections::read_target_file(&target.root, "etc/fstab") {
+            Ok(Some(value)) => value,
+            Ok(None) => {
+                return Err(context_open_error(
+                    "selected target has no /etc/fstab".into(),
+                    discovery_cleanup,
+                    session.take().expect("target session"),
+                    None,
+                    None,
+                    None,
+                ))
+            }
+            Err(error) => {
+                return Err(context_open_error(
+                    format!("cannot read selected target fstab: {error}"),
+                    discovery_cleanup,
+                    session.take().expect("target session"),
+                    None,
+                    None,
+                    None,
+                ))
+            }
         };
-        let devices = crate::target::discovery::discover_inventory();
         let mut esp = match open_target_esp(&fstab, &devices) {
             Ok(value) => value,
-            Err(error) => return Err(context_open_error(error, session.take().expect("target session"), None, None, None)),
+            Err(error) => return Err(context_open_error(error, discovery_cleanup, session.take().expect("target session"), None, None, None)),
         };
         let boot_layout = match target.root_device.as_deref() {
             Some(root_device) => crate::mount::diagnose::target::detect_boot_mount_layout(
@@ -103,20 +125,19 @@ impl DoctorTargetContext {
         };
         let boot_layout = match boot_layout {
             Ok(value) => value,
-            Err(error) => return Err(context_open_error(error, session.take().expect("target session"), esp, None, None)),
+            Err(error) => return Err(context_open_error(error, discovery_cleanup, session.take().expect("target session"), esp, None, None)),
         };
-        let boot = match open_dependency_with_cleanup(
+        let boot = open_dependency_with_cleanup(
             || open_target_boot(&boot_layout, &candidate, &devices),
             || {
                 let mut cleanup = Vec::new();
-                if let Some(esp) = esp.take() { cleanup.push(esp.root.cleanup()); }
+                if let Some(esp) = esp.take() {
+                    cleanup.push(esp.root.cleanup());
+                }
                 cleanup.push(session.take().expect("target session").cleanup());
                 cleanup
             },
-        ) {
-            Ok(value) => value,
-            Err(error) => return Err(error),
-        };
+        )?;
         let top_level = if candidate.root_fstype == "btrfs" {
             ReadonlySession::open_with_options(&candidate.root_device, "btrfs", "ro,norecovery,subvolid=5").map(Some)
         } else {
@@ -124,7 +145,7 @@ impl DoctorTargetContext {
         };
         let top_level = match top_level {
             Ok(value) => value,
-            Err(error) => return Err(context_open_error(format!("cannot open selected Btrfs top-level: {error}"), session.take().expect("target session"), esp, boot, None)),
+            Err(error) => return Err(context_open_error(format!("cannot open selected Btrfs top-level: {error}"), discovery_cleanup, session.take().expect("target session"), esp, boot, None)),
         };
         let recovery_options = match &top_level {
             Some(top_level) => crate::snapshot::diagnose::identity::validate_mounted_filesystem(top_level.root(), &candidate.root_device)
@@ -136,11 +157,11 @@ impl DoctorTargetContext {
                 .map_err(|error| format!("cannot validate selected Btrfs top-level: {error}")),
             None => Ok(None),
         };
-        Ok(Self { target, candidate, fstab: Ok(fstab), devices, esp: Ok(esp), boot_layout: Ok(boot_layout), boot: Ok(boot), top_level: Ok(top_level), recovery_options, session: session.take().expect("target session") })
+        Ok(Self { target, candidate, fstab: Ok(fstab), devices, esp: Ok(esp), boot_layout: Ok(boot_layout), boot: Ok(boot), top_level: Ok(top_level), recovery_options, discovery_cleanup, session: session.take().expect("target session") })
     }
 
     fn cleanup(self) -> Vec<crate::target::discovery::ProbeCleanup> {
-        let mut cleanup = Vec::new();
+        let mut cleanup = self.discovery_cleanup;
         if let Ok(Some(session)) = self.top_level { cleanup.push(session.cleanup()); }
         if let Ok(Some(session)) = self.boot { cleanup.push(session.cleanup()); }
         if let Ok(Some(esp)) = self.esp { cleanup.push(esp.root.cleanup()); }
@@ -167,12 +188,13 @@ impl DoctorTargetContext {
 
 fn context_open_error(
     cause: String,
+    discovery_cleanup: Vec<crate::target::discovery::ProbeCleanup>,
     session: TargetSession,
     esp: Option<DoctorEsp>,
     boot: Option<ReadonlySession>,
     top_level: Option<ReadonlySession>,
 ) -> ContextOpenError {
-    let mut cleanup = Vec::new();
+    let mut cleanup = discovery_cleanup;
     if let Some(session) = top_level { cleanup.push(session.cleanup()); }
     if let Some(session) = boot { cleanup.push(session.cleanup()); }
     if let Some(esp) = esp { cleanup.push(esp.root.cleanup()); }
@@ -262,23 +284,36 @@ fn open_target_esp(
 pub fn run_doctor() -> DoctorReport {
     let runner = crate::fs::command::TrustedRunner::new();
     let environment = sections::capture_environment();
-    let (target, session) = match target_selection::discover_target_session() {
+    if let Err(error) = crate::mount::execute::namespace::establish_private_namespace() {
+        return namespace_failure_report(environment, error.to_string());
+    }
+    let selected = match target_selection::discover_target_session() {
         Ok(value) => value,
-        Err(reason) => {
-            let mut report = DoctorReport::default();
-            report.environment = environment;
-            report.sections = handle_no_target(reason, &mut report);
+        Err(error) => {
+            let mut report = DoctorReport {
+                environment,
+                ..DoctorReport::default()
+            };
+            report.sections = handle_no_target(error.reason.clone(), &mut report);
+            report.cleanup = cleanup_report(error.cleanup, None);
             aggregate(&mut report);
-            report.cleanup = DoctorCleanup::not_required();
             return report;
         }
     };
-    let context = match DoctorTargetContext::new(target.clone(), session) {
+    let target = selected.target.clone();
+    let context = match DoctorTargetContext::new(
+        selected.target,
+        selected.session,
+        selected.inventory,
+        selected.discovery_cleanup,
+    ) {
         Ok(context) => context,
         Err(error) => {
-            let mut report = DoctorReport::default();
-            report.environment = environment;
-            report.target = TargetSelection::Identified(target).to_target_summary();
+            let mut report = DoctorReport {
+                environment,
+                target: TargetSelection::Identified(target).to_target_summary(),
+                ..DoctorReport::default()
+            };
             report.limitations.push(crate::doctor::model::DoctorLimitation::new(
                 DoctorSectionId::Storage,
                 "DOCTOR_CONTEXT_OPEN_FAILED",
@@ -293,9 +328,11 @@ pub fn run_doctor() -> DoctorReport {
             return report;
         }
     };
-    let mut report = DoctorReport::default();
-    report.environment = environment.clone();
-    report.target = context.target_summary();
+    let mut report = DoctorReport {
+        environment: environment.clone(),
+        target: context.target_summary(),
+        ..DoctorReport::default()
+    };
     report.evidence.push(Evidence::new(
         "DOCTOR_TARGET_CONTEXT",
         "doctor::context",
@@ -328,6 +365,28 @@ pub fn run_doctor() -> DoctorReport {
     report
 }
 
+fn namespace_failure_report(
+    environment: DoctorEnvironment,
+    reason: String,
+) -> DoctorReport {
+    let mut report = DoctorReport {
+        environment,
+        sections: DoctorSectionId::all()
+            .iter()
+            .map(|id| DoctorSection::new(*id, DoctorSectionStatus::Unknown))
+            .collect(),
+        ..DoctorReport::default()
+    };
+    report.limitations.push(crate::doctor::model::DoctorLimitation::new(
+        DoctorSectionId::Storage,
+        "DOCTOR_NAMESPACE_UNAVAILABLE",
+        format!("cannot establish private mount namespace: {reason}"),
+    ));
+    report.cleanup = DoctorCleanup::not_required();
+    aggregate(&mut report);
+    report
+}
+
 fn cleanup_report(
     cleanup: Vec<crate::target::discovery::ProbeCleanup>,
     context_failure: Option<String>,
@@ -337,12 +396,13 @@ fn cleanup_report(
         residual.push(format!("context initialization failed: {failure}"));
     }
     DoctorCleanup {
-        cleaned: cleanup.iter().filter(|item| item.unmounted && item.removed).map(|item| item.mountpoint.display().to_string()).collect(),
-        all_clean: residual.is_empty() && cleanup.iter().all(|item| item.unmounted && item.removed),
+        cleaned: cleanup.iter().filter(|item| item.is_clean()).map(|item| item.mountpoint.display().to_string()).collect(),
+        all_clean: residual.is_empty() && cleanup.iter().all(|item| item.is_clean()),
         residual,
     }
 }
 
+#[doc(hidden)]
 pub fn run_doctor_with<R: FsCommandRunner + ?Sized>(runner: &R) -> DoctorReport {
     let mut report = DoctorReport::default();
 
@@ -511,7 +571,7 @@ fn aggregate(report: &mut DoctorReport) {
 
 impl DoctorReport {
     pub fn doctor_failed(&self) -> bool {
-        !self.cleanup.all_clean
+        !self.cleanup.all_clean || self.target.kind == DoctorTargetKind::None
     }
 }
 
@@ -609,9 +669,34 @@ pub mod tests {
     }
 
     #[test]
-    fn doctor_failed_is_false_when_cleanup_is_clean() {
-        let report = DoctorReport::default();
+    fn doctor_failed_is_false_for_an_identified_target_with_clean_cleanup() {
+        let mut report = DoctorReport::default();
+        report.target.kind = DoctorTargetKind::Offline;
+        report.cleanup = DoctorCleanup::clean();
         assert!(!report.doctor_failed());
+    }
+
+    #[test]
+    fn doctor_failed_is_true_when_no_target_was_identified() {
+        let mut report = DoctorReport::default();
+        report.cleanup = DoctorCleanup::clean();
+        assert!(report.doctor_failed());
+    }
+
+    #[test]
+    fn namespace_failure_is_reported_before_target_discovery() {
+        let report = namespace_failure_report(
+            DoctorEnvironment::default(),
+            "operation not permitted".into(),
+        );
+        assert_eq!(report.target.kind, DoctorTargetKind::None);
+        assert!(!report.complete);
+        assert!(report
+            .limitations
+            .iter()
+            .any(|item| item.code == "DOCTOR_NAMESPACE_UNAVAILABLE"));
+        assert!(report.cleanup.all_clean);
+        assert!(report.doctor_failed());
     }
 
     #[test]

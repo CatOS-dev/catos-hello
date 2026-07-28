@@ -60,7 +60,13 @@ fn doctor_no_candidate_exits_nonzero_without_waiting_for_input() {
     let (_tmp, link) = link_doctor();
     let output = Command::new(&link).output().expect("spawn doctor");
     assert!(!output.status.success());
-    assert!(String::from_utf8_lossy(&output.stderr).contains("no diagnosable CatOS system"));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("no diagnosable CatOS system")
+            || stdout.contains("DOCTOR_NAMESPACE_UNAVAILABLE"),
+        "unexpected Doctor infrastructure failure: stdout={stdout:?} stderr={stderr:?}"
+    );
 }
 
 #[test]

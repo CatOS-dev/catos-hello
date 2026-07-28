@@ -127,7 +127,7 @@ fn build_mount_inputs(context: &DoctorTargetContext) -> Result<MountRepairInputs
         },
         catos_confirmation,
         subvol_facts,
-        mount_point_observations: collect_mount_point_observations(target),
+        mount_point_observations: collect_mount_point_observations(target)?,
     })
 }
 
@@ -173,47 +173,71 @@ fn collect_subvolume_facts(root: &Path) -> Result<SubvolFacts, String> {
 
 fn collect_mount_point_observations(
     target: &TargetIdentity,
-) -> std::collections::HashMap<String, MountPointObservation> {
+) -> Result<std::collections::HashMap<String, MountPointObservation>, String> {
     let mut out = std::collections::HashMap::new();
     if target.root_fstype.as_deref() != Some("btrfs") {
-        return out;
+        return Ok(out);
     }
     let root = target_root_path(target);
     for spec in crate::mount::model::CATOS_STANDARD_SUBVOLS {
         if spec.mount_point == "/" {
             continue;
         }
-        let rel = spec
-            .mount_point
-            .strip_prefix('/')
-            .unwrap_or(spec.mount_point);
-        let path = root.join(rel);
-        let obs = observe_path(&path);
-        out.insert(spec.mount_point.to_string(), obs);
+        let observation = observe_rooted_path(&root, spec.mount_point)?;
+        out.insert(spec.mount_point.to_string(), observation);
     }
-    out
+    Ok(out)
 }
 
-fn observe_path(path: &Path) -> MountPointObservation {
-    let meta = match std::fs::symlink_metadata(path) {
-        Ok(m) => m,
-        Err(_) => return MountPointObservation::missing(),
+fn observe_rooted_path(root: &Path, rooted_path: &str) -> Result<MountPointObservation, String> {
+    use crate::target::execute::confined::{rooted_path_kind, RootedPathKind};
+
+    let kind = match rooted_path_kind(root, rooted_path) {
+        Ok(kind) => kind,
+        Err(crate::target::error::FsError::NotFound) => None,
+        Err(error) => {
+            return Err(format!(
+                "cannot safely inspect target mount point {rooted_path}: {error}"
+            ))
+        }
     };
-    let is_symlink = meta.file_type().is_symlink();
-    let is_directory = meta.is_dir();
-    let entry_count = if is_directory {
-        std::fs::read_dir(path).map(|rd| rd.count()).ok()
-    } else {
-        None
-    };
-    MountPointObservation {
-        exists: true,
-        is_symlink,
-        is_directory,
-        is_other_object: !is_symlink && !is_directory,
-        entry_count,
+    match kind {
+        None => Ok(MountPointObservation::missing()),
+        Some(RootedPathKind::Symlink) => Ok(MountPointObservation {
+            exists: true,
+            is_symlink: true,
+            is_directory: false,
+            is_other_object: false,
+            entry_count: None,
+        }),
+        Some(RootedPathKind::Directory) => {
+            let entries = crate::target::execute::confined::list_rooted_directory_names(
+                root,
+                rooted_path,
+            )
+            .map_err(|error| {
+                format!("cannot list target mount point {rooted_path}: {error}")
+            })?;
+            Ok(MountPointObservation {
+                exists: true,
+                is_symlink: false,
+                is_directory: true,
+                is_other_object: false,
+                entry_count: Some(entries.len()),
+            })
+        }
+        Some(RootedPathKind::RegularFile | RootedPathKind::Other) => {
+            Ok(MountPointObservation {
+                exists: true,
+                is_symlink: false,
+                is_directory: false,
+                is_other_object: true,
+                entry_count: None,
+            })
+        }
     }
 }
+
 
 pub(in crate::doctor) fn derive_mount_section_status(
     problems: &[MountProblem],
@@ -399,6 +423,28 @@ mod tests {
         let issue = mount_problem_to_issue(&MountProblem::MissingRootEntry, DoctorSectionId::Mount);
         assert_eq!(issue.section, DoctorSectionId::Mount);
         assert_eq!(issue.code, issue_code::FSTAB_ROOT_SOURCE_MISMATCH);
+    }
+
+    #[test]
+    fn rooted_mount_observation_refuses_intermediate_symlink_escape() {
+        let root = std::env::temp_dir().join(format!(
+            "catos-doctor-mount-root-{}",
+            std::process::id()
+        ));
+        let outside = std::env::temp_dir().join(format!(
+            "catos-doctor-mount-outside-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&outside);
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(outside.join("log")).unwrap();
+        std::os::unix::fs::symlink(&outside, root.join("var")).unwrap();
+
+        assert!(observe_rooted_path(&root, "/var/log").is_err());
+
+        std::fs::remove_dir_all(root).unwrap();
+        std::fs::remove_dir_all(outside).unwrap();
     }
 
     #[test]

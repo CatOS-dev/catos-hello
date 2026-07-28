@@ -60,11 +60,17 @@ pub(in crate::doctor) fn target_root_path(
     target.root.clone()
 }
 
-pub(in crate::doctor) fn read_target_file(root: &Path, relative: &str) -> Result<Option<String>, std::io::Error> {
-    match std::fs::read_to_string(root.join(relative)) {
-        Ok(body) => Ok(Some(body)),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(error),
+pub(in crate::doctor) fn read_target_file(
+    root: &Path,
+    relative: &str,
+) -> Result<Option<String>, String> {
+    let rooted = format!("/{}", relative.trim_start_matches('/'));
+    match crate::target::execute::confined::read_rooted_file(root, &rooted) {
+        Ok(bytes) => String::from_utf8(bytes)
+            .map(Some)
+            .map_err(|_| format!("target file {rooted} is not UTF-8")),
+        Err(crate::target::error::FsError::NotFound) => Ok(None),
+        Err(error) => Err(format!("cannot read target file {rooted}: {error}")),
     }
 }
 
@@ -115,9 +121,35 @@ mod tests {
     }
 
     #[test]
-    fn unreadable_target_file_is_an_io_error_not_absence() {
-        let error = read_target_file(std::path::Path::new("/dev/null"), "secureboot").unwrap_err();
-        assert!(matches!(error.kind(), std::io::ErrorKind::NotADirectory | std::io::ErrorKind::PermissionDenied));
+    fn unreadable_target_file_is_an_error_not_absence() {
+        let error = read_target_file(std::path::Path::new("/dev/null"), "secureboot")
+            .unwrap_err();
+        assert!(error.contains("cannot read target file"));
+    }
+
+    #[test]
+    fn target_file_read_does_not_follow_symlink_outside_selected_root() {
+        let root = std::env::temp_dir().join(format!(
+            "catos-doctor-confined-{}",
+            std::process::id()
+        ));
+        let outside = std::env::temp_dir().join(format!(
+            "catos-doctor-outside-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&outside);
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("secureboot"), "host-secret").unwrap();
+        std::os::unix::fs::symlink(&outside, root.join("etc")).unwrap();
+
+        let error = read_target_file(&root, "etc/secureboot").unwrap_err();
+        assert!(!error.is_empty());
+        assert_eq!(std::fs::read_to_string(outside.join("secureboot")).unwrap(), "host-secret");
+
+        std::fs::remove_dir_all(root).unwrap();
+        std::fs::remove_dir_all(outside).unwrap();
     }
 
     #[test]

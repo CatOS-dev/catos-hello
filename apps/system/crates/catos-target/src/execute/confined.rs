@@ -297,6 +297,13 @@ pub fn create_rooted_directory(top_level: &Path, rooted_path: &str) -> Result<()
     open_rooted_directory(top_level, rooted_path, true).map(|_| ())
 }
 
+/// List the entries directly below the pinned target root itself. The root is
+/// opened with `O_DIRECTORY|O_NOFOLLOW`; no pathname below it is resolved.
+pub fn list_root_directory_names(top_level: &Path) -> Result<Vec<OsString>, FsError> {
+    let directory = open_top_level_directory(top_level)?;
+    list_open_directory_names(directory.as_raw_fd(), top_level)
+}
+
 /// List one rooted directory without following symlinks in any component.
 pub fn list_rooted_directory_names(
     top_level: &Path,
@@ -460,6 +467,31 @@ fn list_open_directory_names(directory_fd: RawFd, path: &Path) -> Result<Vec<OsS
         }
     }
     Ok(names)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RootedPathKind {
+    RegularFile,
+    Directory,
+    Symlink,
+    Other,
+}
+
+/// Determine the type of one path below a pinned target root. Intermediate
+/// symlinks are rejected by `open_rooted_parent`; a symlink at the final
+/// component is reported explicitly so diagnostic callers can fail closed.
+pub fn rooted_path_kind(
+    top_level: &Path,
+    rooted_path: &str,
+) -> Result<Option<RootedPathKind>, FsError> {
+    let entry = open_rooted_parent(top_level, rooted_path, false)?;
+    Ok(match entry_type(entry.parent.as_raw_fd(), &entry.name, &entry.display)? {
+        None => None,
+        Some(libc::S_IFREG) => Some(RootedPathKind::RegularFile),
+        Some(libc::S_IFDIR) => Some(RootedPathKind::Directory),
+        Some(libc::S_IFLNK) => Some(RootedPathKind::Symlink),
+        Some(_) => Some(RootedPathKind::Other),
+    })
 }
 
 /// Return the size of a regular file below `top_level` without reading its

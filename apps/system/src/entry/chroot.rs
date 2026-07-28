@@ -48,22 +48,33 @@ pub fn run(argv: &[String]) -> i32 {
         return exit_code::PROBE_FAILED;
     }
 
-    let mut devices = target_inventory_for_chroot();
+    let discovery = crate::target::discovery::discover_targets_with_options(
+        crate::target::discovery::DiscoveryOptions {
+            include_dot_snapshots: options.show_btrfs_dot_snapshots,
+        },
+    );
+    if let Err(error) = validate_discovery_cleanup(&discovery) {
+        eprintln!("catos-chroot: {error}");
+        return exit_code::PROBE_FAILED;
+    }
+    let (mut devices, inventory_warnings) = target_inventory_for_chroot(&discovery.inventory);
+    for warning in inventory_warnings {
+        eprintln!("catos-chroot: warning: {warning}");
+    }
     if devices.is_empty() {
-            eprintln!("catos-chroot: no usable block devices found");
-            return exit_code::PROBE_FAILED;
+        eprintln!("catos-chroot: no usable block devices found");
+        return exit_code::PROBE_FAILED;
     }
 
-    let discovery = crate::target::discovery::discover_targets();
     let mut opened_luks: Option<OpenedLuks> = None;
     let selected_target = match crate::selection_ui::select_target(&discovery, "catos-chroot") {
-        crate::selection_ui::Selection::Selected(candidate) => candidate,
+        crate::selection_ui::Selection::Selected(candidate) => *candidate,
         crate::selection_ui::Selection::Declined => {
             eprintln!("catos-chroot: target selection declined");
             return exit_code::ARG_ERROR;
         }
         crate::selection_ui::Selection::Unavailable(reason) if discovery.candidates.is_empty() => {
-            let encrypted = match crate::selection_ui::select_luks_device(&crate::target::discovery::discover_inventory(), "catos-chroot") {
+            let encrypted = match crate::selection_ui::select_luks_device(&discovery.inventory, "catos-chroot") {
                 Ok(Some(device)) => device,
                 Ok(None) => { eprintln!("catos-chroot: {reason}"); return exit_code::PROBE_FAILED; }
                 Err(error) => { eprintln!("catos-chroot: {error}"); return exit_code::PROBE_FAILED; }
@@ -78,12 +89,22 @@ pub fn run(argv: &[String]) -> i32 {
             };
             let mut opened = Some(opened);
             match resolve_after_luks(
-                crate::target::discovery::discover_targets,
+                || crate::target::discovery::discover_targets_with_options(
+                    crate::target::discovery::DiscoveryOptions {
+                        include_dot_snapshots: options.show_btrfs_dot_snapshots,
+                    },
+                ),
                 |report| crate::selection_ui::select_target(report, "catos-chroot"),
-                target_inventory_for_chroot,
                 || opened.take().expect("opened LUKS token").close(),
             ) {
-                Ok((selected, fresh_inventory)) => { devices = fresh_inventory; opened_luks = opened; selected }
+                Ok((selected, fresh_inventory, warnings)) => {
+                    for warning in warnings {
+                        eprintln!("catos-chroot: warning: {warning}");
+                    }
+                    devices = fresh_inventory;
+                    opened_luks = opened;
+                    selected
+                }
                 Err(error) => { eprintln!("catos-chroot: {error}"); return exit_code::PROBE_FAILED; }
             }
         }
@@ -180,18 +201,54 @@ fn fail_with_luks_cleanup(opened_luks: Option<OpenedLuks>, code: i32, message: S
     code
 }
 
-fn target_inventory_for_chroot() -> Vec<BlockDevice> {
-    crate::target::discovery::discover_inventory()
-        .into_iter()
-        .filter_map(|device| Some(BlockDevice {
-            name: device.dev_path?.display().to_string(),
-            fs_type: device.filesystem,
-            uuid: device.uuid,
-            partuuid: device.part_uuid,
-            label: device.label,
-            partlabel: device.part_label,
-        }))
-        .collect()
+fn target_inventory_for_chroot(
+    inventory: &[crate::target::model::BlockDevice],
+) -> (Vec<BlockDevice>, Vec<String>) {
+    let mut devices = Vec::new();
+    let mut warnings = Vec::new();
+    for device in inventory {
+        let Some(path) = device.dev_path.as_ref() else {
+            warnings.push(format!(
+                "inventory entry {} has no stable device path and cannot be mounted",
+                device.name
+            ));
+            continue;
+        };
+        devices.push(BlockDevice {
+            name: path.display().to_string(),
+            fs_type: device.filesystem.clone(),
+            uuid: device.uuid.clone(),
+            partuuid: device.part_uuid.clone(),
+            label: device.label.clone(),
+            partlabel: device.part_label.clone(),
+        });
+    }
+    (devices, warnings)
+}
+
+fn validate_discovery_cleanup(
+    report: &crate::target::discovery::DiscoveryReport,
+) -> Result<(), String> {
+    let residual = report
+        .cleanup
+        .iter()
+        .filter(|cleanup| !cleanup.is_clean())
+        .map(|cleanup| {
+            format!(
+                "{}: {}",
+                cleanup.mountpoint.display(),
+                cleanup.error.as_deref().unwrap_or("probe mountpoint was not fully removed")
+            )
+        })
+        .collect::<Vec<_>>();
+    if residual.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "readonly target discovery cleanup incomplete: {}",
+            residual.join("; ")
+        ))
+    }
 }
 
 fn target_block_to_chroot(device: &crate::target::model::BlockDevice) -> Option<BlockDevice> {
@@ -205,24 +262,30 @@ fn find_selected_device(devices: &[BlockDevice], selected: &std::path::Path) -> 
     devices.iter().find(|device| std::path::Path::new(&device.name) == selected).cloned()
 }
 
-fn resolve_after_luks<D, S, I, C>(discover: D, select: S, inventory: I, close: C) -> Result<(crate::target::discovery::TargetCandidate, Vec<BlockDevice>), String>
+fn resolve_after_luks<D, S, C>(
+    discover: D,
+    select: S,
+    close: C,
+) -> Result<(crate::target::discovery::TargetCandidate, Vec<BlockDevice>, Vec<String>), String>
 where
     D: FnOnce() -> crate::target::discovery::DiscoveryReport,
     S: FnOnce(&crate::target::discovery::DiscoveryReport) -> crate::selection_ui::Selection,
-    I: FnOnce() -> Vec<BlockDevice>,
     C: FnOnce() -> Result<(), String>,
 {
     let report = discover();
+    if let Err(error) = validate_discovery_cleanup(&report) {
+        return close_after_luks_failure(close, &error);
+    }
     let candidate = match select(&report) {
-        crate::selection_ui::Selection::Selected(candidate) => candidate,
+        crate::selection_ui::Selection::Selected(candidate) => *candidate,
         crate::selection_ui::Selection::Declined => return close_after_luks_failure(close, "target selection declined"),
         crate::selection_ui::Selection::Unavailable(reason) => return close_after_luks_failure(close, &format!("unlocked mapper did not yield a CatOS candidate: {reason}")),
     };
-    let fresh = inventory();
+    let (fresh, warnings) = target_inventory_for_chroot(&report.inventory);
     if find_selected_device(&fresh, &candidate.root_device).is_none() {
         return close_after_luks_failure(close, "selected mapper is absent from fresh shared inventory");
     }
-    Ok((candidate, fresh))
+    Ok((candidate, fresh, warnings))
 }
 
 fn close_after_luks_failure<T, C>(close: C, reason: &str) -> Result<T, String>
@@ -395,7 +458,36 @@ mod tests {
         let old = BlockDevice { name: "/dev/sda2".into(), fs_type: Some("crypto_LUKS".into()), uuid: Some("luks".into()), partuuid: None, label: None, partlabel: None };
         let fresh = BlockDevice { name: "/dev/mapper/luks-luks".into(), fs_type: Some("btrfs".into()), uuid: Some("root".into()), partuuid: None, label: None, partlabel: None };
         assert!(find_selected_device(&[old], std::path::Path::new("/dev/mapper/luks-luks")).is_none());
-        assert_eq!(find_selected_device(&[fresh.clone()], std::path::Path::new("/dev/mapper/luks-luks")).unwrap(), fresh);
+        assert_eq!(find_selected_device(std::slice::from_ref(&fresh), std::path::Path::new("/dev/mapper/luks-luks")).unwrap(), fresh);
+    }
+
+    fn inventory_device(
+        name: &str,
+        path: Option<&str>,
+        filesystem: Option<&str>,
+    ) -> crate::target::model::BlockDevice {
+        crate::target::model::BlockDevice {
+            name: name.into(),
+            dev_path: path.map(Into::into),
+            major_minor: None,
+            parent: String::new(),
+            class: crate::target::model::DeviceClass::Partition,
+            disk_kind: crate::target::model::DiskKind::Unknown,
+            partition_role: crate::target::model::PartitionRole::LinuxFilesystem,
+            partition_number: None,
+            size_sectors: None,
+            read_only: false,
+            removable: false,
+            filesystem: filesystem.map(str::to_string),
+            uuid: None,
+            part_uuid: None,
+            label: None,
+            part_label: None,
+            mount_point: None,
+            mounts: Vec::new(),
+            mounted_before_session: false,
+            evidence: Vec::new(),
+        }
     }
 
     fn mapper_candidate() -> crate::target::discovery::TargetCandidate {
@@ -406,9 +498,22 @@ mod tests {
     fn luks_resolution_consumes_rediscovered_mapper_inventory() {
         let candidate = mapper_candidate();
         let result = resolve_after_luks(
-            || crate::target::discovery::DiscoveryReport { candidates: vec![candidate.clone()], excluded: Vec::new(), rejected: Vec::new(), cleanup: Vec::new() },
-            |report| crate::selection_ui::Selection::Selected(report.candidates[0].clone()),
-            || vec![BlockDevice { name: "/dev/mapper/luks-id".into(), fs_type: Some("ext4".into()), uuid: Some("root".into()), partuuid: None, label: None, partlabel: None }],
+            || crate::target::discovery::DiscoveryReport {
+                inventory: vec![{
+                    let mut device = inventory_device(
+                        "dm-0",
+                        Some("/dev/mapper/luks-id"),
+                        Some("ext4"),
+                    );
+                    device.uuid = Some("root".into());
+                    device
+                }],
+                candidates: vec![candidate.clone()],
+                excluded: Vec::new(),
+                rejected: Vec::new(),
+                cleanup: Vec::new(),
+            },
+            |report| crate::selection_ui::Selection::Selected(Box::new(report.candidates[0].clone())),
             || panic!("successful rediscovery must not close mapper"),
         ).unwrap();
         assert_eq!(result.0.root_device, std::path::PathBuf::from("/dev/mapper/luks-id"));
@@ -420,10 +525,34 @@ mod tests {
         let error = resolve_after_luks(
             crate::target::discovery::DiscoveryReport::default,
             |_| crate::selection_ui::Selection::Unavailable("no mapper candidate".into()),
-            Vec::new,
             || Err("close failed".into()),
         ).unwrap_err();
         assert!(error.contains("no mapper candidate"));
         assert!(error.contains("LUKS cleanup failed: close failed"));
+    }
+
+    #[test]
+    fn dirty_discovery_cleanup_is_rejected_before_selection() {
+        let report = crate::target::discovery::DiscoveryReport {
+            cleanup: vec![crate::target::discovery::ProbeCleanup {
+                mountpoint: "/tmp/probe".into(),
+                unmounted: false,
+                removed: false,
+                error: Some("busy".into()),
+            }],
+            ..Default::default()
+        };
+        let error = validate_discovery_cleanup(&report).unwrap_err();
+        assert!(error.contains("cleanup incomplete"));
+        assert!(error.contains("/tmp/probe: busy"));
+    }
+
+    #[test]
+    fn pathless_inventory_entries_are_reported_not_silently_dropped() {
+        let inventory = vec![inventory_device("mystery0", None, None)];
+        let (devices, warnings) = target_inventory_for_chroot(&inventory);
+        assert!(devices.is_empty());
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("mystery0"));
     }
 }

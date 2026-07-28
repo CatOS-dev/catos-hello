@@ -11,7 +11,7 @@ use catos_process::run_trusted_tool;
 
 use crate::diagnose::block::discover_devices;
 use crate::diagnose::candidate::inspect_target;
-use crate::diagnose::filesystem::RealFilesystem;
+use crate::diagnose::filesystem::{FilesystemProbe, RealFilesystem};
 use crate::diagnose::system_root::SystemRoot;
 use crate::evidence::Evidence;
 use crate::model::{BlockDevice, OsRelease, RootCandidateConfidence};
@@ -83,8 +83,19 @@ pub struct DiscoveryRejection {
     pub evidence: Vec<Evidence>,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DiscoveryOptions {
+    /// Include Btrfs roots stored below `.snapshots/<id>/snapshot` (or the
+    /// equivalent `@snapshots/<id>/snapshot` layout). Normal discovery hides
+    /// these historical roots so they cannot create false target ambiguity.
+    pub include_dot_snapshots: bool,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct DiscoveryReport {
+    /// The exact block inventory used to derive `candidates`. Consumers must
+    /// reuse it instead of racing a second inventory pass against selection.
+    pub inventory: Vec<BlockDevice>,
     pub candidates: Vec<TargetCandidate>,
     pub excluded: Vec<DiscoveryRejection>,
     pub rejected: Vec<DiscoveryRejection>,
@@ -99,9 +110,19 @@ pub struct ProbeCleanup {
     pub error: Option<String>,
 }
 
+impl ProbeCleanup {
+    pub fn is_clean(&self) -> bool {
+        self.unmounted && self.removed && self.error.is_none()
+    }
+}
+
 /// Discover installed CatOS targets. Candidate contents are always read from
 /// the candidate mount, never from the running host root.
 pub fn discover_targets() -> DiscoveryReport {
+    discover_targets_with_options(DiscoveryOptions::default())
+}
+
+pub fn discover_targets_with_options(options: DiscoveryOptions) -> DiscoveryReport {
     let fs = RealFilesystem;
     let (devices, warnings) = discover_devices(&fs);
     let mut report = DiscoveryReport::default();
@@ -111,10 +132,11 @@ pub fn discover_targets() -> DiscoveryReport {
             evidence: Vec::new(),
         });
     }
-    for device in devices {
-        inspect_device(&device, &mut report);
+    report.inventory = devices.clone();
+    for device in &devices {
+        inspect_device(device, options, &mut report);
     }
-    report.candidates.sort_by(|a, b| candidate_key(a).cmp(&candidate_key(b)));
+    report.candidates.sort_by_key(candidate_key);
     report
 }
 
@@ -125,7 +147,7 @@ pub fn discover_inventory() -> Vec<BlockDevice> {
     discover_devices(&RealFilesystem).0
 }
 
-fn inspect_device(device: &BlockDevice, report: &mut DiscoveryReport) {
+fn inspect_device(device: &BlockDevice, options: DiscoveryOptions, report: &mut DiscoveryReport) {
     let Some(fstype) = device.filesystem.as_deref() else { return };
     if !matches!(fstype, "btrfs" | "ext2" | "ext3" | "ext4" | "xfs" | "f2fs") { return }
     let Some(path) = device.dev_path.as_ref() else { return };
@@ -138,7 +160,7 @@ fn inspect_device(device: &BlockDevice, report: &mut DiscoveryReport) {
     }
 
     if fstype == "btrfs" {
-        inspect_btrfs_device(device, live_mount.map(|mount| mount.root.as_path()), report);
+        inspect_btrfs_device(device, live_mount.map(|mount| mount.root.as_path()), options, report);
         return;
     }
     let mut probe = match ReadonlyProbe::mount(path, fstype, None) {
@@ -157,7 +179,7 @@ fn inspect_device(device: &BlockDevice, report: &mut DiscoveryReport) {
     }
 }
 
-fn inspect_btrfs_device(device: &BlockDevice, live_subvolume: Option<&Path>, report: &mut DiscoveryReport) {
+fn inspect_btrfs_device(device: &BlockDevice, live_subvolume: Option<&Path>, options: DiscoveryOptions, report: &mut DiscoveryReport) {
     let Some(path) = device.dev_path.as_ref() else { return };
     let mut probe = match ReadonlyProbe::mount_with_options(path, "btrfs", "ro,norecovery,subvolid=5") {
         Ok(probe) => probe,
@@ -170,6 +192,19 @@ fn inspect_btrfs_device(device: &BlockDevice, live_subvolume: Option<&Path>, rep
     if !clean { report.rejected.push(rejected(path, "readonly probe cleanup failed".into())); return; }
     let subvolumes = match subvolumes { Ok(values) => values, Err(reason) => { report.rejected.push(rejected(path, reason)); return; } };
     for (subvolume_id, subvolume) in subvolumes {
+        if is_dot_snapshot_root(&subvolume) && !options.include_dot_snapshots {
+            report.excluded.push(DiscoveryRejection {
+                source: path.display().to_string(),
+                reason: format!("Btrfs snapshot root /{subvolume} is hidden by default"),
+                evidence: vec![Evidence::new(
+                    "BTRFS_SNAPSHOT_ROOT_EXCLUDED",
+                    path.display().to_string(),
+                    "historical snapshot roots are excluded from normal target selection",
+                )
+                .with_value(format!("/{subvolume}"))],
+            });
+            continue;
+        }
         let mut subprobe = match ReadonlyProbe::mount(path, "btrfs", Some(&subvolume)) {
             Ok(probe) => probe,
             Err(reason) => { report.rejected.push(rejected(path, format!("cannot probe subvolume /{subvolume}: {reason}"))); continue; }
@@ -188,6 +223,20 @@ fn inspect_btrfs_device(device: &BlockDevice, live_subvolume: Option<&Path>, rep
     }
 }
 
+
+fn is_dot_snapshot_root(path: &str) -> bool {
+    let parts = path
+        .trim_matches('/')
+        .split('/')
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>();
+    parts.windows(3).any(|window| {
+        matches!(window[0], ".snapshots" | "@snapshots")
+            && window[1].chars().all(|character| character.is_ascii_digit())
+            && window[2] == "snapshot"
+    })
+}
+
 fn list_btrfs_subvolumes(root: &Path) -> Result<Vec<(u64, String)>, String> {
     let root = root.to_str().ok_or_else(|| "probe path is not UTF-8".to_string())?;
     let output = run_trusted_tool("btrfs", &["subvolume", "list", "-a", root], Duration::from_secs(10), 64 * 1024)?;
@@ -202,7 +251,9 @@ fn parse_btrfs_subvolume_list(body: &str) -> Vec<(u64, String)> {
         .filter_map(|line| {
             let (_, path) = line.split_once(" path ")?;
             let id = line.strip_prefix("ID ")?.split_whitespace().next()?.parse().ok()?;
-            Some((id, path.trim().to_string()))
+            let path = path.trim();
+            let path = path.strip_prefix("<FS_TREE>/").unwrap_or(path);
+            Some((id, path.to_string()))
         })
         .filter(|(_, path)| !path.is_empty())
         .collect()
@@ -216,7 +267,15 @@ fn inspect_at(device: &BlockDevice, root: &Path, subvolume: Option<String>, subv
     if !inspection.is_catos_target.is_detected() { return None }
     let os_release = inspection.os_release?;
     let running_environment_member = live_root.is_some_and(|live| live == root);
-    let fstab_identity = std::fs::read_to_string(root.join("etc/fstab")).ok().map(|body| body.lines().find(|line| !line.trim_start().starts_with('#') && !line.trim().is_empty()).unwrap_or("").to_string());
+    let fstab_identity = RealFilesystem
+        .rooted_read_to_string(root, Path::new("etc/fstab"))
+        .ok()
+        .map(|body| {
+            body.lines()
+                .find(|line| !line.trim_start().starts_with('#') && !line.trim().is_empty())
+                .unwrap_or("")
+                .to_string()
+        });
     let mut evidence = device.evidence.clone();
     evidence.push(Evidence::new("CANDIDATE_OS_RELEASE", root.display().to_string(), "CatOS identity read from readonly candidate mount"));
     evidence.push(Evidence::new("PROBE_MOUNT", root.display().to_string(), probe_kind));
@@ -300,5 +359,51 @@ mod tests {
         let detail = probe_start_failure(&path, "mount tool unavailable");
         assert!(detail.contains("cleanup removed"));
         assert!(!path.exists());
+    }
+
+    #[test]
+    fn btrfs_all_subvolume_parser_normalises_nested_fs_tree_prefix() {
+        let body = "ID 256 gen 6 top level 5 path @snapshots
+ID 257 gen 6 top level 256 path <FS_TREE>/@snapshots/1/snapshot
+";
+        assert_eq!(
+            parse_btrfs_subvolume_list(body),
+            vec![
+                (256, "@snapshots".to_string()),
+                (257, "@snapshots/1/snapshot".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn snapshot_roots_are_distinguished_from_normal_subvolumes() {
+        for path in [
+            ".snapshots/12/snapshot",
+            "@/.snapshots/12/snapshot",
+            "@snapshots/12/snapshot",
+        ] {
+            assert!(is_dot_snapshot_root(path), "{path}");
+        }
+        for path in ["@", "@home", "@snapshots", "snapshot", "@snapshots/cache"] {
+            assert!(!is_dot_snapshot_root(path), "{path}");
+        }
+    }
+
+    #[test]
+    fn cleanup_is_clean_only_when_unmounted_removed_and_error_free() {
+        let clean = ProbeCleanup {
+            mountpoint: PathBuf::from("/tmp/probe"),
+            unmounted: true,
+            removed: true,
+            error: None,
+        };
+        assert!(clean.is_clean());
+        for dirty in [
+            ProbeCleanup { unmounted: false, ..clean.clone() },
+            ProbeCleanup { removed: false, ..clean.clone() },
+            ProbeCleanup { error: Some("busy".into()), ..clean.clone() },
+        ] {
+            assert!(!dirty.is_clean());
+        }
     }
 }

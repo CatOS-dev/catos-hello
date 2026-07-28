@@ -193,83 +193,142 @@ fn collect_detection_inputs(context: &DoctorTargetContext) -> Result<DetectionIn
 }
 
 fn read_optional_file(root: &Path, relative: &str) -> Result<Option<String>, String> {
-    match std::fs::read_to_string(root.join(relative)) {
-        Ok(body) => Ok(Some(body)),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(format!("cannot read target file {}: {error}", root.join(relative).display())),
-    }
+    read_target_file(root, relative)
+}
+
+fn rooted_path(relative: &str) -> String {
+    format!("/{}", relative.trim_start_matches('/'))
 }
 
 fn target_path_exists(root: &Path, relative: &str) -> Result<bool, String> {
-    match std::fs::symlink_metadata(root.join(relative)) {
-        Ok(_) => Ok(true),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
-        Err(error) => Err(format!("cannot inspect target path {}: {error}", root.join(relative).display())),
+    use crate::target::execute::confined::{rooted_path_kind, RootedPathKind};
+    let rooted = rooted_path(relative);
+    match rooted_path_kind(root, &rooted) {
+        Ok(None) => Ok(false),
+        Ok(Some(RootedPathKind::Symlink)) => {
+            Err(format!("target path {rooted} is a symlink"))
+        }
+        Ok(Some(_)) => Ok(true),
+        Err(crate::target::error::FsError::NotFound) => Ok(false),
+        Err(error) => Err(format!("cannot inspect target path {rooted}: {error}")),
+    }
+}
+
+fn list_target_directory(root: &Path, relative: &str) -> Result<Option<Vec<String>>, String> {
+    let rooted = rooted_path(relative);
+    let result = if rooted == "/" {
+        crate::target::execute::confined::list_root_directory_names(root)
+    } else {
+        crate::target::execute::confined::list_rooted_directory_names(root, &rooted)
+    };
+    match result {
+        Ok(entries) => entries
+            .into_iter()
+            .map(|entry| {
+                entry.into_string().map_err(|_| {
+                    format!("target directory {rooted} contains a non-UTF-8 entry")
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .map(Some),
+        Err(crate::target::error::FsError::NotFound) => Ok(None),
+        Err(error) => Err(format!("cannot list target directory {rooted}: {error}")),
     }
 }
 
 fn valid_grub_config(root: &Path) -> Result<bool, String> {
-    let path = root.join("grub/grub.cfg");
-    let body = match std::fs::read_to_string(&path) {
-        Ok(body) => body,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
-        Err(error) => return Err(format!("cannot read GRUB config {}: {error}", path.display())),
+    let Some(body) = read_optional_file(root, "grub/grub.cfg")? else {
+        return Ok(false);
     };
-    let meaningful: Vec<&str> = body.lines().map(str::trim).filter(|line| !line.is_empty() && !line.starts_with('#')).collect();
+    let meaningful: Vec<&str> = body
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .collect();
     Ok(!meaningful.is_empty()
         && meaningful.iter().any(|line| line.contains("menuentry"))
-        && meaningful.iter().any(|line| line.starts_with("linux ") || line.starts_with("linuxefi ")))
+        && meaningful
+            .iter()
+            .any(|line| line.starts_with("linux ") || line.starts_with("linuxefi ")))
 }
 
 fn valid_limine_config(root: &Path) -> Result<bool, String> {
-    let path = root.join("limine.conf");
-    let body = match std::fs::read_to_string(&path) {
-        Ok(body) => body,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
-        Err(error) => return Err(format!("cannot read Limine config {}: {error}", path.display())),
+    let Some(body) = read_optional_file(root, "limine.conf")? else {
+        return Ok(false);
     };
-    let lines: Vec<&str> = body.lines().map(str::trim).filter(|line| !line.is_empty() && !line.starts_with('#')).collect();
+    let lines: Vec<&str> = body
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .collect();
     Ok(lines.iter().enumerate().any(|(index, line)| {
-        line.starts_with(':') && lines[index + 1..].iter().any(|entry| entry.starts_with("KERNEL_PATH=") || entry.starts_with("LINUX=") || entry.starts_with("PROTOCOL="))
+        line.starts_with(':')
+            && lines[index + 1..].iter().any(|entry| {
+                entry.starts_with("KERNEL_PATH=")
+                    || entry.starts_with("LINUX=")
+                    || entry.starts_with("PROTOCOL=")
+            })
     }))
 }
 
 fn valid_systemd_loader(root: &Path) -> Result<bool, String> {
-    let entries = root.join("loader/entries");
-    let entries = match std::fs::read_dir(&entries) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
-        Err(error) => return Err(format!("cannot read systemd-boot entries {}: {error}", entries.display())),
+    let Some(entries) = list_target_directory(root, "loader/entries")? else {
+        return Ok(false);
     };
-    let entry = entries.map(|entry| -> Result<bool, String> {
-        let entry = entry.map_err(|error| format!("cannot enumerate systemd-boot entries: {error}"))?;
-        let path = entry.path();
-        let body = std::fs::read_to_string(&path).map_err(|error| format!("cannot read systemd-boot entry {}: {error}", path.display()))?;
-        Ok(!body.trim().is_empty()
-            && body.lines().any(|line| line.trim_start().starts_with("title "))
-            && body.lines().any(|line| line.trim_start().starts_with("linux ") || line.trim_start().starts_with("efi ")))
-    }).collect::<Result<Vec<_>, _>>()?.into_iter().any(|valid| valid);
-    Ok(entry)
+    for entry in entries {
+        let relative = format!("loader/entries/{entry}");
+        let Some(body) = read_optional_file(root, &relative)? else {
+            continue;
+        };
+        if !body.trim().is_empty()
+            && body
+                .lines()
+                .any(|line| line.trim_start().starts_with("title "))
+            && body.lines().any(|line| {
+                line.trim_start().starts_with("linux ")
+                    || line.trim_start().starts_with("efi ")
+            })
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 fn efi_asset(root: &Path, needle: &str) -> Result<Option<String>, String> {
-    let mut stack = vec![root.to_path_buf()];
-    while let Some(path) = stack.pop() {
-        let entries = match std::fs::read_dir(&path) {
-            Ok(entries) => entries,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(error) => return Err(format!("cannot inspect EFI asset directory {}: {error}", path.display())),
+    use crate::target::execute::confined::{rooted_path_kind, RootedPathKind};
+
+    let mut stack = vec![String::from("/")];
+    let mut inspected = 0usize;
+    while let Some(directory) = stack.pop() {
+        let Some(entries) = list_target_directory(root, &directory)? else {
+            continue;
         };
         for entry in entries {
-            let entry = entry.map_err(|error| format!("cannot enumerate EFI asset directory {}: {error}", path.display()))?;
-            let path = entry.path();
-            let kind = entry.file_type().map_err(|error| format!("cannot inspect EFI asset {}: {error}", path.display()))?;
-            if kind.is_dir() {
-                stack.push(path);
-            } else if kind.is_file() && path.file_name().and_then(|name| name.to_str()).is_some_and(|name| {
-                name.to_ascii_lowercase().ends_with(".efi") && name.to_ascii_lowercase().contains(needle)
-            }) {
-                return Ok(path.to_str().map(str::to_string));
+            inspected += 1;
+            if inspected > 4096 {
+                return Err("EFI asset tree exceeds the bounded 4096-entry scan".into());
+            }
+            let child = if directory == "/" {
+                format!("/{entry}")
+            } else {
+                format!("{}/{}", directory.trim_end_matches('/'), entry)
+            };
+            match rooted_path_kind(root, &child) {
+                Ok(Some(RootedPathKind::Directory)) => stack.push(child),
+                Ok(Some(RootedPathKind::RegularFile)) => {
+                    let name = entry.to_ascii_lowercase();
+                    if name.ends_with(".efi") && name.contains(needle) {
+                        return Ok(Some(child));
+                    }
+                }
+                Ok(Some(RootedPathKind::Symlink)) => {
+                    return Err(format!("EFI asset tree contains symlink {child}"));
+                }
+                Ok(Some(RootedPathKind::Other)) | Ok(None) => {}
+                Err(error) => {
+                    return Err(format!("cannot inspect EFI asset {child}: {error}"));
+                }
             }
         }
     }
@@ -277,16 +336,16 @@ fn efi_asset(root: &Path, needle: &str) -> Result<Option<String>, String> {
 }
 
 fn installed_packages(root: &Path) -> Result<Vec<String>, String> {
-    let db = root.join("var/lib/pacman/local");
-    let entries = std::fs::read_dir(&db)
-        .map_err(|error| format!("cannot read target package database {}: {error}", db.display()))?;
+    let Some(entries) = list_target_directory(root, "var/lib/pacman/local")? else {
+        return Err("selected target package database is missing".into());
+    };
     let mut packages = Vec::new();
     for entry in entries {
-        let entry = entry.map_err(|error| format!("cannot enumerate target package database {}: {error}", db.display()))?;
-        let desc = std::fs::read_to_string(entry.path().join("desc"))
-            .map_err(|error| format!("cannot read target package record {}: {error}", entry.path().display()))?;
+        let relative = format!("var/lib/pacman/local/{entry}/desc");
+        let desc = read_optional_file(root, &relative)?
+            .ok_or_else(|| format!("target package record /{relative} is missing"))?;
         let name = pacman_package_name(&desc)
-            .ok_or_else(|| format!("target package record {} has no %NAME% field", entry.path().display()))?;
+            .ok_or_else(|| format!("target package record /{relative} has no %NAME% field"))?;
         packages.push(name);
     }
     packages.sort();
@@ -297,7 +356,10 @@ fn pacman_package_name(desc: &str) -> Option<String> {
     let mut lines = desc.lines();
     while let Some(line) = lines.next() {
         if line == "%NAME%" {
-            return lines.next().map(str::to_string).filter(|value| !value.is_empty());
+            return lines
+                .next()
+                .map(str::to_string)
+                .filter(|value| !value.is_empty());
         }
     }
     None
@@ -312,37 +374,78 @@ fn inspect_provider_assets(
     Ok(match provider {
         crate::boot::model::ProviderId::Grub => {
             let boot_root = boot_content_root(context)?;
-            valid_grub_config(&boot_root)? && esp.map_or(Ok(false), |esp| efi_asset(esp.root.root(), "grub").map(|asset| asset.is_some()))?
+            valid_grub_config(&boot_root)?
+                && esp.map_or(Ok(false), |esp| {
+                    efi_asset(esp.root.root(), "grub").map(|asset| asset.is_some())
+                })?
         }
         crate::boot::model::ProviderId::Limine => {
             let Some(esp) = esp else { return Ok(false) };
-            valid_limine_config(esp.root.root())? && efi_asset(esp.root.root(), "limine")?.is_some()
+            valid_limine_config(esp.root.root())?
+                && efi_asset(esp.root.root(), "limine")?.is_some()
         }
         crate::boot::model::ProviderId::SystemdBoot => {
             let Some(esp) = esp else { return Ok(false) };
-            valid_systemd_loader(esp.root.root())? && efi_asset(esp.root.root(), "systemd-boot")?.is_some()
+            valid_systemd_loader(esp.root.root())?
+                && efi_asset(esp.root.root(), "systemd-boot")?.is_some()
         }
         crate::boot::model::ProviderId::Uki | crate::boot::model::ProviderId::Efistub => {
             let Some(esp) = esp else { return Ok(false) };
-            provider_firmware_asset_present(esp.root.root(), provider, read_optional_file(&root, "etc/catos/firmware-boot.conf")?.as_deref())?
+            provider_firmware_asset_present(
+                esp.root.root(),
+                provider,
+                read_optional_file(&root, "etc/catos/firmware-boot.conf")?.as_deref(),
+            )?
         }
     })
 }
 
-fn provider_asset_summary(context: &DoctorTargetContext, provider: crate::boot::model::ProviderId) -> Result<String, String> {
-    let esp = context.esp.as_ref().ok().and_then(|esp| esp.as_ref()).map(|esp| esp.root.root());
+fn provider_asset_summary(
+    context: &DoctorTargetContext,
+    provider: crate::boot::model::ProviderId,
+) -> Result<String, String> {
+    let esp = context
+        .esp
+        .as_ref()
+        .ok()
+        .and_then(|esp| esp.as_ref())
+        .map(|esp| esp.root.root());
     match provider {
-        crate::boot::model::ProviderId::Grub => Ok(format!("config={} asset={:?}", boot_content_root(context)?.join("grub/grub.cfg").display(), esp.map(|root| efi_asset(root, "grub")).transpose()?.flatten())),
-        crate::boot::model::ProviderId::Limine => Ok(format!("config={} asset={:?}", esp.map(|root| root.join("limine.conf").display().to_string()).unwrap_or_else(|| "<unknown>".into()), esp.map(|root| efi_asset(root, "limine")).transpose()?.flatten())),
-        crate::boot::model::ProviderId::SystemdBoot => Ok(format!("loader={} entry={} asset={:?}", esp.map(|root| root.join("loader/loader.conf").display().to_string()).unwrap_or_else(|| "<unknown>".into()), esp.map(|root| root.join("loader/entries").display().to_string()).unwrap_or_else(|| "<unknown>".into()), esp.map(|root| efi_asset(root, "systemd-boot")).transpose()?.flatten())),
-        _ => Ok("firmware provider asset paths are checked from target firmware-boot.conf and ESP".into()),
+        crate::boot::model::ProviderId::Grub => Ok(format!(
+            "config={} asset={:?}",
+            boot_content_root(context)?.join("grub/grub.cfg").display(),
+            esp.map(|root| efi_asset(root, "grub")).transpose()?.flatten()
+        )),
+        crate::boot::model::ProviderId::Limine => Ok(format!(
+            "config={} asset={:?}",
+            esp.map(|root| root.join("limine.conf").display().to_string())
+                .unwrap_or_else(|| "<unknown>".into()),
+            esp.map(|root| efi_asset(root, "limine"))
+                .transpose()?
+                .flatten()
+        )),
+        crate::boot::model::ProviderId::SystemdBoot => Ok(format!(
+            "loader={} entry={} asset={:?}",
+            esp.map(|root| root.join("loader/loader.conf").display().to_string())
+                .unwrap_or_else(|| "<unknown>".into()),
+            esp.map(|root| root.join("loader/entries").display().to_string())
+                .unwrap_or_else(|| "<unknown>".into()),
+            esp.map(|root| efi_asset(root, "systemd-boot"))
+                .transpose()?
+                .flatten()
+        )),
+        _ => Ok(
+            "firmware provider asset paths are checked from target firmware-boot.conf and ESP"
+                .into(),
+        ),
     }
 }
 
 fn boot_content_root(context: &DoctorTargetContext) -> Result<std::path::PathBuf, String> {
     use crate::mount::model::BootMountLayout;
     match context.boot_layout.as_ref().map_err(Clone::clone)? {
-        BootMountLayout::SeparateBootAndEsp { .. } | BootMountLayout::BootBtrfsSubvolume { .. } => context
+        BootMountLayout::SeparateBootAndEsp { .. }
+        | BootMountLayout::BootBtrfsSubvolume { .. } => context
             .boot
             .as_ref()
             .map_err(Clone::clone)?
@@ -366,19 +469,34 @@ fn boot_asset_exists(context: &DoctorTargetContext, relative: &str) -> Result<bo
     use crate::mount::model::BootMountLayout;
 
     match context.boot_layout.as_ref().map_err(Clone::clone)? {
-        BootMountLayout::SeparateBootAndEsp { .. } | BootMountLayout::BootBtrfsSubvolume { .. } => {
-            let session = context.boot.as_ref().map_err(Clone::clone)?
-                .as_ref().ok_or_else(|| "selected target has an external /boot but no readonly boot session".to_string())?;
+        BootMountLayout::SeparateBootAndEsp { .. }
+        | BootMountLayout::BootBtrfsSubvolume { .. } => {
+            let session = context
+                .boot
+                .as_ref()
+                .map_err(Clone::clone)?
+                .as_ref()
+                .ok_or_else(|| {
+                    "selected target has an external /boot but no readonly boot session".to_string()
+                })?;
             target_path_exists(session.root(), relative)
         }
         BootMountLayout::EspAtBoot { .. } => {
-            let esp = context.esp.as_ref().map_err(Clone::clone)?
-                .as_ref().ok_or_else(|| "selected target has FAT /boot but no readonly ESP session".to_string())?;
+            let esp = context
+                .esp
+                .as_ref()
+                .map_err(Clone::clone)?
+                .as_ref()
+                .ok_or_else(|| {
+                    "selected target has FAT /boot but no readonly ESP session".to_string()
+                })?;
             target_path_exists(esp.root.root(), relative)
         }
         BootMountLayout::BootInsideRoot
         | BootMountLayout::EspAtBootEfi { .. }
-        | BootMountLayout::EspAtEfi { .. } => target_path_exists(&context.target.root, &format!("boot/{relative}")),
+        | BootMountLayout::EspAtEfi { .. } => {
+            target_path_exists(&context.target.root, &format!("boot/{relative}"))
+        }
     }
 }
 
@@ -387,33 +505,39 @@ fn provider_firmware_asset_present(
     provider: crate::boot::model::ProviderId,
     firmware_boot_conf: Option<&str>,
 ) -> Result<bool, String> {
-    let Some(firmware_boot_conf) = firmware_boot_conf else { return Ok(false) };
+    let Some(firmware_boot_conf) = firmware_boot_conf else {
+        return Ok(false);
+    };
     match provider {
-        crate::boot::model::ProviderId::Uki => {
-            Ok(firmware_boot_conf.contains("method=uki")
-                && target_path_exists(esp_root, "EFI/Linux")?
-                && has_efi_file(esp_root.join("EFI/Linux"))?)
-        }
+        crate::boot::model::ProviderId::Uki => Ok(firmware_boot_conf.contains("method=uki")
+            && target_path_exists(esp_root, "EFI/Linux")?
+            && has_efi_file(esp_root, "EFI/Linux")?),
         crate::boot::model::ProviderId::Efistub => {
             Ok(firmware_boot_conf.contains("method=efistub")
                 && target_path_exists(esp_root, "EFI/CatOS")?
-                && has_efi_file(esp_root.join("EFI/CatOS"))?)
+                && has_efi_file(esp_root, "EFI/CatOS")?)
         }
         _ => Ok(false),
     }
 }
 
-fn has_efi_file(directory: std::path::PathBuf) -> Result<bool, String> {
-    let entries = match std::fs::read_dir(&directory) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
-        Err(error) => return Err(format!("cannot inspect EFI directory {}: {error}", directory.display())),
+fn has_efi_file(root: &Path, relative: &str) -> Result<bool, String> {
+    use crate::target::execute::confined::{rooted_path_kind, RootedPathKind};
+    let Some(entries) = list_target_directory(root, relative)? else {
+        return Ok(false);
     };
     for entry in entries {
-        let entry = entry.map_err(|error| format!("cannot enumerate EFI directory {}: {error}", directory.display()))?;
-        let kind = entry.file_type().map_err(|error| format!("cannot inspect EFI file {}: {error}", entry.path().display()))?;
-        if kind.is_file() && entry.file_name().to_str().is_some_and(|name| name.ends_with(".efi")) {
-            return Ok(true);
+        if !entry.to_ascii_lowercase().ends_with(".efi") {
+            continue;
+        }
+        let child = format!("{}/{}", rooted_path(relative).trim_end_matches('/'), entry);
+        match rooted_path_kind(root, &child) {
+            Ok(Some(RootedPathKind::RegularFile)) => return Ok(true),
+            Ok(Some(RootedPathKind::Symlink)) => {
+                return Err(format!("EFI asset {child} is a symlink"));
+            }
+            Ok(_) => {}
+            Err(error) => return Err(format!("cannot inspect EFI asset {child}: {error}")),
         }
     }
     Ok(false)
@@ -470,6 +594,80 @@ pub(in crate::doctor) fn run_secure_boot_section(
             return Ok(());
         }
     };
+
+    if !context.candidate.running_environment_member {
+        let target_marker = match read_target_file(&root, "etc/catos/secureboot") {
+            Ok(value) => value.is_some(),
+            Err(error) => {
+                set_section(sections, id, DoctorSectionStatus::Unknown);
+                report.limitations.push(DoctorLimitation::new(
+                    id,
+                    "SECURE_BOOT_POLICY_INCOMPLETE",
+                    format!("cannot read target Secure Boot marker: {error}"),
+                ));
+                return Ok(());
+            }
+        };
+        let firmware_boot_conf = match read_target_file(
+            &root,
+            "etc/catos/firmware-boot.conf",
+        ) {
+            Ok(value) => value,
+            Err(error) => {
+                set_section(sections, id, DoctorSectionStatus::Unknown);
+                report.limitations.push(DoctorLimitation::new(
+                    id,
+                    "SECURE_BOOT_POLICY_INCOMPLETE",
+                    format!("cannot read target firmware boot policy: {error}"),
+                ));
+                return Ok(());
+            }
+        };
+        push_evidence(
+            sections,
+            id,
+            Evidence::new(
+                "TARGET_POLICY_MARKER",
+                "doctor::secure_boot",
+                format!("/etc/catos/secureboot present: {target_marker}"),
+            ),
+        );
+        push_evidence(
+            sections,
+            id,
+            Evidence::new(
+                "TARGET_FIRMWARE_BOOT_POLICY",
+                "doctor::secure_boot",
+                format!(
+                    "firmware-boot.conf present: {}",
+                    firmware_boot_conf.is_some()
+                ),
+            ),
+        );
+        push_evidence(
+            sections,
+            id,
+            Evidence::new(
+                "TARGET_ESP_ASSETS",
+                "doctor::secure_boot",
+                match esp {
+                    Some(esp) => format!(
+                        "selected target ESP {} mounted at {}",
+                        esp.device.display(),
+                        esp.mount_point
+                    ),
+                    None => "selected target fstab did not identify an ESP".to_string(),
+                },
+            ),
+        );
+        set_section(sections, id, DoctorSectionStatus::Unknown);
+        report.limitations.push(DoctorLimitation::new(
+            id,
+            "OFFLINE_FIRMWARE_STATE_UNAVAILABLE",
+            "the Live environment firmware state is not evidence for the selected offline target",
+        ));
+        return Ok(());
+    }
 
     let firmware_sb_body = match read_target_file(
         Path::new("/"),
@@ -644,6 +842,19 @@ mod tests {
         std::fs::remove_file(root.join("liminex64.efi")).unwrap();
         assert!(efi_asset(&root, "limine").unwrap().is_none());
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn efi_asset_scan_refuses_symlink_escape() {
+        let root = scratch("efi-symlink");
+        let outside = scratch("efi-outside");
+        std::fs::create_dir_all(root.join("EFI")).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("grubx64.efi"), b"host").unwrap();
+        std::os::unix::fs::symlink(&outside, root.join("EFI/GRUB")).unwrap();
+        assert!(efi_asset(&root, "grub").is_err());
+        std::fs::remove_dir_all(root).unwrap();
+        std::fs::remove_dir_all(outside).unwrap();
     }
 
     #[test]

@@ -10,7 +10,9 @@ use crate::model::{
 use crate::verify::verify_assembled_target;
 use catos_mount::execute::syscall::{self, ms_flags};
 use catos_process::trusted_tool_path;
-use catos_target::execute::confined::open_rooted_directory_pub;
+use catos_target::execute::confined::{
+    open_rooted_directory_pub, remove_empty_rooted_directory, rooted_path_kind, RootedPathKind,
+};
 use catos_target::execute::luks;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -56,6 +58,127 @@ pub trait ChrootEffects {
 
 pub struct SystemChrootEffects;
 
+struct PreparedMountpoint<'a> {
+    session_root: &'a Path,
+    directory: Option<std::os::fd::OwnedFd>,
+    created_directories: Vec<String>,
+}
+
+impl PreparedMountpoint<'_> {
+    fn target(&self) -> PathBuf {
+        self.directory.as_ref().map_or_else(
+            || self.session_root.to_path_buf(),
+            |directory| PathBuf::from(format!("/proc/self/fd/{}", directory.as_raw_fd())),
+        )
+    }
+
+    fn fail(mut self, failure: String) -> String {
+        self.directory.take();
+        match rollback_created_directories(self.session_root, &self.created_directories) {
+            Ok(()) => failure,
+            Err(cleanup) => format!("{failure}; mount-point rollback failed: {cleanup}"),
+        }
+    }
+}
+
+fn prepare_mountpoint<'a>(
+    session_root: &'a Path,
+    mount_point: &str,
+) -> Result<PreparedMountpoint<'a>, String> {
+    if mount_point == "/" {
+        return Ok(PreparedMountpoint {
+            session_root,
+            directory: None,
+            created_directories: Vec::new(),
+        });
+    }
+    let created_directories = missing_rooted_directories(session_root, mount_point)?;
+    let directory = match open_rooted_directory_pub(session_root, mount_point, true) {
+        Ok(directory) => directory,
+        Err(error) => {
+            let failure = format!("cannot prepare target mount point {mount_point}: {error}");
+            return match rollback_created_directories(session_root, &created_directories) {
+                Ok(()) => Err(failure),
+                Err(cleanup) => Err(format!(
+                    "{failure}; mount-point rollback failed: {cleanup}"
+                )),
+            };
+        }
+    };
+    Ok(PreparedMountpoint {
+        session_root,
+        directory: Some(directory),
+        created_directories,
+    })
+}
+
+fn missing_rooted_directories(
+    session_root: &Path,
+    mount_point: &str,
+) -> Result<Vec<String>, String> {
+    use std::path::Component;
+
+    let path = Path::new(mount_point);
+    if !path.is_absolute() {
+        return Err(format!("mount point {mount_point:?} is not absolute"));
+    }
+    let components = path
+        .components()
+        .filter_map(|component| match component {
+            Component::RootDir => None,
+            Component::Normal(component) => Some(Ok(component.to_string_lossy().into_owned())),
+            Component::CurDir | Component::ParentDir | Component::Prefix(_) => Some(Err(format!(
+                "mount point {mount_point:?} contains a dot, parent, or prefix component"
+            ))),
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut missing = false;
+    let mut current = String::new();
+    let mut created = Vec::new();
+    for component in components {
+        current.push('/');
+        current.push_str(&component);
+        if missing {
+            created.push(current.clone());
+            continue;
+        }
+        match rooted_path_kind(session_root, &current) {
+            Ok(Some(RootedPathKind::Directory)) => {}
+            Ok(None) | Err(catos_target::error::FsError::NotFound) => {
+                missing = true;
+                created.push(current.clone());
+            }
+            Ok(Some(RootedPathKind::Symlink)) => {
+                return Err(format!("mount point component {current} is a symlink"));
+            }
+            Ok(Some(RootedPathKind::RegularFile | RootedPathKind::Other)) => {
+                return Err(format!("mount point component {current} is not a directory"));
+            }
+            Err(error) => {
+                return Err(format!("cannot inspect mount point component {current}: {error}"));
+            }
+        }
+    }
+    Ok(created)
+}
+
+fn rollback_created_directories(
+    session_root: &Path,
+    created_directories: &[String],
+) -> Result<(), String> {
+    let mut failures = Vec::new();
+    for directory in created_directories.iter().rev() {
+        if let Err(error) = remove_empty_rooted_directory(session_root, directory) {
+            failures.push(format!("{directory}: {error}"));
+        }
+    }
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(failures.join("; "))
+    }
+}
+
 impl ChrootEffects for SystemChrootEffects {
     fn mount(
         &mut self,
@@ -64,34 +187,26 @@ impl ChrootEffects for SystemChrootEffects {
         mount_point: &str,
         options: &[String],
     ) -> Result<(), String> {
-        let directory;
-        let target = if mount_point == "/" {
-            session_root.to_path_buf()
-        } else {
-            directory =
-                open_rooted_directory_pub(session_root, mount_point, true).map_err(|error| {
-                    format!("cannot prepare target mount point {mount_point}: {error}")
-                })?;
-            PathBuf::from(format!("/proc/self/fd/{}", directory.as_raw_fd()))
-        };
         let fstype = device
             .fs_type
             .as_deref()
             .ok_or_else(|| format!("device {} has no filesystem type", device.name))?;
+        let prepared = prepare_mountpoint(session_root, mount_point)?;
+        let target = prepared.target();
         let data = (!options.is_empty()).then(|| options.join(","));
-        syscall::mount(
+        match syscall::mount(
             Some(&device.name),
             &target,
             Some(fstype),
             0,
             data.as_deref(),
-        )
-        .map_err(|error| {
-            format!(
+        ) {
+            Ok(()) => Ok(()),
+            Err(error) => Err(prepared.fail(format!(
                 "mount of {} at {} failed: {error}",
                 device.name, mount_point
-            )
-        })
+            ))),
+        }
     }
 
     fn mount_runtime(
@@ -100,11 +215,8 @@ impl ChrootEffects for SystemChrootEffects {
         runtime: ChrootRuntimeMount,
     ) -> Result<(), String> {
         let mount_point = runtime.mount_point();
-        let directory =
-            open_rooted_directory_pub(session_root, mount_point, true).map_err(|error| {
-                format!("cannot prepare runtime mount point {mount_point}: {error}")
-            })?;
-        let target = PathBuf::from(format!("/proc/self/fd/{}", directory.as_raw_fd()));
+        let prepared = prepare_mountpoint(session_root, mount_point)?;
+        let target = prepared.target();
         let result = match runtime {
             ChrootRuntimeMount::Proc => syscall::mount(
                 Some("proc"),
@@ -127,7 +239,12 @@ impl ChrootEffects for SystemChrootEffects {
                 syscall::mount(Some(mount_point), &target, None, ms_flags::MS_BIND, None)
             }
         };
-        result.map_err(|error| format!("runtime mount {mount_point} failed: {error}"))
+        match result {
+            Ok(()) => Ok(()),
+            Err(error) => Err(prepared.fail(format!(
+                "runtime mount {mount_point} failed: {error}"
+            ))),
+        }
     }
 
     fn read_mountinfo(&mut self) -> Result<String, String> {
@@ -362,4 +479,70 @@ pub fn open_luks(
         mapper_path: PathBuf::from("/dev/mapper").join(mapper),
         closed: false,
     })
+}
+
+
+#[cfg(test)]
+mod mountpoint_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+    fn scratch() -> PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "catos-chroot-mountpoint-{}-{}",
+            std::process::id(),
+            SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        root
+    }
+
+    #[test]
+    fn failed_mountpoint_preparation_rolls_back_only_new_directories() {
+        let root = scratch();
+        std::fs::create_dir(root.join("boot")).unwrap();
+        let created = missing_rooted_directories(&root, "/boot/efi/vendor").unwrap();
+        assert_eq!(created, vec!["/boot/efi", "/boot/efi/vendor"]);
+        catos_target::execute::confined::create_rooted_directory(
+            &root,
+            "/boot/efi/vendor",
+        )
+        .unwrap();
+
+        rollback_created_directories(&root, &created).unwrap();
+
+        assert!(root.join("boot").is_dir());
+        assert!(!root.join("boot/efi").exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn rollback_reports_nonempty_created_directory() {
+        let root = scratch();
+        catos_target::execute::confined::create_rooted_directory(&root, "/boot/efi").unwrap();
+        std::fs::write(root.join("boot/efi/keep"), b"data").unwrap();
+
+        let error = rollback_created_directories(
+            &root,
+            &["/boot".into(), "/boot/efi".into()],
+        )
+        .unwrap_err();
+        assert!(error.contains("refusing to remove non-empty"));
+        assert!(root.join("boot/efi/keep").is_file());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn mountpoint_planning_refuses_intermediate_symlink() {
+        let root = scratch();
+        let outside = scratch();
+        std::os::unix::fs::symlink(&outside, root.join("boot")).unwrap();
+        assert!(missing_rooted_directories(&root, "/boot/efi").is_err());
+        std::fs::remove_file(root.join("boot")).unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+        std::fs::remove_dir_all(outside).unwrap();
+    }
 }

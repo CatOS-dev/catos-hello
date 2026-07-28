@@ -11,7 +11,7 @@ use crate::target::model::BlockDevice;
 
 #[derive(Debug, Clone)]
 pub enum Selection {
-    Selected(TargetCandidate),
+    Selected(Box<TargetCandidate>),
     Declined,
     Unavailable(String),
 }
@@ -26,7 +26,7 @@ pub fn select_target(report: &DiscoveryReport, program: &str) -> Selection {
     }
     if !io::stdin().is_terminal() {
         return match report.candidates.as_slice() {
-            [candidate] if candidate.confidence == RootCandidateConfidence::High => Selection::Selected(candidate.clone()),
+            [candidate] if candidate.confidence == RootCandidateConfidence::High => Selection::Selected(Box::new(candidate.clone())),
             _ => Selection::Unavailable("multiple target candidates require an interactive terminal".into()),
         };
     }
@@ -34,7 +34,7 @@ pub fn select_target(report: &DiscoveryReport, program: &str) -> Selection {
         let candidate = &report.candidates[0];
         print_summary(candidate);
         return match read_confirm(program, "Use this target?") {
-            Ok(true) => Selection::Selected(candidate.clone()),
+            Ok(true) => Selection::Selected(Box::new(candidate.clone())),
             Ok(false) => Selection::Declined,
             Err(error) => Selection::Unavailable(error),
         };
@@ -44,7 +44,7 @@ pub fn select_target(report: &DiscoveryReport, program: &str) -> Selection {
         println!("  [{index}] {}", summary(candidate));
     }
     match read_index(program, report.candidates.len()) {
-        Ok(index) => { let candidate = report.candidates[index].clone(); print_summary(&candidate); Selection::Selected(candidate) }
+        Ok(index) => { let candidate = report.candidates[index].clone(); print_summary(&candidate); Selection::Selected(Box::new(candidate)) }
         Err(error) => Selection::Unavailable(error),
     }
 }

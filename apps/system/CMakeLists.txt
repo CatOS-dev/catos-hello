@@ -147,6 +147,9 @@ if(BUILD_TESTS)
     option(CATOS_SYSTEM_DOCTOR_SMOKE
            "Enable real catos-doctor QEMU acceptance (opt-in; needs qemu + kernel + busybox + mkfs.btrfs). Verifies byte-for-byte no-write guarantee."
            OFF)
+    option(CATOS_SYSTEM_CHROOT_SMOKE
+           "Enable real catos-chroot QEMU acceptance (opt-in; needs qemu + kernel + static busybox + mkfs.btrfs)."
+           OFF)
     if(CATOS_SYSTEM_INITRAMFS_SMOKE)
         # Two test variants:
         #   * bare:         no initramfs markers; verifies binary starts
@@ -289,6 +292,24 @@ if(BUILD_TESTS)
             TIMEOUT 600
             SKIP_RETURN_CODE 77
             LABELS "rust;integration;qemu;boot-repair"
+        )
+    endif()
+    if(CATOS_SYSTEM_CHROOT_SMOKE)
+        # Chroot multicall acceptance. The guest executes /bin/catos-chroot
+        # against a real Btrfs target with multiple same-filesystem subvolumes,
+        # verifies the assembled mount tree inside chroot, then proves reverse
+        # unmount and session-root cleanup. Historical snapshot roots are hidden
+        # by default and exposed only by the explicit CLI switch.
+        add_test(
+            NAME catos-system-chroot-qemu-smoke
+            COMMAND "${BASH_CMD}"
+                    "${CMAKE_CURRENT_SOURCE_DIR}/scripts/chroot-qemu-smoke.sh"
+                    --bin "${CATOS_SYSTEM_BIN}"
+        )
+        set_tests_properties(catos-system-chroot-qemu-smoke PROPERTIES
+            TIMEOUT 300
+            SKIP_RETURN_CODE 77
+            LABELS "rust;integration;qemu;chroot"
         )
     endif()
     if(CATOS_SYSTEM_DOCTOR_SMOKE)

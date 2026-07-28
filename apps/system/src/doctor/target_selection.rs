@@ -19,10 +19,22 @@
 use crate::doctor::model::{DoctorTarget, DoctorTargetKind};
 use crate::target::model::TargetIdentity;
 use crate::selection_ui::{select_target, Selection};
-use crate::target::discovery::discover_targets;
-use crate::target::discovery::TargetSession;
+use crate::target::discovery::{discover_targets, ProbeCleanup, TargetSession};
 #[cfg(test)]
 use crate::target::plan::{TargetPlan, TargetPlanKind};
+
+pub struct SelectedTargetSession {
+    pub target: TargetIdentity,
+    pub session: TargetSession,
+    pub inventory: Vec<crate::target::model::BlockDevice>,
+    pub discovery_cleanup: Vec<ProbeCleanup>,
+}
+
+#[derive(Debug, Clone)]
+pub struct TargetDiscoveryError {
+    pub reason: String,
+    pub cleanup: Vec<ProbeCleanup>,
+}
 
 #[derive(Debug, Clone)]
 pub enum TargetSelection {
@@ -79,13 +91,48 @@ pub fn discover_target() -> TargetSelection {
     }
 }
 
-pub fn discover_target_session() -> Result<(TargetIdentity, TargetSession), String> {
-    let candidate = match select_target(&discover_targets(), "catos-doctor") {
-        Selection::Selected(candidate) => candidate,
-        Selection::Declined => return Err("operator declined the discovered target".into()),
-        Selection::Unavailable(reason) => return Err(reason),
+pub fn discover_target_session() -> Result<SelectedTargetSession, TargetDiscoveryError> {
+    let report = discover_targets();
+    let dirty_cleanup = report
+        .cleanup
+        .iter()
+        .filter(|cleanup| !cleanup.is_clean())
+        .map(|cleanup| {
+            format!(
+                "{}: {}",
+                cleanup.mountpoint.display(),
+                cleanup.error.as_deref().unwrap_or("probe mountpoint was not fully removed")
+            )
+        })
+        .collect::<Vec<_>>();
+    if !dirty_cleanup.is_empty() {
+        return Err(TargetDiscoveryError {
+            reason: format!(
+                "readonly target discovery cleanup incomplete: {}",
+                dirty_cleanup.join("; ")
+            ),
+            cleanup: report.cleanup,
+        });
+    }
+    let candidate = match select_target(&report, "catos-doctor") {
+        Selection::Selected(candidate) => *candidate,
+        Selection::Declined => {
+            return Err(TargetDiscoveryError {
+                reason: "operator declined the discovered target".into(),
+                cleanup: report.cleanup,
+            })
+        }
+        Selection::Unavailable(reason) => {
+            return Err(TargetDiscoveryError {
+                reason,
+                cleanup: report.cleanup,
+            })
+        }
     };
-    let session = TargetSession::open(candidate).map_err(|error| format!("open selected readonly target: {error}"))?;
+    let session = TargetSession::open(candidate).map_err(|error| TargetDiscoveryError {
+        reason: format!("open selected readonly target: {error}"),
+        cleanup: report.cleanup.clone(),
+    })?;
     let target = TargetIdentity {
         root: session.root().to_path_buf(),
         root_device: Some(session.candidate().root_device.clone()),
@@ -93,7 +140,12 @@ pub fn discover_target_session() -> Result<(TargetIdentity, TargetSession), Stri
         root_subvol: session.candidate().root_subvolume.clone(),
         root_uuid: session.candidate().root_uuid.clone(),
     };
-    Ok((target, session))
+    Ok(SelectedTargetSession {
+        target,
+        session,
+        inventory: report.inventory,
+        discovery_cleanup: report.cleanup,
+    })
 }
 
 /// Map a [`TargetPlan`] to a [`TargetSelection`] without any field
