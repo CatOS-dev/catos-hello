@@ -51,7 +51,7 @@ pub(super) fn run_apply(
 
     // CLI-contract check FIRST: --esp-device is rejected before any
     // root check, plan load, or mount. A wrapper script that learned
-    // the flag from phase-2 `target plan` must learn it is unsupported
+    // the flag from `target plan` must learn it is unsupported
     // here without paying for a privilege check or touching the plan
     // file.
     let selection = args.require_target_selection()?;

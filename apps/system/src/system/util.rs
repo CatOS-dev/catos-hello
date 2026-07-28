@@ -1,4 +1,4 @@
-use super::Phase2Outcome;
+use super::SystemCommandOutcome;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -32,17 +32,19 @@ pub(super) fn mount_error_to_top_error(err: MountError) -> Error {
     Error::MountFailed(err)
 }
 
-/// Convenience used by entry.rs to detect whether a phase-2 command
+/// Convenience used by entry.rs to detect whether a storage command
 /// should set a non-success exit code based on its outcome.
-pub fn exit_code_for(outcome: &Phase2Outcome) -> i32 {
+pub fn exit_code_for(outcome: &SystemCommandOutcome) -> i32 {
     match outcome {
-        Phase2Outcome::StorageScan(report) if !report.ambiguities.is_empty() => {
+        SystemCommandOutcome::StorageScan(report) if !report.ambiguities.is_empty() => {
             // Ambiguities are surfaced but not fatal: the report still
             // contains useful device data. We exit 0 so downstream
             // tooling can consume the JSON.
             exit_code::SUCCESS
         }
-        Phase2Outcome::TargetMount { cleanup, .. } if !cleanup.all_clean => exit_code::PROBE_FAILED,
+        SystemCommandOutcome::TargetMount { cleanup, .. } if !cleanup.all_clean => {
+            exit_code::PROBE_FAILED
+        }
         _ => exit_code::SUCCESS,
     }
 }
@@ -69,7 +71,7 @@ mod tests {
     /// exit_code_for returns SUCCESS for a clean TargetMount outcome.
     #[test]
     fn exit_code_for_clean_target_mount_is_success() {
-        let outcome = Phase2Outcome::TargetMount {
+        let outcome = SystemCommandOutcome::TargetMount {
             session: MountSession {
                 id: "test".into(),
                 state: crate::mount::model::MountSessionState::Active,
@@ -89,7 +91,7 @@ mod tests {
     /// exit_code_for returns PROBE_FAILED when residuals remain.
     #[test]
     fn exit_code_for_residual_target_mount_is_probe_failed() {
-        let outcome = Phase2Outcome::TargetMount {
+        let outcome = SystemCommandOutcome::TargetMount {
             session: MountSession {
                 id: "test".into(),
                 state: crate::mount::model::MountSessionState::CleanupIncomplete,

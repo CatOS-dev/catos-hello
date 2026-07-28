@@ -28,19 +28,56 @@ fn run(args: &[&str]) -> (bool, i32, String, String) {
 }
 
 #[test]
-fn no_args_exits_arg_error() {
-    let (ok, code, _, stderr) = run(&[]);
-    assert!(!ok);
-    assert_eq!(code, 2, "stderr: {stderr}");
-    // Errors must go to stderr, not stdout.
-    assert!(!stderr.is_empty());
+fn no_args_opens_the_maintenance_menu_instead_of_failing() {
+    let (ok, code, stdout, stderr) = run(&[]);
+    assert!(ok, "exit {code}: {stderr}");
+    assert_eq!(code, 0);
+    assert!(stdout.contains("CatOS System Tools"), "stdout={stdout:?}");
+    for action in [
+        "Check system health",
+        "Open installed system",
+        "Repair",
+        "Recover",
+        "Update",
+    ] {
+        assert!(stdout.contains(action), "menu missing {action:?}: {stdout}");
+    }
+    assert!(!stderr.contains("argument error"), "stderr={stderr:?}");
 }
 
 #[test]
-fn unknown_subcommand_exits_arg_error() {
-    let (ok, code, _, _) = run(&["frobnicate"]);
+fn multicall_name_is_not_an_aggregate_subcommand() {
+    let (ok, code, stdout, stderr) = run(&["catos-repair", "--help"]);
     assert!(!ok);
     assert_eq!(code, 2);
+    assert!(stdout.is_empty(), "stdout={stdout:?}");
+    assert!(
+        stderr.contains(r#"unknown command "catos-repair""#),
+        "stderr={stderr:?}"
+    );
+    assert!(stderr.contains("catos-system --help"), "stderr={stderr:?}");
+}
+
+#[test]
+fn option_first_legacy_inspection_remains_compatible() {
+    let (ok, code, stdout, stderr) = run(&["--json", "inspect"]);
+    assert!(ok, "exit {code}: {stderr}");
+    let value: serde_json::Value = serde_json::from_str(stdout.trim())
+        .unwrap_or_else(|error| panic!("invalid JSON: {error}; stdout={stdout:?}"));
+    assert_eq!(value["invocation"], "catos-system");
+    assert!(value.get("runtime").is_some());
+    assert!(value.get("capabilities").is_some());
+    assert!(value.get("target").is_some());
+}
+
+#[test]
+fn unknown_command_is_actionable_and_does_not_leak_error_taxonomy() {
+    let (ok, code, _, stderr) = run(&["frobnicate"]);
+    assert!(!ok);
+    assert_eq!(code, 2);
+    assert!(stderr.contains("unknown command"), "stderr={stderr:?}");
+    assert!(stderr.contains("catos-system --help"), "stderr={stderr:?}");
+    assert!(!stderr.contains("argument error"), "stderr={stderr:?}");
 }
 
 #[test]
@@ -123,14 +160,14 @@ fn json_has_required_top_level_keys() {
     ] {
         assert!(v.get(key).is_some(), "missing top-level JSON key: {key}");
     }
-    // The phase-1 contract enumerates exactly these 15 capabilities.
+    // The inspection contract enumerates exactly these 15 capabilities.
     let cap_names: Vec<&str> = v["capabilities"]
         .as_array()
         .unwrap()
         .iter()
         .map(|c| c["name"].as_str().unwrap())
         .collect();
-    assert_eq!(cap_names.len(), 15, "expected 15 phase-1 capabilities");
+    assert_eq!(cap_names.len(), 15, "expected 15 inspection capabilities");
     for required in [
         "read_target_root",
         "read_proc",
@@ -182,19 +219,77 @@ fn json_runtime_has_six_detections() {
 }
 
 #[test]
-fn public_help_describes_the_minimal_entry_point_roles() {
+fn public_help_describes_user_actions_not_implementation_layers() {
     let (ok, _, stdout, _) = run(&["--help"]);
     assert!(ok);
-    for name in [
-        "catos-update",
-        "catos-recovery",
-        "catos-doctor",
-        "catos-repair",
+    for command in [
+        "doctor", "chroot", "repair", "recovery", "update", "advanced",
     ] {
-        assert!(stdout.contains(name), "missing public entry point {name}");
+        assert!(
+            stdout.contains(command),
+            "missing command {command}: {stdout}"
+        );
     }
-    assert!(!stdout.contains("doctor inspect"));
-    assert!(!stdout.contains("doctor preflight"));
+    for leaked in ["phase", "stage", "backend", "FOUNDATION", "SAFE-MOUNT"] {
+        assert!(
+            !stdout
+                .to_ascii_lowercase()
+                .contains(&leaked.to_ascii_lowercase()),
+            "help leaks {leaked:?}: {stdout}"
+        );
+    }
+    assert!(
+        stdout.contains("Run without a command"),
+        "help must advertise the interactive path: {stdout}"
+    );
+}
+
+#[test]
+fn catos_system_routes_every_primary_user_command() {
+    for (command, expected) in [
+        ("doctor", "catos-doctor"),
+        ("chroot", "catos-chroot"),
+        ("repair", "catos-repair"),
+        ("recovery", "catos-recovery"),
+        ("update", "catos-update"),
+    ] {
+        let (ok, code, stdout, stderr) = run(&[command, "--help"]);
+        assert!(ok, "catos-system {command} --help exited {code}: {stderr}");
+        assert!(
+            stdout.starts_with(expected),
+            "wrong help for {command}: {stdout}"
+        );
+        assert!(
+            !stdout.to_ascii_lowercase().contains("phase"),
+            "{command} help leaks phase: {stdout}"
+        );
+        assert!(
+            !stdout.to_ascii_lowercase().contains("stage"),
+            "{command} help leaks stage: {stdout}"
+        );
+        assert!(
+            !stdout.to_ascii_lowercase().contains("backend"),
+            "{command} help leaks backend: {stdout}"
+        );
+    }
+}
+
+#[test]
+fn advanced_help_contains_low_level_diagnostics_without_dominating_default_help() {
+    let (ok, code, stdout, stderr) = run(&["advanced", "--help"]);
+    assert!(ok, "exit {code}: {stderr}");
+    for command in [
+        "inspect",
+        "environment",
+        "capabilities",
+        "storage scan",
+        "target plan",
+    ] {
+        assert!(
+            stdout.contains(command),
+            "advanced help missing {command:?}: {stdout}"
+        );
+    }
 }
 
 #[test]
@@ -387,7 +482,7 @@ fn target_root_absolute_symlinks_do_not_escape_to_host() {
 }
 
 #[test]
-fn phase2_json_failure_is_structured_and_keeps_stdout_pure() {
+fn system_json_failure_is_structured_and_keeps_stdout_pure() {
     let (ok, code, stdout, stderr) = run(&[
         "target",
         "plan",
@@ -405,4 +500,22 @@ fn phase2_json_failure_is_structured_and_keeps_stdout_pure() {
         value["error"]["detail"]["device_or_path"],
         "/dev/catos-definitely-missing"
     );
+}
+
+#[test]
+fn human_output_never_exposes_internal_phase_or_backend_labels() {
+    for args in [
+        &["advanced", "inspect"][..],
+        &["advanced", "storage", "scan"][..],
+        &["recovery", "list"][..],
+    ] {
+        let (_, _, stdout, stderr) = run(args);
+        let combined = format!("{stdout}\n{stderr}").to_ascii_lowercase();
+        for leaked in ["phase 1", "phase 2", "phase 3", "system backend"] {
+            assert!(
+                !combined.contains(leaked),
+                "{args:?} leaked {leaked:?}: {combined}"
+            );
+        }
+    }
 }

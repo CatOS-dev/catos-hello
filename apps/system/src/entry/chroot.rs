@@ -13,7 +13,6 @@ use crate::error::exit_code;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 struct ChrootOptions {
-    skip_root_check: bool,
     no_auto_mount: bool,
     no_systemd_chroot: bool,
     show_btrfs_dot_snapshots: bool,
@@ -23,22 +22,19 @@ pub fn run(argv: &[String]) -> i32 {
     let options = match parse_argv(argv) {
         Ok(options) => options,
         Err(message) => {
-            eprintln!("catos-chroot: argument error: {message}");
+            eprintln!("catos-chroot: {message}");
             return exit_code::ARG_ERROR;
         }
     };
 
-    let evidence = if options.skip_root_check {
-        ChrootPrivilegeEvidence::ExplicitNonRootOverride
-    } else {
-        ChrootPrivilegeEvidence::EffectiveUid(unsafe { libc::geteuid() })
-    };
+    if let Some(exit) = super::elevation::require_root_or_reexec("chroot", argv, "catos-chroot") {
+        return exit;
+    }
+    let evidence = ChrootPrivilegeEvidence::EffectiveUid(super::elevation::effective_uid());
     let authorization = match authorize(evidence) {
         Ok(authorization) => authorization,
         Err(message) => {
-            eprintln!(
-                "catos-chroot: {message}; pass --skip-root-check to override (not recommended)"
-            );
+            eprintln!("catos-chroot: {message}");
             return exit_code::PERMISSION_DENIED;
         }
     };
@@ -296,7 +292,27 @@ where C: FnOnce() -> Result<(), String> {
 pub fn print_help() {
     let version = crate::PROGRAM_VERSION;
     print!(
-        "catos-chroot {version} - CatOS interactive chroot helper\n\nUSAGE:\n    catos-chroot [OPTIONS]\n\nDESCRIPTION:\n    Diagnoses the selected target read-only, builds a typed mount plan,\n    assembles the target in a private session root, verifies it, and then\n    enters arch-chroot. All mounts and LUKS mappings opened by this command\n    are cleaned up before exit.\n\nOPTIONS:\n    --skip-root-check          Explicitly authorise non-root execution (dangerous).\n    --no-auto-mount            Do not plan target mounts from /etc/fstab.\n    --no-systemd-chroot        Drop the -S flag passed to arch-chroot.\n    --show-btrfs-dot-snapshots Include .snapshots/* subvolumes in the picker.\n    -h, --help                 Show this help message and exit.\n    -V, --version              Print program version and exit.\n\nEXIT CODES:\n    0   Shell exited and cleanup completed.\n    2   Argument, plan, or selection error.\n    4   Chroot execution was not authorised.\n    5   Diagnosis, mount, verification, shell, or cleanup failed.\n"
+        r#"catos-chroot {version} - open an installed CatOS system for maintenance
+
+USAGE:
+    catos-chroot [OPTIONS]
+    catos-system chroot [OPTIONS]
+
+The command finds installed CatOS systems, lets you choose one, unlocks an
+encrypted target when needed, mounts its configured filesystems, and opens
+an interactive shell. Everything mounted or unlocked by this command is
+cleaned up when the shell exits.
+
+OPTIONS:
+    --no-auto-mount            Mount only the selected root filesystem.
+    --no-systemd-chroot        Use the offline arch-chroot mode.
+    --show-btrfs-dot-snapshots Include historical .snapshots entries.
+    -h, --help                 Show this help message.
+    -V, --version              Print the program version.
+
+Administrator privileges are requested automatically when an elevation tool
+is available.
+"#
     );
 }
 
@@ -304,13 +320,12 @@ fn parse_argv(argv: &[String]) -> Result<ChrootOptions, String> {
     let mut options = ChrootOptions::default();
     for argument in argv {
         match argument.as_str() {
-            "--skip-root-check" => options.skip_root_check = true,
             "--no-auto-mount" => options.no_auto_mount = true,
             "--no-systemd-chroot" => options.no_systemd_chroot = true,
             "--show-btrfs-dot-snapshots" => options.show_btrfs_dot_snapshots = true,
             other => {
                 return Err(format!(
-                    "unknown option {other:?}; expected --skip-root-check, --no-auto-mount, --no-systemd-chroot, --show-btrfs-dot-snapshots"
+                    "unknown option {other:?}; expected --no-auto-mount, --no-systemd-chroot, --show-btrfs-dot-snapshots"
                 ))
             }
         }
@@ -431,13 +446,11 @@ mod tests {
     #[test]
     fn parse_known_flags() {
         let options = parse_argv(&[
-            "--skip-root-check".into(),
             "--no-auto-mount".into(),
             "--no-systemd-chroot".into(),
             "--show-btrfs-dot-snapshots".into(),
         ])
         .unwrap();
-        assert!(options.skip_root_check);
         assert!(options.no_auto_mount);
         assert!(options.no_systemd_chroot);
         assert!(options.show_btrfs_dot_snapshots);

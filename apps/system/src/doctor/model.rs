@@ -468,13 +468,13 @@ impl DoctorTargetKind {
     }
 }
 
-/// Environment summary reused from phase 1. Doctor does not
+/// Environment summary reused from low-level inspection. Doctor does not
 /// re-derive environment facts; it cites them so consumers see one
 /// coherent picture.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct DoctorEnvironment {
     /// `running_system`, `chroot`, `live_environment`, `initramfs`,
-    /// or `unknown` — same vocabulary as phase 1.
+    /// or `unknown` — same vocabulary as the inspection report.
     pub primary_mode: String,
     /// Whether `/` itself looks like the running CatOS root.
     pub running_root_is_catos: bool,

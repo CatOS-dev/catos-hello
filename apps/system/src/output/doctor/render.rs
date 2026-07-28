@@ -10,8 +10,7 @@
 use std::io::Write;
 
 use crate::doctor::model::{
-    DoctorIssue, DoctorOverallStatus, DoctorRecommendation, DoctorReport, DoctorSection,
-    DoctorSeverity, DoctorTargetKind,
+    DoctorOverallStatus, DoctorReport, DoctorSection, DoctorSeverity, DoctorTargetKind,
 };
 use crate::error::Error;
 
@@ -20,170 +19,341 @@ use crate::error::Error;
 /// not by rendering success. A render I/O failure is surfaced via
 /// `Error::SerializeFailed` so the caller can still observe it.
 pub fn render_doctor_human(report: &DoctorReport, out: &mut dyn Write) -> Result<(), Error> {
+    if let Some(failure) = startup_failure(report) {
+        writeln!(out, "CatOS Doctor could not start").map_err(io_err)?;
+        writeln!(out, "Error: {}", fit(&failure.message, 73)).map_err(io_err)?;
+        if let Some(residual) = report.cleanup.residual.first() {
+            writeln!(out, "Cleanup: {}", fit(residual, 71)).map_err(io_err)?;
+        }
+        return Ok(());
+    }
+
     writeln!(out, "CatOS Doctor").map_err(io_err)?;
-    writeln!(out, "============").map_err(io_err)?;
-    writeln!(out).map_err(io_err)?;
-
-    writeln!(out, "Target").map_err(io_err)?;
-    writeln!(out, "------").map_err(io_err)?;
-    render_target(report, out)?;
-    writeln!(out).map_err(io_err)?;
-
-    writeln!(out, "Overall status").map_err(io_err)?;
-    writeln!(out, "--------------").map_err(io_err)?;
-    writeln!(out, "status:    {}", report.overall_status.as_str()).map_err(io_err)?;
-    writeln!(out, "complete:  {}", report.complete).map_err(io_err)?;
-    writeln!(out).map_err(io_err)?;
-
+    render_table_header(out, "Item", "Status", "Details")?;
+    render_row(
+        out,
+        "Overall",
+        report.overall_status.as_str(),
+        &format!(
+            "{}; target={}",
+            if report.complete {
+                "complete"
+            } else {
+                "partial"
+            },
+            target_kind_label(report.target.kind)
+        ),
+    )?;
     for section in &report.sections {
-        render_section_human(section, out)?;
+        render_row(
+            out,
+            section.id.heading(),
+            section_status_label(section.status),
+            &section_summary(report, section),
+        )?;
     }
 
-    if !report.issues.is_empty() {
-        writeln!(out, "Issues").map_err(io_err)?;
-        writeln!(out, "------").map_err(io_err)?;
+    if has_findings(report) {
+        writeln!(out).map_err(io_err)?;
+        writeln!(out, "Findings").map_err(io_err)?;
+        render_table_header(out, "Area", "Level", "Finding")?;
         for issue in &report.issues {
-            render_issue_human(issue, out)?;
-        }
-        writeln!(out).map_err(io_err)?;
-    }
-
-    if !report.limitations.is_empty() {
-        writeln!(out, "Limitations").map_err(io_err)?;
-        writeln!(out, "-----------").map_err(io_err)?;
-        for lim in &report.limitations {
-            writeln!(
+            render_row(
                 out,
-                "[{}] {}: {}",
-                lim.section.as_str(),
-                lim.code,
-                lim.message
-            )
-            .map_err(io_err)?;
+                issue.section.heading(),
+                severity_label(issue.severity),
+                &format!("{}: {}", issue.code, issue.message),
+            )?;
         }
-        writeln!(out).map_err(io_err)?;
+        for limitation in &report.limitations {
+            render_row(
+                out,
+                limitation.section.heading(),
+                "limited",
+                &format!("{}: {}", limitation.code, limitation.message),
+            )?;
+        }
+        for warning in &report.warnings {
+            render_row(out, "General", "warn", warning)?;
+        }
+        for residual in &report.cleanup.residual {
+            render_row(out, "Cleanup", "error", residual)?;
+        }
     }
 
     if !report.recommendations.is_empty() {
-        writeln!(out, "Recommended actions").map_err(io_err)?;
-        writeln!(out, "-------------------").map_err(io_err)?;
-        for rec in &report.recommendations {
-            render_recommendation_human(rec, out)?;
-        }
         writeln!(out).map_err(io_err)?;
-    }
-
-    if !report.cleanup.cleaned.is_empty() || !report.cleanup.residual.is_empty() {
-        writeln!(out, "Cleanup").map_err(io_err)?;
-        writeln!(out, "-------").map_err(io_err)?;
-        for c in &report.cleanup.cleaned {
-            writeln!(out, "cleaned: {c}").map_err(io_err)?;
+        writeln!(out, "Actions").map_err(io_err)?;
+        render_table_header(out, "Action", "Type", "Command or next step")?;
+        for (index, recommendation) in report.recommendations.iter().enumerate() {
+            let (kind, detail) = match recommendation.command.as_deref() {
+                Some(command) => ("run", command.to_string()),
+                None => ("review", recommendation.message.clone()),
+            };
+            render_wrapped_row(out, &format!("{}", index + 1), kind, &detail)?;
         }
-        for r in &report.cleanup.residual {
-            writeln!(out, "RESIDUAL: {r}").map_err(io_err)?;
-        }
-        writeln!(out, "all_clean: {}", report.cleanup.all_clean).map_err(io_err)?;
-        writeln!(out).map_err(io_err)?;
     }
 
     Ok(())
 }
 
-fn render_target(report: &DoctorReport, out: &mut dyn Write) -> Result<(), Error> {
-    let t = &report.target;
-    writeln!(out, "kind:          {}", target_kind_label(t.kind)).map_err(io_err)?;
-    if let Some(dev) = t.root_device.as_deref() {
-        writeln!(out, "root device:   {dev}").map_err(io_err)?;
-    }
-    if let Some(fs) = t.root_fstype.as_deref() {
-        writeln!(out, "root fstype:   {fs}").map_err(io_err)?;
-    }
-    if let Some(subvol) = t.root_subvolume.as_deref() {
-        writeln!(out, "root subvol:   {subvol}").map_err(io_err)?;
-    }
-    if let Some(esp) = t.esp_device.as_deref() {
-        writeln!(out, "ESP device:    {esp}").map_err(io_err)?;
-    }
-    if let Some(layout) = t.boot_layout.as_deref() {
-        writeln!(out, "boot layout:   {layout}").map_err(io_err)?;
-    }
-    writeln!(out, "primary mode:  {}", report.environment.primary_mode).map_err(io_err)?;
+const ITEM_WIDTH: usize = 13;
+const STATUS_WIDTH: usize = 10;
+const DETAIL_WIDTH: usize = 49;
+
+fn render_table_header(
+    out: &mut dyn Write,
+    item: &str,
+    status: &str,
+    details: &str,
+) -> Result<(), Error> {
+    render_row(out, item, status, details)?;
     writeln!(
         out,
-        "running root CatOS: {}",
-        report.environment.running_root_is_catos
+        "{}-+-{}-+-{}",
+        "-".repeat(ITEM_WIDTH),
+        "-".repeat(STATUS_WIDTH),
+        "-".repeat(DETAIL_WIDTH)
     )
-    .map_err(io_err)?;
+    .map_err(io_err)
+}
+
+fn render_row(out: &mut dyn Write, item: &str, status: &str, details: &str) -> Result<(), Error> {
+    writeln!(
+        out,
+        "{:<item_width$} | {:<status_width$} | {}",
+        fit(item, ITEM_WIDTH),
+        fit(status, STATUS_WIDTH),
+        fit(details, DETAIL_WIDTH),
+        item_width = ITEM_WIDTH,
+        status_width = STATUS_WIDTH,
+    )
+    .map_err(io_err)
+}
+
+fn render_wrapped_row(
+    out: &mut dyn Write,
+    item: &str,
+    status: &str,
+    details: &str,
+) -> Result<(), Error> {
+    let lines = wrap_words(details, DETAIL_WIDTH);
+    for (index, line) in lines.iter().enumerate() {
+        if index == 0 {
+            render_row(out, item, status, line)?;
+        } else {
+            render_row(out, "", "", line)?;
+        }
+    }
     Ok(())
 }
 
-fn target_kind_label(k: DoctorTargetKind) -> &'static str {
-    match k {
-        DoctorTargetKind::RunningRoot => "running_root",
+fn wrap_words(value: &str, width: usize) -> Vec<String> {
+    let normalized = value.split_whitespace().collect::<Vec<_>>().join(" ");
+    if normalized.is_empty() {
+        return vec![String::new()];
+    }
+    let mut lines = Vec::new();
+    let mut current = String::new();
+    for word in normalized.split(' ') {
+        let word_len = word.chars().count();
+        if word_len > width {
+            if !current.is_empty() {
+                lines.push(std::mem::take(&mut current));
+            }
+            let chars = word.chars().collect::<Vec<_>>();
+            for chunk in chars.chunks(width) {
+                lines.push(chunk.iter().collect());
+            }
+            continue;
+        }
+        let projected = current.chars().count() + usize::from(!current.is_empty()) + word_len;
+        if projected <= width {
+            if !current.is_empty() {
+                current.push(' ');
+            }
+            current.push_str(word);
+        } else {
+            lines.push(std::mem::take(&mut current));
+            current.push_str(word);
+        }
+    }
+    if !current.is_empty() {
+        lines.push(current);
+    }
+    lines
+}
+
+fn startup_failure(report: &DoctorReport) -> Option<&crate::doctor::model::DoctorLimitation> {
+    report
+        .limitations
+        .iter()
+        .find(|limitation| limitation.code == "DOCTOR_NAMESPACE_UNAVAILABLE")
+}
+
+fn has_findings(report: &DoctorReport) -> bool {
+    !report.issues.is_empty()
+        || !report.limitations.is_empty()
+        || !report.warnings.is_empty()
+        || !report.cleanup.residual.is_empty()
+}
+
+fn target_details(report: &DoctorReport) -> String {
+    let target = &report.target;
+    let mut parts = Vec::new();
+    if let Some(device) = target.root_device.as_deref() {
+        parts.push(device.to_string());
+    }
+    if let Some(fstype) = target.root_fstype.as_deref() {
+        parts.push(fstype.to_string());
+    }
+    if let Some(subvolume) = target.root_subvolume.as_deref() {
+        parts.push(subvolume.to_string());
+    }
+    if let Some(esp) = target.esp_device.as_deref() {
+        parts.push(format!("ESP {esp}"));
+    }
+    if parts.is_empty() {
+        "not identified".to_string()
+    } else {
+        parts.join("; ")
+    }
+}
+
+fn section_summary(report: &DoctorReport, section: &DoctorSection) -> String {
+    let issue_count = report
+        .issues
+        .iter()
+        .filter(|issue| issue.section == section.id)
+        .count();
+    let limitation_count = report
+        .limitations
+        .iter()
+        .filter(|limitation| limitation.section == section.id)
+        .count();
+    if issue_count > 0 || limitation_count > 0 {
+        let mut parts = Vec::new();
+        if issue_count > 0 {
+            parts.push(format!("{issue_count} issue{}", plural(issue_count)));
+        }
+        if limitation_count > 0 {
+            parts.push(format!(
+                "{limitation_count} unavailable check{}",
+                plural(limitation_count)
+            ));
+        }
+        return parts.join("; ");
+    }
+
+    match section.id {
+        crate::doctor::model::DoctorSectionId::Environment => format!(
+            "{}; CatOS root {}",
+            empty_as(&report.environment.primary_mode, "unknown mode"),
+            yes_no(report.environment.running_root_is_catos)
+        ),
+        crate::doctor::model::DoctorSectionId::Storage => target_details(report),
+        _ => preferred_evidence_message(section)
+            .unwrap_or_else(|| default_section_summary(section.status).to_string()),
+    }
+}
+
+fn preferred_evidence_message(section: &DoctorSection) -> Option<String> {
+    use crate::doctor::model::DoctorSectionId;
+    let preferred: &[&str] = match section.id {
+        DoctorSectionId::Filesystem => &["FS_CHECK_LABEL", "FS_CHECK_STDOUT"],
+        DoctorSectionId::Mount => &["FSTAB_LOADED", "ROOT_IDENTITY"],
+        DoctorSectionId::Boot => &["PROVIDER_DETECTED", "BOOT_LAYOUT"],
+        DoctorSectionId::SecureBoot => &["FIRMWARE_SECURE_BOOT", "TARGET_POLICY_MARKER"],
+        DoctorSectionId::Recovery => &["RECOVERY_RECORDS"],
+        DoctorSectionId::Environment | DoctorSectionId::Storage => &[],
+    };
+    for code in preferred {
+        if let Some(evidence) = section
+            .evidence
+            .iter()
+            .find(|evidence| evidence.code == *code)
+        {
+            return Some(evidence.message.clone());
+        }
+    }
+    section
+        .evidence
+        .first()
+        .map(|evidence| evidence.message.clone())
+}
+
+fn default_section_summary(status: crate::doctor::model::DoctorSectionStatus) -> &'static str {
+    use crate::doctor::model::DoctorSectionStatus;
+    match status {
+        DoctorSectionStatus::Healthy => "no problems found",
+        DoctorSectionStatus::Degraded => "non-blocking concern",
+        DoctorSectionStatus::Unhealthy => "repair required",
+        DoctorSectionStatus::Critical => "urgent repair required",
+        DoctorSectionStatus::Skipped => "check unavailable",
+        DoctorSectionStatus::NotApplicable => "not applicable",
+        DoctorSectionStatus::Unknown => "not evaluated",
+    }
+}
+
+fn section_status_label(status: crate::doctor::model::DoctorSectionStatus) -> &'static str {
+    use crate::doctor::model::DoctorSectionStatus;
+    match status {
+        DoctorSectionStatus::NotApplicable => "n/a",
+        _ => status.as_str(),
+    }
+}
+
+fn target_kind_label(kind: DoctorTargetKind) -> &'static str {
+    match kind {
+        DoctorTargetKind::RunningRoot => "running",
         DoctorTargetKind::Offline => "offline",
         DoctorTargetKind::None => "none",
     }
 }
 
-fn render_section_human(section: &DoctorSection, out: &mut dyn Write) -> Result<(), Error> {
-    writeln!(out, "{}", section.id.heading()).map_err(io_err)?;
-    writeln!(out, "{}", "-".repeat(section.id.heading().len())).map_err(io_err)?;
-    writeln!(out, "status: {}", section.status.as_str()).map_err(io_err)?;
-    for ev in &section.evidence {
-        writeln!(
-            out,
-            "  * {}: {}",
-            ev.code,
-            ev.message.lines().next().unwrap_or("")
-        )
-        .map_err(io_err)?;
-    }
-    for issue in &section.issues {
-        render_issue_human(issue, out)?;
-    }
-    writeln!(out).map_err(io_err)?;
-    Ok(())
-}
-
-fn render_issue_human(issue: &DoctorIssue, out: &mut dyn Write) -> Result<(), Error> {
-    writeln!(
-        out,
-        "[{}] ({}) {}: {}",
-        severity_label(issue.severity),
-        issue.section.as_str(),
-        issue.code,
-        issue.message
-    )
-    .map_err(io_err)?;
-    for ev in &issue.evidence {
-        writeln!(out, "    evidence: {}: {}", ev.code, ev.message).map_err(io_err)?;
-    }
-    if let Some(rec) = issue.recommendation_code.as_deref() {
-        writeln!(out, "    next:     {rec}").map_err(io_err)?;
-    }
-    Ok(())
-}
-
-fn render_recommendation_human(
-    rec: &DoctorRecommendation,
-    out: &mut dyn Write,
-) -> Result<(), Error> {
-    writeln!(out, "* [{}] {}", rec.code, rec.message).map_err(io_err)?;
-    if let Some(cmd) = rec.command.as_deref() {
-        writeln!(out, "  command: {cmd}").map_err(io_err)?;
-    }
-    if !rec.addresses.is_empty() {
-        writeln!(out, "  addresses: {}", rec.addresses.join(", ")).map_err(io_err)?;
-    }
-    Ok(())
-}
-
-fn severity_label(s: DoctorSeverity) -> &'static str {
-    match s {
+fn severity_label(severity: DoctorSeverity) -> &'static str {
+    match severity {
         DoctorSeverity::Info => "info",
         DoctorSeverity::Warning => "warn",
         DoctorSeverity::Error => "error",
         DoctorSeverity::Critical => "CRIT",
+    }
+}
+
+fn fit(value: &str, width: usize) -> String {
+    let normalized = value.split_whitespace().collect::<Vec<_>>().join(" ");
+    if normalized.chars().count() <= width {
+        return normalized;
+    }
+    if width <= 3 {
+        return normalized.chars().take(width).collect();
+    }
+    let mut truncated: String = normalized.chars().take(width - 3).collect();
+    truncated.push_str("...");
+    truncated
+}
+
+fn plural(count: usize) -> &'static str {
+    if count == 1 {
+        ""
+    } else {
+        "s"
+    }
+}
+
+fn yes_no(value: bool) -> &'static str {
+    if value {
+        "yes"
+    } else {
+        "no"
+    }
+}
+
+fn empty_as<'a>(value: &'a str, fallback: &'a str) -> &'a str {
+    if value.is_empty() {
+        fallback
+    } else {
+        value
     }
 }
 
@@ -284,29 +454,161 @@ mod tests {
     }
 
     #[test]
-    fn human_render_includes_overall_status_target_and_section_headers() {
+    fn human_render_uses_one_compact_row_per_section() {
         let report = sample_report();
         let mut buf = Vec::new();
         render_doctor_human(&report, &mut buf).unwrap();
         let out = String::from_utf8(buf).unwrap();
-        assert!(out.contains("CatOS Doctor"));
-        assert!(out.contains("status:    unhealthy"));
-        assert!(out.contains("Target"));
-        assert!(out.contains("root device:   /dev/nvme0n1p2"));
-        assert!(out.contains("Filesystem"));
-        assert!(out.contains("status: critical"));
-        assert!(out.contains("[CRIT] (filesystem) FS_CORRUPTION_DETECTED"));
+        assert!(out.contains("Item          | Status"), "{out}");
+        assert!(
+            out.contains("Overall       | unhealthy  | complete; target=running"),
+            "{out}"
+        );
+        assert!(
+            !out.contains("Target        |"),
+            "target row duplicates storage: {out}"
+        );
+        assert_eq!(
+            out.matches("/dev/nvme0n1p2").count(),
+            1,
+            "target details duplicated: {out}"
+        );
+        assert!(out.contains("Filesystem    | critical"), "{out}");
+        assert!(out.contains("FS_CORRUPTION_DETECTED"), "{out}");
+        assert!(out.contains("catos-repair fs /dev/nvme0n1p2"), "{out}");
+        assert!(
+            !out.contains("Filesystem\n----------"),
+            "section was expanded vertically: {out}"
+        );
+        assert_eq!(
+            out.matches("FS_CORRUPTION_DETECTED").count(),
+            1,
+            "issue duplicated: {out}"
+        );
     }
 
     #[test]
-    fn human_render_emits_recommendations_and_cleanup() {
-        let report = sample_report();
+    fn healthy_seven_section_summary_fits_without_a_pager() {
+        let mut report = sample_report();
+        report.overall_status = DoctorOverallStatus::Healthy;
+        report.complete = true;
+        report.issues.clear();
+        report.limitations.clear();
+        report.recommendations.clear();
+        report.sections = DoctorSectionId::all()
+            .iter()
+            .map(|id| DoctorSection::new(*id, DoctorSectionStatus::Healthy))
+            .collect();
         let mut buf = Vec::new();
         render_doctor_human(&report, &mut buf).unwrap();
         let out = String::from_utf8(buf).unwrap();
-        assert!(out.contains("Recommended actions"));
-        assert!(out.contains("RUN_CATOS_REPAIR_FS"));
-        assert!(out.contains("command: catos-repair fs"));
+        let lines = out.lines().count();
+        assert!(
+            lines <= 14,
+            "healthy report needs paging ({lines} lines):\n{out}"
+        );
+        assert!(
+            out.lines().all(|line| line.chars().count() <= 80),
+            "line exceeds 80 columns:\n{out}"
+        );
+    }
+
+    #[test]
+    fn domain_summary_prefers_conclusions_over_probe_setup() {
+        let mut report = sample_report();
+        report.issues.clear();
+        report.limitations.clear();
+        report.recommendations.clear();
+        let mut filesystem =
+            DoctorSection::new(DoctorSectionId::Filesystem, DoctorSectionStatus::Healthy);
+        filesystem.evidence.push(Evidence::new(
+            "FS_CHECK",
+            "fs::diagnose",
+            "argv: check --readonly --force /dev/vda",
+        ));
+        filesystem
+            .evidence
+            .push(Evidence::new("FS_CHECK_LABEL", "btrfs", "label: clean"));
+        let mut boot = DoctorSection::new(DoctorSectionId::Boot, DoctorSectionStatus::Healthy);
+        boot.evidence.push(Evidence::new(
+            "PROVIDER_SIGNAL_COUNT",
+            "boot::detect",
+            "1 authoritative provider signal(s) present",
+        ));
+        boot.evidence.push(Evidence::new(
+            "PROVIDER_DETECTED",
+            "boot::detect",
+            "provider=grub method=None",
+        ));
+        report.sections = vec![filesystem, boot];
+        let mut buf = Vec::new();
+        render_doctor_human(&report, &mut buf).unwrap();
+        let out = String::from_utf8(buf).unwrap();
+        assert!(
+            out.contains("Filesystem    | healthy    | label: clean"),
+            "{out}"
+        );
+        assert!(
+            out.contains("Boot          | healthy    | provider=grub method=None"),
+            "{out}"
+        );
+        assert!(!out.contains("argv: check --readonly"), "{out}");
+        assert!(!out.contains("authoritative provider signal"), "{out}");
+    }
+
+    #[test]
+    fn action_commands_are_wrapped_but_never_truncated() {
+        let mut report = sample_report();
+        report.recommendations = vec![DoctorRecommendation::new(
+            "RUN_CATOS_RECOVERY_RESUME",
+            "resume interrupted recovery",
+        )
+        .with_command(
+            "catos-recovery resume --root-device /dev/vda --transaction tx-00000000000000000000000000000004",
+        )];
+        let mut buf = Vec::new();
+        render_doctor_human(&report, &mut buf).unwrap();
+        let out = String::from_utf8(buf).unwrap();
+        assert!(
+            out.contains("catos-recovery resume --root-device /dev/vda"),
+            "{out}"
+        );
+        assert!(
+            out.contains("--transaction tx-00000000000000000000000000000004"),
+            "{out}"
+        );
+        assert!(
+            !out.contains("catos-recovery resume --root-device /dev..."),
+            "{out}"
+        );
+        assert!(out.lines().all(|line| line.chars().count() <= 80), "{out}");
+    }
+
+    #[test]
+    fn namespace_failure_is_a_short_error_not_an_unknown_report() {
+        let mut report = DoctorReport::default();
+        report.sections = DoctorSectionId::all()
+            .iter()
+            .map(|id| DoctorSection::new(*id, DoctorSectionStatus::Unknown))
+            .collect();
+        report.limitations.push(DoctorLimitation::new(
+            DoctorSectionId::Storage,
+            "DOCTOR_NAMESPACE_UNAVAILABLE",
+            "cannot establish private mount namespace: operation not permitted",
+        ));
+        let mut buf = Vec::new();
+        render_doctor_human(&report, &mut buf).unwrap();
+        let out = String::from_utf8(buf).unwrap();
+        assert!(out.contains("Doctor could not start"), "{out}");
+        assert!(out.contains("operation not permitted"), "{out}");
+        assert!(
+            !out.contains("Environment"),
+            "fatal error rendered empty sections: {out}"
+        );
+        assert!(
+            out.lines().count() <= 3,
+            "fatal error is too verbose: {out}"
+        );
     }
 
     #[test]

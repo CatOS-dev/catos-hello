@@ -1,5 +1,5 @@
 use super::util::{fresh_session_root, mount_error_to_top_error};
-use super::Phase2Outcome;
+use super::SystemCommandOutcome;
 use std::path::Path;
 
 use crate::cli::TargetSelection;
@@ -24,7 +24,7 @@ struct TargetInputs {
 pub fn run_target_plan(
     root: &SystemRoot,
     selection: &TargetSelection,
-) -> Result<Phase2Outcome, Error> {
+) -> Result<SystemCommandOutcome, Error> {
     let inputs = prepare_target_inputs(root, selection)?;
     let session_root = fresh_session_root();
     let plan = build_plan(PlanInputs {
@@ -35,7 +35,7 @@ pub fn run_target_plan(
         include_local: false,
     })
     .map_err(mount_error_to_top_error)?;
-    Ok(Phase2Outcome::TargetPlan {
+    Ok(SystemCommandOutcome::TargetPlan {
         plan,
         warnings: inputs.warnings,
     })
@@ -48,7 +48,7 @@ pub fn run_target_plan(
 pub fn run_target_mount(
     root: &SystemRoot,
     selection: &TargetSelection,
-) -> Result<Phase2Outcome, Error> {
+) -> Result<SystemCommandOutcome, Error> {
     let inputs = prepare_target_inputs(root, selection)?;
     let session_root = fresh_session_root();
     let plan = build_plan(PlanInputs {
@@ -89,7 +89,7 @@ pub fn run_target_mount(
                     .into_iter()
                     .map(|message| Warning::new("TARGET_INSPECTION_WARNING", message)),
             );
-            Ok(Phase2Outcome::TargetMount {
+            Ok(SystemCommandOutcome::TargetMount {
                 session: final_snapshot,
                 inspection: Box::new(inspection),
                 cleanup,
@@ -344,7 +344,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(path);
     }
 
-    /// Phase 2 must retain the same openat2 confinement as phase 1. An
+    /// Target mounting must retain the same openat2 confinement as inspection. An
     /// absolute symlink inside the target root is interpreted inside that
     /// root and must never expose the host or an arbitrary outside tree.
     #[test]

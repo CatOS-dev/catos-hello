@@ -1,5 +1,5 @@
-//! System (phase 2) report rendering.
+//! Storage and read-only target-inspection report rendering.
 
-pub mod phase2;
+pub mod report;
 
-pub use phase2::*;
+pub use report::*;

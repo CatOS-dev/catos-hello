@@ -837,7 +837,7 @@ fn write_efivars_possible(fs: &dyn FilesystemProbe, caps: &ProcCaps) -> Capabili
                 Evidence::new(
                     "CAP_SYS_ADMIN_PRESENT",
                     "/proc/self/status CapEff",
-                    "CAP_SYS_ADMIN in effective set; writability not probed (phase 1 is read-only)",
+                    "CAP_SYS_ADMIN is effective; read-only inspection does not test writability",
                 ),
             ],
         ),

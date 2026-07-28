@@ -1,6 +1,6 @@
 use super::target::read_target_fstab;
 use super::util::merge_warnings;
-use super::Phase2Outcome;
+use super::SystemCommandOutcome;
 use std::collections::HashSet;
 
 use crate::error::Error;
@@ -13,7 +13,7 @@ use crate::target::diagnose::system_root::SystemRoot;
 use crate::target::model::StorageReport;
 use crate::target::model::Warning;
 
-pub fn run_storage_scan(root: &SystemRoot) -> Result<Phase2Outcome, Error> {
+pub fn run_storage_scan(root: &SystemRoot) -> Result<SystemCommandOutcome, Error> {
     let fs = RealFilesystem;
     let (devices, mut dev_warnings) = discover_devices(&fs);
     let fstab = match read_target_fstab(root) {
@@ -53,7 +53,7 @@ pub fn run_storage_scan(root: &SystemRoot) -> Result<Phase2Outcome, Error> {
     let mut warnings = merge_warnings(dev_warnings, cand_warnings);
     warnings.append(&mut probed.warnings);
 
-    Ok(Phase2Outcome::StorageScan(StorageReport {
+    Ok(SystemCommandOutcome::StorageScan(StorageReport {
         devices,
         root_candidates,
         esp_candidates,

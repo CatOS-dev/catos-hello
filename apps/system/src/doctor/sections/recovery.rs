@@ -298,13 +298,21 @@ fn inspect_single_record(
             )
             .with_recommendation(recommendation_code::RUN_CATOS_RECOVERY_RESUME),
         );
-        report.recommendations.push(DoctorRecommendation::new(
+        let recommendation = DoctorRecommendation::new(
             recommendation_code::RUN_CATOS_RECOVERY_RESUME,
             format!(
-                "transaction {} is interrupted; catos-recovery resume or revert can complete it",
+                "transaction {} is interrupted; resume or revert can complete it",
                 record.transaction_id
             ),
-        ));
+        );
+        let recommendation = match report.target.root_device.as_deref() {
+            Some(root_device) => recommendation.with_command(format!(
+                "catos-recovery resume --root-device {root_device} --transaction {}",
+                record.transaction_id
+            )),
+            None => recommendation,
+        };
+        report.recommendations.push(recommendation);
     }
 }
 
@@ -389,6 +397,39 @@ mod tests {
             .iter()
             .any(|limitation| limitation.code == "RECOVERY_INSPECT_FAILED"));
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn interrupted_transaction_recommendation_contains_resume_command() {
+        let record = RecoveryRecordView {
+            transaction_id: "tx-00000000000000000000000000000004".into(),
+            state: crate::snapshot::model::TransactionState::Locked,
+            last_error: None,
+            last_cleanup: None,
+        };
+        let mut sections: Vec<(DoctorSectionId, DoctorSection)> = DoctorSectionId::all()
+            .iter()
+            .map(|id| (*id, DoctorSection::new(*id, DoctorSectionStatus::Unknown)))
+            .collect();
+        let mut report = DoctorReport::default();
+        report.target.root_device = Some("/dev/vda".into());
+        let mut status = DoctorSectionStatus::Healthy;
+
+        inspect_single_record(
+            &mut sections,
+            &mut report,
+            DoctorSectionId::Recovery,
+            &record,
+            &mut status,
+        );
+
+        assert_eq!(report.recommendations.len(), 1);
+        assert_eq!(
+            report.recommendations[0].command.as_deref(),
+            Some(
+                "catos-recovery resume --root-device /dev/vda --transaction tx-00000000000000000000000000000004"
+            )
+        );
     }
 
     #[test]

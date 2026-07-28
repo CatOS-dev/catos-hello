@@ -70,7 +70,7 @@ pub fn run(argv: &[String]) -> i32 {
     let opts = match parse_argv(argv) {
         Ok(opts) => opts,
         Err(message) => {
-            eprintln!("catos-update: argument error: {message}");
+            eprintln!("catos-update: {message}");
             return exit_code::ARG_ERROR;
         }
     };
@@ -144,7 +144,7 @@ pub fn run(argv: &[String]) -> i32 {
 pub fn print_help() {
     let version = crate::PROGRAM_VERSION;
     print!(
-        "catos-update {version} - CatOS interactive system updater\n\nUSAGE:\n    catos-update [OPTIONS]\n\nOPTIONS:\n    -c, --check       Print pending updates without applying them.\n    -l, --list        Alias for --check.\n    -d, --devel       Reserved for AUR --devel (currently a no-op).\n    -h, --help        Show this help message and exit.\n    -V, --version     Print program version and exit.\n\nEXIT CODES:\n    0   Updates listed, applied, or system up to date.\n    2   Argument error.\n    4   No privilege elevation command available.\n    5   Could not enumerate or apply updates.\n"
+        "catos-update {version} - CatOS interactive system updater\n\nUSAGE:\n    catos-update [OPTIONS]\n\nOPTIONS:\n    -c, --check       Print pending updates without applying them.\n    -l, --list        Alias for --check.\n    -d, --devel       Reserved for AUR --devel (currently a no-op).\n    -h, --help        Show this help message and exit.\n    -V, --version     Print program version and exit.\n\nEXIT CODES:\n    0   Updates listed, applied, or system up to date.\n    2   An option was not recognised.\n    4   No privilege elevation command available.\n    5   Could not enumerate or apply updates.\n"
     );
 }
 

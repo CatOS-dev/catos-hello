@@ -1,5 +1,5 @@
-//! Output rendering for `catos-repair fs`. Mirrors the phase-2 /
-//! phase-3 split: JSON is a thin serde wrapper around the model;
+//! Output rendering for `catos-repair fs`. JSON is a thin serde wrapper
+//! around the model;
 //! human output is plain ASCII. Both render the SAME
 //! [`FsRepairReport`], so JSON and human output cannot diverge on
 //! the final outcome or the audit trail.
@@ -10,7 +10,7 @@ use crate::error::Error;
 use crate::fs::model::FsRepairReport;
 
 /// Render the repair report as JSON. Uses the same envelope as
-/// phase-2 and phase-3 reports so consumers parse one shape.
+/// other system and recovery reports so consumers parse one shape.
 pub fn render_repair_json(
     report: &FsRepairReport,
     invocation: &str,
@@ -28,9 +28,9 @@ pub fn render_repair_json(
 }
 
 /// Render the repair report as plain ASCII text. No ANSI escapes;
-/// matches the phase-2 human contract.
+/// matches the shared human-report contract.
 pub fn render_repair_human<W: Write>(report: &FsRepairReport, out: &mut W) -> std::io::Result<()> {
-    writeln!(out, "CatOS system backend (repair fs)")?;
+    writeln!(out, "CatOS Filesystem Repair")?;
     writeln!(out, "  program version : {}", crate::PROGRAM_VERSION)?;
     writeln!(out, "  schema version  : {}", crate::SCHEMA_VERSION)?;
     writeln!(out)?;

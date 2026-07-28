@@ -68,7 +68,7 @@ pub fn validate_mounted_filesystem(
         return Err(SnapshotError::new(
             SnapshotErrorKind::UnsupportedMultiDeviceBtrfs,
             format!(
-                "phase 3 supports exactly one btrfs device; target reports {}: {:?}",
+                "snapshot recovery supports exactly one Btrfs device; target reports {}: {:?}",
                 filesystem_devices.len(),
                 filesystem_devices
             ),
@@ -126,7 +126,7 @@ pub fn validate_recovery_id(id: &str) -> Result<(), SnapshotError> {
     Ok(())
 }
 
-/// Phase 3 currently switches roots with an atomic name exchange. A
+/// Snapshot recovery currently switches roots with an atomic name exchange. A
 /// source snapshot nested below the active root would move together
 /// with that root and invalidate its sealed path during the operation.
 pub fn ensure_supported_snapshot_layout(

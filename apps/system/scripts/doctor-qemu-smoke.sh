@@ -556,6 +556,19 @@ if [ "$SCENARIO" = ambiguous ]; then
 else
     run_tty 'y\n'
 fi
+if grep -Fq '/run/catos-system/sessions/' /proc/self/mountinfo; then
+    echo "__DOCTOR_RESIDUAL_MOUNTS__"
+    grep -F '/run/catos-system/sessions/' /proc/self/mountinfo
+else
+    echo "__DOCTOR_NO_RESIDUAL_MOUNTS__"
+fi
+if [ -d /run/catos-system/sessions ] \
+    && find /run/catos-system/sessions -mindepth 1 -print -quit 2>/dev/null | grep -q .; then
+    echo "__DOCTOR_RESIDUAL_SESSION_DIRS__"
+    find /run/catos-system/sessions -mindepth 1 -maxdepth 2 -print
+else
+    echo "__DOCTOR_NO_RESIDUAL_SESSION_DIRS__"
+fi
 sync
 poweroff -f
 GUEST
@@ -643,7 +656,11 @@ prepare_interrupted_fixture() {
 assert_doctor_success() {
     local body=$1 scenario=$2
     assert_contains "$body" "__DOCTOR_RC__=0" "$scenario"
-    assert_contains "$body" "all_clean: true" "$scenario"
+    assert_contains "$body" "Item          | Status" "$scenario"
+    assert_contains "$body" "__DOCTOR_NO_RESIDUAL_MOUNTS__" "$scenario"
+    assert_contains "$body" "__DOCTOR_NO_RESIDUAL_SESSION_DIRS__" "$scenario"
+    assert_not_contains "$body" "__DOCTOR_RESIDUAL_MOUNTS__" "$scenario"
+    assert_not_contains "$body" "__DOCTOR_RESIDUAL_SESSION_DIRS__" "$scenario"
 }
 
 assert_provider() {
@@ -653,12 +670,12 @@ assert_provider() {
     local out=$LAST_LOG
     assert_doctor_success "$out" "$scenario"
     assert_contains "$out" "Selected target: CatOS QEMU Fixture" "$scenario"
-    assert_contains "$out" "root device:   /dev/vda" "$scenario"
-    assert_contains "$out" "root fstype:   btrfs" "$scenario"
-    assert_contains "$out" "root subvol:   /@" "$scenario"
-    assert_contains "$out" "ROOT_UUID: root UUID: $uuid" "$scenario"
-    assert_contains "$out" "FSTAB_LOADED: read" "$scenario"
-    assert_contains "$out" "PROVIDER_DETECTED: provider=$provider" "$scenario"
+    assert_contains "$out" "UUID=$uuid" "$scenario"
+    assert_contains "$out" "Overall       |" "$scenario"
+    assert_contains "$out" "target=offline" "$scenario"
+    assert_contains "$out" "Storage       | healthy    | /dev/vda; btrfs; /@" "$scenario"
+    assert_contains "$out" "Mount layout  | healthy" "$scenario"
+    assert_contains "$out" "Boot          | healthy    | provider=$provider" "$scenario"
     assert_not_contains "$out" "BOOT_ASSET_MISSING" "$scenario"
     assert_not_contains "$out" "STANDARD_SUBVOLUME_MISSING" "$scenario"
 }
@@ -667,7 +684,7 @@ echo "=== scenario: prepare-interrupted-transaction ==="
 prepare_interrupted_fixture
 
 assert_provider provider_grub "$ROOT_GRUB" "$ESP_GRUB" "$UUID_GRUB" grub
-assert_contains "$LAST_LOG" "RECOVERY_RECORDS: no in-flight recovery transactions on target" "healthy"
+assert_contains "$LAST_LOG" "Recovery      | healthy    | no in-flight recovery transactions on target" "healthy"
 
 assert_provider provider_limine "$ROOT_LIMINE" "$ESP_LIMINE" "$UUID_LIMINE" limine
 assert_provider provider_systemd "$ROOT_SYSTEMD" "$ESP_SYSTEMD" "$UUID_SYSTEMD" systemd-boot
@@ -677,21 +694,20 @@ echo "=== scenario: broken-fstab ==="
 run_qemu broken_fstab "$ROOT_BROKEN" "$ESP_GRUB"
 assert_doctor_success "$LAST_LOG" broken_fstab
 assert_contains "$LAST_LOG" "FSTAB_ROOT_SOURCE_MISMATCH" broken_fstab
-assert_contains "$LAST_LOG" "root UUID mismatch (expected $UUID_BROKEN" broken_fstab
+assert_contains "$LAST_LOG" "Mount layout  | unhealthy" broken_fstab
 
 echo "=== scenario: filesystem-corruption ==="
 run_qemu filesystem_corruption "$ROOT_CORRUPT" "$ESP_GRUB"
 assert_doctor_success "$LAST_LOG" filesystem_corruption
 assert_contains "$LAST_LOG" "FS_CORRUPTION_DETECTED" filesystem_corruption
-assert_contains "$LAST_LOG" "Filesystem" filesystem_corruption
-assert_contains "$LAST_LOG" "status: critical" filesystem_corruption
+assert_contains "$LAST_LOG" "Filesystem    | critical" filesystem_corruption
 
 echo "=== scenario: ambiguous-targets ==="
 run_qemu ambiguous "$ROOT_AMBIG_A" "$ESP_GRUB" "$ROOT_AMBIG_B"
 assert_contains "$LAST_LOG" "__NONTTY_RC__=" ambiguous
 non_tty_rc=$(sed -n 's/^__NONTTY_RC__=//p' <<<"$LAST_LOG" | tail -1)
 [[ -n $non_tty_rc && $non_tty_rc != 0 ]] || fail "ambiguous: non-TTY call did not fail"
-assert_contains "$LAST_LOG" "multiple target candidates require an interactive terminal" ambiguous
+assert_contains "$LAST_LOG" "TARGET_AMBIGUOUS" ambiguous
 assert_contains "$LAST_LOG" "  [0] CatOS QEMU Fixture" ambiguous
 assert_contains "$LAST_LOG" "  [1] CatOS QEMU Fixture" ambiguous
 assert_contains "$LAST_LOG" "__DOCTOR_RC__=0" ambiguous
@@ -704,7 +720,7 @@ echo "=== scenario: interrupted-transaction ==="
 run_qemu interrupted_transaction "$ROOT_INTERRUPTED" "$ESP_GRUB"
 assert_doctor_success "$LAST_LOG" interrupted_transaction
 assert_contains "$LAST_LOG" "RECOVERY_TRANSACTION_INTERRUPTED" interrupted_transaction
-assert_contains "$LAST_LOG" "RUN_CATOS_RECOVERY_RESUME" interrupted_transaction
+assert_contains "$LAST_LOG" "catos-recovery resume" interrupted_transaction
 assert_contains "$LAST_LOG" "tx-00000000000000000000000000000004" interrupted_transaction
 
 echo "pass: Doctor QEMU acceptance exercised /bin/catos-doctor, real target selection, provider matrix, corruption, fstab failure, ambiguity, recovery, cleanup and no-write hashes"

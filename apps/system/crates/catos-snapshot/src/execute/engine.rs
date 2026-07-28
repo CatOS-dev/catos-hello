@@ -107,7 +107,7 @@ impl Engine {
     // phase3.rs and main.rs to dereference the box to read
     // `last_error.kind`, `last_error.resume_possible`, etc. — fields
     // the CLI's JSON envelope serialises by value. The cost
-    // (touching the public `Phase3Outcome` enum, the JSON renderer,
+    // (touching the public `RecoveryOutcome` enum, the JSON renderer,
     // and the human formatter) outweighs the silence here.
     #[allow(clippy::result_large_err)]
     pub fn load_for_write(
@@ -325,7 +325,7 @@ impl Engine {
     // unboxed (apart from `drive`, `begin`, `load_for_write`,
     // `load`). Boxing here would change the public API consumed by
     // phase3.rs::run_revert, which surfaces the error via the JSON
-    // envelope `Phase3Outcome`. Boxing would force phase3 to
+    // envelope `RecoveryOutcome`. Boxing would force recovery code to
     // dereference before serialising, and would change the visible
     // signature in any future external consumer of `Engine::revert`.
     // The internal helpers (`drive_inner`, `revert_inner`,
@@ -447,7 +447,7 @@ impl Engine {
     /// the on-disk record is left untouched so `status` cannot
     /// accidentally mutate the transaction. The CLI's `status`
     /// command also mounts the btrfs top-level read-only (see
-    /// `phase3::mount_btrfs_toplevel_ro`), giving a two-layer
+    /// `recovery::mount_btrfs_toplevel_ro`), giving a two-layer
     /// guarantee that status is non-mutating.
     ///
     /// Detects terminal-state drift: if the persisted state is

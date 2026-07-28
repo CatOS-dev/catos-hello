@@ -1,31 +1,31 @@
-//! Output rendering for phase-2 results (StorageReport, MountPlan,
-//! MountSession). Mirrors the phase-1 JSON/human split: JSON is a thin
+//! Output rendering for storage and target-inspection results (StorageReport, MountPlan,
+//! MountSession). JSON is a thin
 //! serde wrapper, human is plain ASCII.
 
 use std::io::Write;
 
 use crate::error::Error;
 use crate::mount::model::{CleanupReport, MountPlan, MountSession};
-use crate::system::Phase2Outcome;
+use crate::system::SystemCommandOutcome;
 use crate::target::model::StorageReport;
 
-/// Render a phase-2 outcome as JSON. Wraps every variant in a top-level
-/// object with the same stable envelope keys as phase-1 reports:
+/// Render a storage or target-inspection outcome as JSON. Wraps every variant in a top-level
+/// object with the same stable envelope keys as inspection reports:
 /// `schemaVersion`, `programVersion`, `invocation`, plus the variant-
 /// specific payload.
-pub fn render_phase2_json(
-    outcome: &Phase2Outcome,
+pub fn render_system_json(
+    outcome: &SystemCommandOutcome,
     invocation: &str,
     target_root: &std::path::Path,
 ) -> Result<String, Error> {
     let body = match outcome {
-        Phase2Outcome::StorageScan(report) => json_envelope(
+        SystemCommandOutcome::StorageScan(report) => json_envelope(
             invocation,
             target_root,
             "storage_scan",
             serde_json::to_value(report).map_err(|e| Error::SerializeFailed(e.to_string()))?,
         ),
-        Phase2Outcome::TargetPlan { plan, warnings } => {
+        SystemCommandOutcome::TargetPlan { plan, warnings } => {
             let mut payload = serde_json::Map::new();
             payload.insert(
                 "plan".into(),
@@ -43,7 +43,7 @@ pub fn render_phase2_json(
                 serde_json::Value::Object(payload),
             )
         }
-        Phase2Outcome::TargetMount {
+        SystemCommandOutcome::TargetMount {
             session,
             inspection,
             cleanup,
@@ -79,9 +79,9 @@ pub fn render_phase2_json(
     serde_json::to_string_pretty(&body).map_err(|e| Error::SerializeFailed(e.to_string()))
 }
 
-/// Render a phase-2 failure using the same stable envelope as successful
+/// Render a storage or target-inspection failure using the same stable envelope as successful
 /// reports. Mount failures remain structured for TUI/GUI consumers.
-pub fn render_phase2_error_json(
+pub fn render_system_error_json(
     error: &Error,
     invocation: &str,
     target_root: &std::path::Path,
@@ -131,21 +131,24 @@ fn json_envelope(
     })
 }
 
-/// Render a phase-2 outcome as plain ASCII text. Each variant has its own
+/// Render a storage or target-inspection outcome as plain ASCII text. Each variant has its own
 /// section layout. Mirrors the human renderer's contract: no ANSI, no
 /// panic on empty input.
-pub fn render_phase2_human<W: Write>(outcome: &Phase2Outcome, out: &mut W) -> std::io::Result<()> {
-    writeln!(out, "CatOS system backend (phase 2, read-only)")?;
+pub fn render_system_human<W: Write>(
+    outcome: &SystemCommandOutcome,
+    out: &mut W,
+) -> std::io::Result<()> {
+    writeln!(out, "CatOS Storage and Target Inspection")?;
     writeln!(out, "  program version : {}", crate::PROGRAM_VERSION)?;
     writeln!(out, "  schema version  : {}", crate::SCHEMA_VERSION)?;
     writeln!(out)?;
     match outcome {
-        Phase2Outcome::StorageScan(report) => render_storage_report(out, report),
-        Phase2Outcome::TargetPlan { plan, warnings } => {
+        SystemCommandOutcome::StorageScan(report) => render_storage_report(out, report),
+        SystemCommandOutcome::TargetPlan { plan, warnings } => {
             render_mount_plan(out, plan)?;
             render_warnings(out, warnings)
         }
-        Phase2Outcome::TargetMount {
+        SystemCommandOutcome::TargetMount {
             session,
             inspection,
             cleanup,
@@ -348,18 +351,18 @@ mod tests {
     use crate::target::model::StorageReport;
 
     #[test]
-    fn human_phase2_output_has_no_ansi_escapes() {
-        let outcome = Phase2Outcome::StorageScan(StorageReport::default());
+    fn human_system_output_has_no_ansi_escapes() {
+        let outcome = SystemCommandOutcome::StorageScan(StorageReport::default());
         let mut buf = Vec::new();
-        render_phase2_human(&outcome, &mut buf).unwrap();
+        render_system_human(&outcome, &mut buf).unwrap();
         let s = String::from_utf8(buf).unwrap();
         assert!(!s.contains('\u{001b}'));
     }
 
     #[test]
-    fn json_phase2_output_includes_envelope_keys() {
-        let outcome = Phase2Outcome::StorageScan(StorageReport::default());
-        let j = render_phase2_json(&outcome, "catos-system", std::path::Path::new("/")).unwrap();
+    fn json_system_output_includes_envelope_keys() {
+        let outcome = SystemCommandOutcome::StorageScan(StorageReport::default());
+        let j = render_system_json(&outcome, "catos-system", std::path::Path::new("/")).unwrap();
         let v: serde_json::Value = serde_json::from_str(&j).unwrap();
         assert_eq!(v["schemaVersion"], 2);
         assert_eq!(v["kind"], "storage_scan");
@@ -378,7 +381,7 @@ mod tests {
             residual_mounts: vec![],
         });
         let json =
-            render_phase2_error_json(&error, "catos-system", std::path::Path::new("/")).unwrap();
+            render_system_error_json(&error, "catos-system", std::path::Path::new("/")).unwrap();
         let value: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(value["kind"], "error");
         assert_eq!(value["error"]["code"], "device_not_found");

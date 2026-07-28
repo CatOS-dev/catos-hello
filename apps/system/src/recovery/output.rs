@@ -1,40 +1,40 @@
-//! Output rendering for phase-3 recovery results (RecoveryListReport,
+//! Output rendering for Btrfs recovery results (RecoveryListReport,
 //! RecoveryInspectReport, RecoveryPlan, TransactionRecord, etc.).
-//! Mirrors the phase-1/phase-2 JSON/human split: JSON is a thin serde
+//! JSON is a thin serde
 //! wrapper, human is plain ASCII.
 
 use std::io::Write;
 
 use crate::error::Error;
 use crate::recovery::model::{RecoveryInspectReport, RecoveryListReport, RecoveryStatusReport};
-use crate::recovery::Phase3Outcome;
+use crate::recovery::RecoveryOutcome;
 use crate::snapshot::model::{RecoveryPlan, SnapshotError, TransactionRecord};
 
-pub fn render_phase3_json(
-    outcome: &Phase3Outcome,
+pub fn render_recovery_json(
+    outcome: &RecoveryOutcome,
     invocation: &str,
     target_root: &std::path::Path,
 ) -> Result<String, Error> {
     let body = match outcome {
-        Phase3Outcome::List(report) => json_envelope(
+        RecoveryOutcome::List(report) => json_envelope(
             invocation,
             target_root,
             "recovery_list",
             serde_json::to_value(report).map_err(|e| Error::SerializeFailed(e.to_string()))?,
         ),
-        Phase3Outcome::Inspect(report) => json_envelope(
+        RecoveryOutcome::Inspect(report) => json_envelope(
             invocation,
             target_root,
             "recovery_inspect",
             serde_json::to_value(report).map_err(|e| Error::SerializeFailed(e.to_string()))?,
         ),
-        Phase3Outcome::Plan(plan) => json_envelope(
+        RecoveryOutcome::Plan(plan) => json_envelope(
             invocation,
             target_root,
             "recovery_plan",
             serde_json::to_value(plan).map_err(|e| Error::SerializeFailed(e.to_string()))?,
         ),
-        Phase3Outcome::Apply {
+        RecoveryOutcome::Apply {
             record,
             final_state,
             cleanup,
@@ -60,13 +60,13 @@ pub fn render_phase3_json(
                 serde_json::Value::Object(payload),
             )
         }
-        Phase3Outcome::Status(report) => json_envelope(
+        RecoveryOutcome::Status(report) => json_envelope(
             invocation,
             target_root,
             "recovery_status",
             serde_json::to_value(report).map_err(|e| Error::SerializeFailed(e.to_string()))?,
         ),
-        Phase3Outcome::Resume {
+        RecoveryOutcome::Resume {
             record,
             final_state,
             cleanup,
@@ -92,7 +92,7 @@ pub fn render_phase3_json(
                 serde_json::Value::Object(payload),
             )
         }
-        Phase3Outcome::Revert {
+        RecoveryOutcome::Revert {
             record,
             final_state,
             cleanup,
@@ -118,7 +118,7 @@ pub fn render_phase3_json(
                 serde_json::Value::Object(payload),
             )
         }
-        Phase3Outcome::Error(error) => json_envelope(
+        RecoveryOutcome::Error(error) => json_envelope(
             invocation,
             target_root,
             "error",
@@ -128,26 +128,29 @@ pub fn render_phase3_json(
     serde_json::to_string_pretty(&body).map_err(|e| Error::SerializeFailed(e.to_string()))
 }
 
-pub fn render_phase3_human<W: Write>(outcome: &Phase3Outcome, out: &mut W) -> std::io::Result<()> {
-    writeln!(out, "CatOS system backend (phase 3, recovery)")?;
+pub fn render_recovery_human<W: Write>(
+    outcome: &RecoveryOutcome,
+    out: &mut W,
+) -> std::io::Result<()> {
+    writeln!(out, "CatOS Btrfs Snapshot Recovery")?;
     writeln!(out, "  program version : {}", crate::PROGRAM_VERSION)?;
     writeln!(out, "  schema version  : {}", crate::SCHEMA_VERSION)?;
     writeln!(out)?;
     match outcome {
-        Phase3Outcome::List(report) => render_list(out, report),
-        Phase3Outcome::Inspect(report) => render_inspect(out, report),
-        Phase3Outcome::Plan(plan) => render_plan(out, plan),
-        Phase3Outcome::Apply {
+        RecoveryOutcome::List(report) => render_list(out, report),
+        RecoveryOutcome::Inspect(report) => render_inspect(out, report),
+        RecoveryOutcome::Plan(plan) => render_plan(out, plan),
+        RecoveryOutcome::Apply {
             record,
             final_state,
             cleanup,
         }
-        | Phase3Outcome::Resume {
+        | RecoveryOutcome::Resume {
             record,
             final_state,
             cleanup,
         }
-        | Phase3Outcome::Revert {
+        | RecoveryOutcome::Revert {
             record,
             final_state,
             cleanup,
@@ -163,8 +166,8 @@ pub fn render_phase3_human<W: Write>(outcome: &Phase3Outcome, out: &mut W) -> st
             }
             Ok(())
         }
-        Phase3Outcome::Status(report) => render_status(out, report),
-        Phase3Outcome::Error(error) => render_error(out, error),
+        RecoveryOutcome::Status(report) => render_status(out, report),
+        RecoveryOutcome::Error(error) => render_error(out, error),
     }
 }
 
@@ -464,8 +467,8 @@ mod tests {
 
     #[test]
     fn json_plan_envelope_carries_schema_and_kind() {
-        let outcome = Phase3Outcome::Plan(sample_plan());
-        let j = render_phase3_json(&outcome, "catos-system", std::path::Path::new("/")).unwrap();
+        let outcome = RecoveryOutcome::Plan(sample_plan());
+        let j = render_recovery_json(&outcome, "catos-system", std::path::Path::new("/")).unwrap();
         let v: serde_json::Value = serde_json::from_str(&j).unwrap();
         assert_eq!(v["schemaVersion"], 2);
         assert_eq!(v["kind"], "recovery_plan");
@@ -481,8 +484,8 @@ mod tests {
             crate::snapshot::model::SnapshotErrorKind::StalePlan,
             "fsid drifted",
         );
-        let outcome = Phase3Outcome::Error(Box::new(error));
-        let j = render_phase3_json(&outcome, "catos-system", std::path::Path::new("/")).unwrap();
+        let outcome = RecoveryOutcome::Error(Box::new(error));
+        let j = render_recovery_json(&outcome, "catos-system", std::path::Path::new("/")).unwrap();
         let v: serde_json::Value = serde_json::from_str(&j).unwrap();
         assert_eq!(v["kind"], "error");
         assert_eq!(v["payload"]["kind"], "stale_plan");
@@ -491,9 +494,9 @@ mod tests {
 
     #[test]
     fn human_plan_output_has_no_ansi_escapes() {
-        let outcome = Phase3Outcome::Plan(sample_plan());
+        let outcome = RecoveryOutcome::Plan(sample_plan());
         let mut buf = Vec::new();
-        render_phase3_human(&outcome, &mut buf).unwrap();
+        render_recovery_human(&outcome, &mut buf).unwrap();
         let s = String::from_utf8(buf).unwrap();
         assert!(!s.contains('\u{001b}'));
         assert!(s.contains("Recovery plan"));
@@ -569,8 +572,8 @@ mod tests {
             revert_confirmation_token: Some("revert-v1:tx-1:abc".into()),
             warnings: vec![],
         };
-        let outcome = Phase3Outcome::Status(Box::new(report));
-        let j = render_phase3_json(&outcome, "catos-system", std::path::Path::new("/")).unwrap();
+        let outcome = RecoveryOutcome::Status(Box::new(report));
+        let j = render_recovery_json(&outcome, "catos-system", std::path::Path::new("/")).unwrap();
         let v: serde_json::Value = serde_json::from_str(&j).unwrap();
         assert_eq!(v["kind"], "recovery_status");
         assert_eq!(v["payload"]["reconciled_state"], "completed");

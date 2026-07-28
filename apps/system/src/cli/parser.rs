@@ -5,14 +5,14 @@ use crate::target::diagnose::system_root::SystemRoot;
 use std::path::{Component, Path, PathBuf};
 
 /// Parse a top-level subcommand, consuming the matching `argv` slots.
-/// Handles both single-word phase-1 commands (`environment`, `capabilities`,
-/// `inspect`) and two-word phase-2 commands (`storage scan`, `target plan`,
+/// Handles single-word inspection commands (`environment`, `capabilities`,
+/// `inspect`) and two-word storage commands (`storage scan`, `target plan`,
 /// `target mount`). Advances `idx` past every consumed token.
 ///
 /// Returns a structured argument error if the leading word is unknown or
 /// if a two-word command is missing its required second word.
 fn parse_command(first: &str, argv: &[String], idx: &mut usize) -> Result<Command, Error> {
-    // Phase-1 single-word commands: consume exactly one token.
+    // Single-word inspection commands consume exactly one token.
     if let Some(c) = Command::parse_name(first) {
         *idx += 1;
         return Ok(c);
@@ -227,7 +227,7 @@ pub fn parse(argv: &[String], default_root: SystemRoot) -> Result<ParseOutcome, 
                 command = Some(parse_command(positional, argv, &mut idx)?);
             }
             // A second positional after we already have the subcommand is an
-            // error (no phase-1 subcommand takes a positional argument).
+            // error (none of these commands accepts another positional argument).
             extra_positional if !extra_positional.starts_with('-') => {
                 return Err(Error::InvalidArgument {
                     message: format!(

@@ -1,4 +1,4 @@
-//! Stage-3 `catos-repair mount` behaviour contract.
+//! `catos-repair mount` behaviour contract.
 //!
 //! These tests pin the spec's must-have non-privileged cases at
 //! three layers:
@@ -28,23 +28,21 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use catos_system::mount::model::{
-    AppliedAction, MountProblem, MountRepairOutcome, MountRepairReport, PlannedFstabEdit,
-    MountTargetIdentity, CATOS_STANDARD_SUBVOLS,
-};
-use catos_system::mount::plan::repair::{apply_edits, FstabEditError};
-use catos_system::repair::mount::{
-    apply_in_memory, build_plan, detect_drift, run_mount_repair_diagnosis,
-};
-use catos_system::mount::diagnose::target::{
-    diagnose, MountPointObservation, MountRepairInputs,
-};
-use catos_system::mount::plan::repair::{
-    validate_directory_creation, validate_mount_point_path, PathObservation, PathRejection,
-};
 use catos_system::mount::diagnose::subvolume::{
     decide_all, history_from_entries, CatosConfirmation, SubvolDecision, SubvolFacts,
     SubvolObservation,
+};
+use catos_system::mount::diagnose::target::{diagnose, MountPointObservation, MountRepairInputs};
+use catos_system::mount::model::{
+    AppliedAction, MountProblem, MountRepairOutcome, MountRepairReport, MountTargetIdentity,
+    PlannedFstabEdit, CATOS_STANDARD_SUBVOLS,
+};
+use catos_system::mount::plan::repair::{apply_edits, FstabEditError};
+use catos_system::mount::plan::repair::{
+    validate_directory_creation, validate_mount_point_path, PathObservation, PathRejection,
+};
+use catos_system::repair::mount::{
+    apply_in_memory, build_plan, detect_drift, run_mount_repair_diagnosis,
 };
 
 // ---------------------------------------------------------------------------
@@ -674,48 +672,54 @@ fn diagnose_matches_run_mount_repair_diagnosis_problems() {
 // ===========================================================================
 
 #[test]
-fn cli_mount_help_exits_zero_and_describes_domain() {
+fn cli_mount_help_exits_zero_and_describes_the_real_command() {
     let out = Command::new(bin_path())
-        .arg("catos-repair")
-        .arg("--help")
+        .args(["repair", "mount", "--help"])
         .output()
         .unwrap();
     let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(out.status.success());
-    // argv[0]=catos-repair is not enough on its own because the
-    // binary falls through to the full parser when argv[0] is
-    // catos-system. We invoke via the catos-repair symlink-style
-    // argv[0] in main, so the help text should be the catos-repair
-    // help. Confirm the mount domain is mentioned.
-    assert!(stdout.contains("mount"));
-    assert!(stdout.contains("fs"));
-    assert!(stdout.contains("boot"));
-}
-
-#[test]
-fn cli_mount_no_aid_runs_and_reports() {
-    // The binary always returns a structured report; the outcome is
-    // environment-dependent. We only assert the CLI shape.
-    let out = Command::new(bin_path()).arg("mount").output().unwrap();
-    let stdout = String::from_utf8_lossy(&out.stdout);
     let stderr = String::from_utf8_lossy(&out.stderr);
-    // When invoked from cargo test, argv[0] is the binary itself
-    // (catos-system), so `mount` is interpreted by the full parser
-    // as an unknown subcommand. We assert the test surfaces *some*
-    // structured output (either the repair report or an arg-error
-    // message) without hanging.
-    let _ = (stdout, stderr);
+    assert!(out.status.success(), "stderr={stderr}");
+    assert!(stdout.contains("catos-repair"));
+    assert!(stdout.contains("repair fstab and the mount layout"));
+    assert!(stdout.contains("--root-device"));
+    assert!(stdout.contains("--root-subvolume"));
+    assert!(stdout.contains("--esp-device"));
 }
 
 #[test]
-fn cli_mount_unknown_flag_rejected_with_arg_error() {
-    // Spawning via the catos-system binary directly: `mount
-    // --bogus` is parsed by the full catos-system parser, which
-    // rejects it. Use the catos-repair symlink pattern via
-    // argv[0]=catos-repair would require running through the
-    // multicall, which the harness exposes via CARGO_BIN_EXE.
-    let out = Command::new(bin_path()).args(["--help"]).output().unwrap();
-    assert!(out.status.success() || out.status.code() == Some(2));
+fn cli_mount_routes_to_the_repair_engine_without_touching_a_target() {
+    let out = Command::new(bin_path())
+        .args([
+            "repair",
+            "mount",
+            "--root-device",
+            "/dev/catos-test-device-that-does-not-exist",
+            "--json",
+        ])
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!stderr.contains("unknown command"), "stderr={stderr}");
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    let report: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap_or_else(|error| {
+        panic!("mount repair did not emit JSON: {error}; stdout={stdout:?}")
+    });
+    assert_eq!(report["kind"], "repair_mount");
+    assert_eq!(report["payload"]["final_outcome"], "ambiguous_target");
+}
+
+#[test]
+fn cli_mount_unknown_flag_is_rejected_in_plain_language() {
+    let out = Command::new(bin_path())
+        .args(["repair", "mount", "--definitely-not-a-flag"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("unknown flag"), "stderr={stderr}");
+    assert!(!stderr.contains("argument error"), "stderr={stderr}");
 }
 
 #[test]
@@ -744,7 +748,11 @@ fn history_from_entries_classifies_correct_and_wrong_subvol() {
         "UUID=root  /data  btrfs  defaults,subvol=/@data  0 0",
     ]
     .into_iter()
-    .map(|l| catos_system::mount::diagnose::fstab::parse_line(l).unwrap().unwrap())
+    .map(|l| {
+        catos_system::mount::diagnose::fstab::parse_line(l)
+            .unwrap()
+            .unwrap()
+    })
     .collect();
     let history = history_from_entries(&entries);
     assert!(history.has_correct_entry("/home"));
@@ -843,9 +851,9 @@ fn topology_fstab(body: &str) -> Vec<catos_system::mount::diagnose::fstab::Fstab
 
 #[test]
 fn detects_all_six_boot_and_esp_layouts() {
+    use catos_system::mount::diagnose::layout::detect_boot_mount_layout;
     use catos_system::mount::model::BootMountLayout;
     use catos_system::target::model::PartitionRole;
-    use catos_system::mount::diagnose::layout::detect_boot_mount_layout;
 
     let root = topology_device(
         "root",

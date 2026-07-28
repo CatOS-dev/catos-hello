@@ -41,7 +41,7 @@ pub enum Error {
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Error::InvalidArgument { message } => write!(f, "argument error: {message}"),
+            Error::InvalidArgument { message } => f.write_str(message),
             Error::InvalidRoot { path, reason } => {
                 write!(f, "invalid target root {path:?}: {reason}")
             }

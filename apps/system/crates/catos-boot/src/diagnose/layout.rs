@@ -92,7 +92,7 @@ pub fn detect_layout(mounted_root: &Path, fstab: &[FstabEntry]) -> BootLayout {
     }
 }
 
-/// Derive the phase-3 boot gate from metadata observed through a
+/// Derive the snapshot-recovery boot gate from metadata observed through a
 /// read-only target mount. The check is deliberately conservative: a
 /// root-only exchange is supported only when every observed boot
 /// resource lives inside the root subvolume.
@@ -115,7 +115,7 @@ pub fn evaluate_readonly_consistency(layout: &BootLayout) -> BootConsistencyRepo
         }
         if external_esp {
             reasons.push(
-                "the ESP is outside the root subvolume and phase 3 performs no ESP writes".into(),
+                "the ESP is outside the root subvolume and snapshot recovery performs no ESP writes".into(),
             );
         }
         (BootConsistencyStatus::Unsupported, false)

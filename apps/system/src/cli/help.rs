@@ -1,104 +1,64 @@
-use crate::error::exit_code;
-
 pub fn help_text() -> String {
     format!(
         "\
-catos-system {version} - CatOS mount and boot recovery backend
+catos-system {version} - CatOS system maintenance
 
 USAGE:
-    catos-system <SUBCOMMAND> [OPTIONS]
+    catos-system
+    catos-system <COMMAND> [OPTIONS]
+    catos-system help [COMMAND]
 
-FOUNDATION SUBCOMMANDS (read-only environment + target inspection):
-    environment   Print detected runtime environment facts.
-    capabilities  Print detected capabilities (read-only).
-    inspect       Print combined runtime + capabilities + target inspection.
-
-SAFE-MOUNT SUBCOMMANDS (read-only discovery + temporary target mount):
-    storage scan  Walk sysfs + blkid + mountinfo; emit a StorageReport.
-                  Pure read. No mounts, no writes.
-    target plan   Read --root's /etc/fstab + discover devices; emit a
-                  MountPlan WITHOUT executing any mount.
-    target mount  Same as 'target plan' then execute the plan in a private
-                  mount namespace (read-only mounts only).
-
-SNAPSHOT-RECOVERY SUBCOMMANDS (transactional Btrfs root recovery):
-    recovery list     List existing transactions on the configured root.
-    recovery inspect  Read-only: show filesystem + current-root + snapshot
-                      identity and the source-snapshot boot layout.
-    recovery plan     Read-only: emit an immutable RecoveryPlan bound to a
-                      plan id and confirmation token. Does NOT write.
-    recovery apply    Execute the plan: mount the btrfs toplevel rw, run the
-                      state machine, swap roots via renameat2(RENAME_EXCHANGE).
-                      Does NOT touch the bootloader or the ESP. Requires
-                      --plan-id and --confirm. Must run as root.
-    recovery status   Read the transaction record, reconcile with disk facts,
-                      emit a RecoveryStatusReport.
-    recovery resume   Continue an in-flight transaction from its last
-                      persisted state. Idempotent. Must run as root.
-    recovery revert   Swap the roots back to the pre-recovery state.
-                      Requires --confirm. Must run as root.
+COMMANDS:
+    doctor      Check the installed system and explain detected problems.
+    chroot      Find an installed CatOS system and open a maintenance shell.
+    repair      Repair a filesystem, mount configuration, or boot setup.
+    recovery    Recover a Btrfs system from a snapshot or resume a transaction.
+    update      Check for updates and update the running system.
+    advanced    Low-level read-only inspection and target-mount tools.
+    help        Show help for one command.
 
 OPTIONS:
-    --root PATH   Inspect a different target root (default: /).
-                  PATH must be an absolute path to an existing directory.
-    --root-device /dev/...
-                  Explicit root block device for an unmounted target.
-    --root-subvolume PATH
-                  Explicit Btrfs root subvolume (requires --root-device).
-    --esp-device /dev/...
-                  Override the EFI System Partition for the target plan.
-    --snapshot-subvolume PATH
-                  Explicit source readonly snapshot (phase 3 inspect/plan).
-    --plan-id <id>
-                  Plan id (phase 3 apply).
-    --confirm <token>
-                  Confirmation token bound to the plan (phase 3 apply, revert).
-    --transaction <id>
-                  Transaction id (phase 3 status, resume, revert).
-    --json        Emit a stable JSON report on stdout instead of human text.
-    -h, --help    Show this help message and exit.
-    -V, --version Print program version and exit.
+    -h, --help       Show this help message.
+    -V, --version    Print the program version.
 
-EXIT CODES:
-    {ok}   success
-    {arg}   argument error
-    {root} target root invalid (does not exist, not a directory, etc.)
-    {perm} permission denied reading a critical path
-    {probe} environment probe could not produce a report
-    {ser}  JSON serialisation failed
+Run without a command to open the interactive maintenance menu.
 
-NOTES:
-    * Phases 1 and 2 are read-only with respect to the target device:
-      environment/capabilities/inspection probes never mount, and
-      'target mount' uses read-only filesystem-specific safety options
-      (ext4 noload, xfs norecovery, btrfs rescue=nologreplay, ...) so
-      journal replay and superblock updates are suppressed.
-    * In the current implementation, recovery apply/resume/revert is the
-      only target write path. The writes are bounded to the
-      btrfs top-level, transactional, crash-resumable, and require
-      --plan-id + --confirm (--transaction + --confirm for revert).
-      Snapshot recovery never touches the ESP, the bootloader, /boot,
-      initramfs images, or firmware entries.
-    * 'target mount' enters a private mount namespace (CLONE_NEWNS) and
-      flips / to MS_REC|MS_PRIVATE so its mounts do NOT propagate to
-      the host. Pre-existing mounts are never unmounted.
-    * Phase 2 mounts are read-only with filesystem-specific safety options
-      (ext4 noload, xfs norecovery, btrfs rescue=nologreplay, etc.) so journal replay
-      and superblock updates are suppressed.
-    * Public entry points share this binary:
-      catos-doctor  runs the diagnosis with no arguments;
-      catos-recovery handles Btrfs snapshot recovery;
-      catos-repair is the fs/mount/boot repair entry point;
-      catos-update is retained as a separate entry point.
-    * catos-doctor has no inspect or preflight subcommands.
+The same functions are also installed as catos-doctor, catos-chroot,
+catos-repair, catos-recovery, and catos-update.
 ",
         version = crate::PROGRAM_VERSION,
-        ok = exit_code::SUCCESS,
-        arg = exit_code::ARG_ERROR,
-        root = exit_code::INVALID_ROOT,
-        perm = exit_code::PERMISSION_DENIED,
-        probe = exit_code::PROBE_FAILED,
-        ser = exit_code::SERIALIZE_FAILED,
+    )
+}
+
+pub fn advanced_help_text() -> String {
+    format!(
+        "\
+catos-system {version} - advanced inspection tools
+
+USAGE:
+    catos-system advanced <COMMAND> [OPTIONS]
+
+COMMANDS:
+    inspect          Show runtime, capability, and target information.
+    environment      Show runtime-environment information.
+    capabilities     Show available maintenance capabilities.
+    storage scan     Scan block devices and possible CatOS targets.
+    target plan      Build a read-only target mount plan.
+    target mount     Mount and inspect a target read-only, then clean it up.
+
+OPTIONS:
+    --root PATH                  Inspect a mounted target root instead of /.
+    --root-device /dev/...       Select an unmounted root device.
+    --root-subvolume PATH        Select its Btrfs root subvolume.
+    --esp-device /dev/...        Select the EFI System Partition.
+    --json                       Emit machine-readable JSON.
+    -h, --help                   Show this help message.
+
+These commands are intended for diagnosis and automation. Normal recovery
+work should start from `catos-system`, `catos-system doctor`, or
+`catos-system chroot`.
+",
+        version = crate::PROGRAM_VERSION,
     )
 }
 

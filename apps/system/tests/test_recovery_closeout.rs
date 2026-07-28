@@ -1,6 +1,6 @@
-//! Phase-3 closeout regression tests.
+//! Recovery closeout regression tests.
 //!
-//! Each test below pins a defect called out by the phase-3 closeout
+//! Each test below pins a defect called out by the recovery closeout
 //! brief. They are written BEFORE the implementation fixes so a
 //! passing run after the fix is the evidence the defect is gone,
 //! not a tautology.
@@ -10,8 +10,8 @@
 //! ### `--esp-device` contract
 //!
 //! A script that learned `--esp-device /dev/nvme0n1p1` from the
-//! phase-2 `target` command will pass it to `recovery apply`
-//! expecting ESP reconciliation. Phase 3 does NOT touch the ESP; if
+//! read-only `target` command will pass it to `recovery apply`
+//! expecting ESP reconciliation. Recovery does NOT touch the ESP; if
 //! the flag were silently ignored, the operator would boot into a
 //! recovery that advertised ESP maintenance and shipped a system
 //! whose bootloader resources disagreed with the new root. The
@@ -105,10 +105,10 @@ fn minimal_plan_payload() -> serde_json::Value {
 // A. --esp-device rejection contract
 // ===========================================================================
 //
-// Failure mode: every phase-3 subcommand silently accepts
+// Failure mode: every recovery subcommand silently accepts
 // `--esp-device`. inspect/plan never read it; apply reads it once
 // (`let _ = selection.esp_device;`) and then ignores it. A wrapper
-// script that builds on the phase-2 contract (`target plan
+// script that builds on the target-plan contract (`target plan
 // --esp-device ...`) has no way to learn that recovery will not
 // maintain the ESP until it is far too late.
 //
@@ -238,7 +238,7 @@ fn recovery_apply_rejects_explicit_esp_before_persistent_write() {
 }
 
 #[test]
-fn every_phase3_subcommand_rejects_explicit_esp() {
+fn every_recovery_subcommand_rejects_explicit_esp() {
     let cases: &[&[&str]] = &[
         &[
             "recovery",
@@ -471,14 +471,14 @@ fn session_directory_error_kinds_have_distinct_stable_codes() {
 // behind a success status, defeating the whole point of the
 // explicit cleanup contract.
 
-/// Guards: `Phase3Outcome::Apply` carrying a Completed state but a
+/// Guards: `RecoveryOutcome::Apply` carrying a Completed state but a
 /// `last_cleanup` whose `all_clean` is false MUST surface a
 /// non-zero exit. CI/CD pipelines that gate on `$?` would
 /// otherwise ship a recovery whose residual mount leaks into the
 /// next boot.
 #[test]
 fn exit_code_for_completed_apply_with_dirty_cleanup_is_nonzero() {
-    use catos_system::recovery::{exit_code_for, Phase3Outcome};
+    use catos_system::recovery::{exit_code_for, RecoveryOutcome};
     let record = sample_record_with_cleanup(Some(CleanupSummary {
         unmounted: Vec::new(),
         residual: vec![
@@ -493,7 +493,7 @@ fn exit_code_for_completed_apply_with_dirty_cleanup_is_nonzero() {
         ],
         all_clean: false,
     };
-    let outcome = Phase3Outcome::Apply {
+    let outcome = RecoveryOutcome::Apply {
         record,
         final_state: TransactionState::Completed,
         cleanup: dirty_cleanup,
@@ -510,14 +510,14 @@ fn exit_code_for_completed_apply_with_dirty_cleanup_is_nonzero() {
 /// non-zero, otherwise a half-reverted system would look healthy.
 #[test]
 fn exit_code_for_reverted_with_dirty_cleanup_is_nonzero() {
-    use catos_system::recovery::{exit_code_for, Phase3Outcome};
+    use catos_system::recovery::{exit_code_for, RecoveryOutcome};
     let dirty_cleanup = CleanupSummary {
         unmounted: Vec::new(),
         residual: vec!["session directory cleanup: residual mount".into()],
         all_clean: false,
     };
     let record = sample_record_with_cleanup(Some(dirty_cleanup.clone()));
-    let outcome = Phase3Outcome::Revert {
+    let outcome = RecoveryOutcome::Revert {
         record,
         final_state: TransactionState::Reverted,
         cleanup: dirty_cleanup,
@@ -531,14 +531,14 @@ fn exit_code_for_reverted_with_dirty_cleanup_is_nonzero() {
 /// always-non-zero, breaking the contract for healthy recoveries.
 #[test]
 fn exit_code_for_completed_apply_with_clean_cleanup_is_success() {
-    use catos_system::recovery::{exit_code_for, Phase3Outcome};
+    use catos_system::recovery::{exit_code_for, RecoveryOutcome};
     let clean_cleanup = CleanupSummary {
         unmounted: vec!["/run/catos-system/sessions/recovery-rw-1234".into()],
         residual: Vec::new(),
         all_clean: true,
     };
     let record = sample_record_with_cleanup(Some(clean_cleanup.clone()));
-    let outcome = Phase3Outcome::Apply {
+    let outcome = RecoveryOutcome::Apply {
         record,
         final_state: TransactionState::Completed,
         cleanup: clean_cleanup,
@@ -702,7 +702,7 @@ fn attach_cleanup_does_not_clear_last_error() {
 // Live attack tests against `/run/catos-system/sessions/` require
 // root and a private mount namespace; those scenarios run in the
 // QEMU recovery smoke test. At unit level we lock the contract of
-// the shared `secure_dir` helpers so phase 3 cannot regress to a
+// the shared `secure_dir` helpers so recovery cannot regress to a
 // weaker local copy.
 
 /// Guards: two near-simultaneous invocations of the same session
@@ -791,7 +791,7 @@ fn secure_dir_remove_session_dir_refuses_symlink() {
 // a new `last_cleanup` value to the durable transaction record. Mutating
 // `engine.record_mut().last_cleanup = Some(...)` updates the in-memory
 // record only — it does NOT touch the on-disk state file. The pre-fix
-// phase-3 orchestrator relied on exactly that non-persistent mutation
+// recovery orchestrator relied on exactly that non-persistent mutation
 // to "restamp" the record after the rw mount session was torn down,
 // leaving the on-disk record stuck on the pre-teardown placeholder.
 // The fix removes that pattern from the orchestrator and adds a

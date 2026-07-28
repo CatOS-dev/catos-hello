@@ -2,7 +2,7 @@ use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use catos_system::boot::model::BootLayout;
-use catos_system::recovery::{exit_code_for, Phase3Outcome};
+use catos_system::recovery::{exit_code_for, RecoveryOutcome};
 use catos_system::snapshot::execute::engine::{Engine, EngineOptions};
 use catos_system::snapshot::model::{
     BtrfsFilesystemIdentity, BtrfsSubvolumeIdentity, CompletedStep, DiskFacts, FstabRootDefinition,
@@ -160,7 +160,7 @@ fn failed_recoverable_resumes_from_the_last_safe_checkpoint() {
 #[test]
 fn resume_cannot_exit_success_with_a_failure_state() {
     let record = record(TransactionState::FailedRecoverable);
-    let outcome = Phase3Outcome::Resume {
+    let outcome = RecoveryOutcome::Resume {
         record,
         final_state: TransactionState::FailedRecoverable,
         cleanup: catos_system::snapshot::model::CleanupSummary {

@@ -10,9 +10,10 @@
 
 use std::env;
 use std::fs;
+use std::io::Write;
 use std::os::unix::fs::symlink;
 use std::path::PathBuf;
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 fn bin_path() -> PathBuf {
     // Injected by cargo for the `catos-system` binary target.
@@ -86,17 +87,17 @@ fn each_symlink_is_recognised_in_help_output() {
 
 #[test]
 fn core_probe_results_are_identical_across_entry_points() {
-    // Stage-1 routing change: `catos-recovery` no longer inherits the
+    // Public routing change: `catos-recovery` no longer inherits the
     // `catos-system inspect` subcommand. The public recovery surface is
     // `catos-recovery <SUB>` (list/inspect/plan/apply/status/resume/
     // revert), and `catos-recovery inspect` is now the RECOVERY inspect
-    // subcommand, not the phase-1 inspect. The original "identical
+    // subcommand, not the low-level inspect. The original "identical
     // report" guarantee was a property of the old inherited-surface
     // design that the new contract intentionally removes (see the
     // user-facing spec: "公开接口去掉重复的 `recovery` 层").
     //
     // The property this test re-pins under the new contract:
-    //   * `catos-system inspect` still produces the canonical phase-1
+    //   * `catos-system inspect` still produces the canonical inspection
     //     report (unchanged, schema-stable).
     //   * The recovery engine's `inspect` is reachable through BOTH the
     //     `catos-system recovery inspect` canonical form and the new
@@ -198,43 +199,23 @@ fn single_physical_binary_backs_all_entry_points() {
 }
 
 #[test]
-fn doctor_without_arguments_outputs_diagnosis() {
+fn doctor_without_arguments_requires_privilege_before_diagnosis() {
+    if unsafe { libc::geteuid() } == 0 {
+        return;
+    }
     let bin = bin_path();
     let tmp = TempDir::new("catos-doctor-no-args").unwrap();
     let link = tmp.path.join("catos-doctor");
     symlink(&bin, &link).unwrap();
 
     let output = Command::new(&link).output().expect("spawn doctor");
-    assert!(!output.status.success());
-    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(output.status.code(), Some(4));
+    assert!(output.stdout.is_empty());
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("no diagnosable CatOS system")
-            || stdout.contains("DOCTOR_NAMESPACE_UNAVAILABLE"),
-        "unexpected Doctor infrastructure failure: stdout={stdout:?} stderr={stderr:?}"
+        stderr.contains("administrator privileges are required"),
+        "stderr={stderr:?}"
     );
-    let stdout = String::from_utf8(output.stdout).unwrap();
-    // Stage-5 Doctor now produces an aggregated report whose
-    // canonical sections are Environment, Storage, Filesystem, Mount,
-    // Boot, Secure Boot, Recovery. The previous phase-1-only
-    // "Runtime / Capabilities / Target" headings are intentionally
-    // gone.
-    assert!(stdout.contains("CatOS Doctor"));
-    assert!(stdout.contains("Overall status"));
-    for section in [
-        "Environment",
-        "Storage",
-        "Filesystem",
-        "Mount layout",
-        "Boot",
-        "Secure Boot",
-        "Recovery",
-    ] {
-        assert!(
-            stdout.contains(section),
-            "doctor output missing section {section:?}: {stdout}"
-        );
-    }
 }
 
 #[test]
@@ -282,7 +263,7 @@ fn unknown_argv0_falls_back_to_canonical_name() {
 }
 
 // ===========================================================================
-// Phase-1 stage-1: invocation-aware routing contract
+// Invocation-aware routing contract
 // ===========================================================================
 //
 // Each public entry point owns a distinct dispatch surface. These tests
@@ -296,7 +277,7 @@ fn unknown_argv0_falls_back_to_canonical_name() {
 //     `inspect`, `recovery`, `preflight`, `apply`, ...) are rejected.
 //   * `catos-update` is recognised (no crash, prints help/version) but
 //     does NOT inherit any `catos-system` subcommand. Calling
-//     `catos-update inspect` must not run the phase-1 inspector.
+//     `catos-update inspect` must not run the low-level inspector.
 //
 // `catos-doctor`'s argumentless behavior is already pinned by the tests
 // above; these additions do not regress it.
@@ -407,36 +388,133 @@ fn recovery_subcommands_route_directly() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn repair_without_args_rejects_and_lists_three_domains() {
-    // `catos-repair` (no args) MUST be rejected with ARG_ERROR (2). The
-    // usage message MUST name the three domains (fs, mount, boot) so an
-    // operator can correct the invocation. This is real dispatch:
-    // routing enters the repair handler, NOT the generic parser.
+fn aggregate_menu_reaches_repair_target_selection() {
+    let bin = bin_path();
+    let mut child = Command::new(&bin)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn catos-system");
+    child
+        .stdin
+        .take()
+        .expect("piped stdin")
+        .write_all(b"3\n2\n0\n0\n")
+        .expect("write menu input");
+    let output = child.wait_with_output().expect("wait for catos-system");
+    assert!(
+        output.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("CatOS System Tools"), "stdout={stdout}");
+    assert!(stdout.contains("Repair Target"), "stdout={stdout}");
+    assert!(
+        stdout.contains("Choose a detected CatOS installation"),
+        "stdout={stdout}"
+    );
+}
+
+#[test]
+fn repair_menu_requires_target_selection_before_execution() {
+    let bin = bin_path();
+    let tmp = TempDir::new("catos-repair-target-menu").unwrap();
+    let link = link_to(&bin, &tmp, "catos-repair");
+    let mut child = Command::new(&link)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn catos-repair");
+    child
+        .stdin
+        .take()
+        .expect("piped stdin")
+        .write_all(b"2\n0\n")
+        .expect("write menu input");
+    let output = child.wait_with_output().expect("wait for catos-repair");
+    assert!(
+        output.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("Repair Target"), "stdout={stdout}");
+    assert!(
+        stdout.contains("Choose a detected CatOS installation"),
+        "stdout={stdout}"
+    );
+    assert!(
+        stdout.contains("Enter a root device manually"),
+        "stdout={stdout}"
+    );
+}
+
+#[test]
+fn recovery_menu_requires_target_selection_before_execution() {
+    let bin = bin_path();
+    let tmp = TempDir::new("catos-recovery-target-menu").unwrap();
+    let link = link_to(&bin, &tmp, "catos-recovery");
+    let mut child = Command::new(&link)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn catos-recovery");
+    child
+        .stdin
+        .take()
+        .expect("piped stdin")
+        .write_all(b"1\n0\n")
+        .expect("write menu input");
+    let output = child.wait_with_output().expect("wait for catos-recovery");
+    assert!(
+        output.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("Recovery Target"), "stdout={stdout}");
+    assert!(
+        stdout.contains("Choose a detected CatOS installation"),
+        "stdout={stdout}"
+    );
+    assert!(
+        stdout.contains("Enter a root device manually"),
+        "stdout={stdout}"
+    );
+}
+
+#[test]
+fn repair_without_args_opens_an_interactive_menu() {
     let bin = bin_path();
     let tmp = TempDir::new("catos-repair-no-args").unwrap();
     let link = link_to(&bin, &tmp, "catos-repair");
-    let (ok, code, _stdout, stderr) = run_via(&link, &[]);
-    assert!(!ok);
-    assert_eq!(code, 2, "stderr={stderr}");
-    for domain in ["fs", "mount", "boot"] {
+    let (ok, code, stdout, stderr) = run_via(&link, &[]);
+    assert!(ok, "exit {code}: {stderr}");
+    assert_eq!(code, 0);
+    assert!(stdout.contains("Repair"), "stdout={stdout}");
+    for action in ["filesystem", "mount layout", "boot setup"] {
         assert!(
-            stderr.contains(domain),
-            "no-args usage must mention domain {domain}: {stderr}"
+            stdout.to_ascii_lowercase().contains(action),
+            "repair menu must mention {action}: {stdout}"
         );
     }
 }
 
 #[test]
 fn repair_domains_route_appropriately() {
-    // After stage 4:
-    //   * `catos-repair fs` is implemented (stage 2). With no
+    // Current repair behavior:
+    //   * `catos-repair fs` is implemented. With no
     //     devices and no explicit selection it refuses with
     //     ARG_ERROR (ambiguous target).
-    //   * `catos-repair mount` is implemented (stage 3). It builds
+    //   * `catos-repair mount` is implemented. It builds
     //     a structured report and may exit 0 (clean / partially
     //     repaired) or non-zero depending on the host. It MUST NOT
     //     print "not implemented".
-    //   * `catos-repair boot` is implemented (stage 4). It detects
+    //   * `catos-repair boot` is implemented. It detects
     //     the target's bootloader provider from the target's own
     //     configuration; without a verified target it refuses with
     //     a structured report (ARG_ERROR for ambiguous_target) and
@@ -449,7 +527,7 @@ fn repair_domains_route_appropriately() {
     let _ = fs_ok;
     assert!(
         !fs_stderr.to_lowercase().contains("not implemented"),
-        "fs must be implemented in stage 2; stderr={fs_stderr}"
+        "fs must be implemented; stderr={fs_stderr}"
     );
 
     let (mount_ok, _mount_code, _mount_stdout, mount_stderr) = run_via(&link, &["mount"]);
@@ -458,7 +536,7 @@ fn repair_domains_route_appropriately() {
         !mount_stderr
             .to_lowercase()
             .contains("not implemented in this stage"),
-        "mount must be implemented in stage 3; stderr={mount_stderr}"
+        "mount must be implemented; stderr={mount_stderr}"
     );
 
     let (boot_ok, _boot_code, _boot_stdout, boot_stderr) = run_via(&link, &["boot"]);
@@ -466,7 +544,7 @@ fn repair_domains_route_appropriately() {
         !boot_stderr
             .to_lowercase()
             .contains("not implemented in this stage"),
-        "boot must be implemented in stage 4; stderr={boot_stderr}"
+        "boot must be implemented; stderr={boot_stderr}"
     );
     // Without a verified target, boot repair refuses — never exits 0
     // on a host without a uniquely identified CatOS root.
@@ -543,7 +621,7 @@ fn update_help_and_version_are_accepted() {
 fn update_does_not_inherit_catos_system_commands() {
     // `catos-update` is recognised as a distinct entry point and MUST
     // NOT expose any `catos-system` subcommand. Each inherited name
-    // must exit ARG_ERROR (2) and must NOT produce the phase-1 report.
+    // must exit ARG_ERROR (2) and must NOT produce the inspection report.
     // Without this guard, `catos-update inspect --json` would silently
     // run the diagnostics under a different invocation name.
     let bin = bin_path();
@@ -566,14 +644,14 @@ fn update_does_not_inherit_catos_system_commands() {
             code, 2,
             "catos-update {sub} must exit ARG_ERROR; stderr={stderr}"
         );
-        // The stdout must NOT be a phase-1 inspection report. If it
+        // The stdout must NOT be a low-level inspection report. If it
         // were, the JSON would contain `runtime`/`capabilities` keys.
         if !stdout.trim().is_empty() {
             let parsed: Result<serde_json::Value, _> = serde_json::from_str(stdout.trim());
             if let Ok(value) = parsed {
                 assert!(
                     value.get("runtime").is_none() && value.get("capabilities").is_none(),
-                    "catos-update {sub} produced a phase-1 report: {value}"
+                    "catos-update {sub} produced a inspection report: {value}"
                 );
             }
         }
@@ -593,30 +671,15 @@ fn update_does_not_inherit_catos_system_commands() {
 
 #[test]
 fn doctor_remains_argumentless_after_routing_changes() {
-    // Pins the doctor contract so future refactors do not regress it.
-    // Doctor runs the diagnosis with no args; any functional argument
-    // is rejected with ARG_ERROR (2). Stage-5 Doctor emits an
-    // aggregated report whose canonical sections include Environment,
-    // Storage, Filesystem, Mount layout, Boot, Secure Boot, Recovery.
     let bin = bin_path();
     let tmp = TempDir::new("catos-doctor-routing-regression").unwrap();
     let link = link_to(&bin, &tmp, "catos-doctor");
-    let (ok_no_args, code_no_args, stdout, _) = run_via(&link, &[]);
-    assert!(!ok_no_args);
-    assert_eq!(code_no_args, 5);
-    for section in [
-        "Environment",
-        "Storage",
-        "Filesystem",
-        "Mount layout",
-        "Boot",
-        "Secure Boot",
-        "Recovery",
-    ] {
-        assert!(
-            stdout.contains(section),
-            "doctor output missing {section}: {stdout}"
-        );
+    if unsafe { libc::geteuid() } != 0 {
+        let (ok_no_args, code_no_args, stdout, stderr) = run_via(&link, &[]);
+        assert!(!ok_no_args);
+        assert_eq!(code_no_args, 4);
+        assert!(stdout.is_empty());
+        assert!(stderr.contains("administrator privileges are required"));
     }
     for forbidden in [
         "inspect",
@@ -689,11 +752,35 @@ fn chroot_does_not_inherit_catos_system_commands() {
     let bin = bin_path();
     let tmp = TempDir::new("catos-chroot-no-inherit").unwrap();
     let link = link_to(&bin, &tmp, "catos-chroot");
-    for sub in ["inspect", "environment", "capabilities", "storage", "target", "recovery"] {
+    for sub in [
+        "inspect",
+        "environment",
+        "capabilities",
+        "storage",
+        "target",
+        "recovery",
+    ] {
         let (ok, code, _stdout, stderr) = run_via(&link, &[sub]);
-        assert!(!ok, "catos-chroot {sub} unexpectedly ran a catos-system command");
-        assert_eq!(code, 2, "catos-chroot {sub} must exit ARG_ERROR; stderr={stderr}");
+        assert!(
+            !ok,
+            "catos-chroot {sub} unexpectedly ran a catos-system command"
+        );
+        assert_eq!(
+            code, 2,
+            "catos-chroot {sub} must exit ARG_ERROR; stderr={stderr}"
+        );
     }
+}
+
+#[test]
+fn chroot_rejects_the_removed_non_root_bypass() {
+    let bin = bin_path();
+    let tmp = TempDir::new("catos-chroot-no-root-bypass").unwrap();
+    let link = link_to(&bin, &tmp, "catos-chroot");
+    let (ok, code, _stdout, stderr) = run_via(&link, &["--skip-root-check"]);
+    assert!(!ok);
+    assert_eq!(code, 2, "stderr={stderr}");
+    assert!(stderr.contains("unknown option"), "stderr={stderr}");
 }
 
 #[test]
@@ -719,7 +806,6 @@ fn chroot_help_lists_documented_flags() {
     let (ok, _code, stdout, _stderr) = run_via(&link, &["--help"]);
     assert!(ok);
     for flag in [
-        "--skip-root-check",
         "--no-auto-mount",
         "--no-systemd-chroot",
         "--show-btrfs-dot-snapshots",
@@ -728,5 +814,33 @@ fn chroot_help_lists_documented_flags() {
             stdout.contains(flag),
             "catos-chroot --help missing {flag}: {stdout}"
         );
+    }
+    assert!(
+        !stdout.contains("--skip-root-check"),
+        "testing-only privilege bypass must not be advertised: {stdout}"
+    );
+}
+
+#[test]
+fn public_entry_points_report_usage_problems_in_plain_language() {
+    let bin = bin_path();
+    let tmp = TempDir::new("catos-plain-usage-errors").unwrap();
+    let cases: &[(&str, &[&str])] = &[
+        ("catos-system", &["unknown-command"]),
+        ("catos-doctor", &["unexpected"]),
+        ("catos-chroot", &["--unknown"]),
+        ("catos-repair", &["unknown-domain"]),
+        ("catos-recovery", &["unknown-command"]),
+        ("catos-update", &["--unknown"]),
+    ];
+    for (name, args) in cases {
+        let link = link_to(&bin, &tmp, name);
+        let (_, code, _, stderr) = run_via(&link, args);
+        assert_eq!(code, 2, "{name} {args:?}: stderr={stderr:?}");
+        assert!(
+            !stderr.to_ascii_lowercase().contains("argument error"),
+            "{name} leaked internal error taxonomy: {stderr:?}"
+        );
+        assert!(!stderr.trim().is_empty(), "{name} returned no guidance");
     }
 }

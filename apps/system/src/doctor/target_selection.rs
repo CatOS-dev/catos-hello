@@ -1,7 +1,7 @@
 //! Target selection for Doctor.
 //!
 //! Doctor identifies the target **directly via the `target` capability**,
-//! not via `repair::mount_repair`. Phase-1 target discovery is strictly
+//! not via `repair::mount_repair`. Target discovery is strictly
 //! read-only: we confirm the running root when it identifies as CatOS,
 //! and otherwise report `None`. We deliberately do not mount candidate
 //! devices here — mounting is `repair`'s job.
@@ -17,9 +17,9 @@
 //! phase.
 
 use crate::doctor::model::{DoctorTarget, DoctorTargetKind};
-use crate::target::model::TargetIdentity;
 use crate::selection_ui::{select_target, Selection};
 use crate::target::discovery::{discover_targets, ProbeCleanup, TargetSession};
+use crate::target::model::TargetIdentity;
 #[cfg(test)]
 use crate::target::plan::{TargetPlan, TargetPlanKind};
 
@@ -30,9 +30,20 @@ pub struct SelectedTargetSession {
     pub discovery_cleanup: Vec<ProbeCleanup>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TargetDiscoveryErrorKind {
+    NotFound,
+    Ambiguous,
+    Declined,
+    CleanupIncomplete,
+    OpenFailed,
+}
+
 #[derive(Debug, Clone)]
 pub struct TargetDiscoveryError {
+    pub kind: TargetDiscoveryErrorKind,
     pub reason: String,
+    pub candidates: Vec<String>,
     pub cleanup: Vec<ProbeCleanup>,
 }
 
@@ -86,7 +97,9 @@ pub fn discover_target() -> TargetSelection {
             root_subvol: candidate.root_subvolume,
             root_uuid: candidate.root_uuid,
         }),
-        Selection::Declined => TargetSelection::None { reason: "operator declined the discovered target".into() },
+        Selection::Declined => TargetSelection::None {
+            reason: "operator declined the discovered target".into(),
+        },
         Selection::Unavailable(reason) => TargetSelection::None { reason },
     }
 }
@@ -101,16 +114,21 @@ pub fn discover_target_session() -> Result<SelectedTargetSession, TargetDiscover
             format!(
                 "{}: {}",
                 cleanup.mountpoint.display(),
-                cleanup.error.as_deref().unwrap_or("probe mountpoint was not fully removed")
+                cleanup
+                    .error
+                    .as_deref()
+                    .unwrap_or("probe mountpoint was not fully removed")
             )
         })
         .collect::<Vec<_>>();
     if !dirty_cleanup.is_empty() {
         return Err(TargetDiscoveryError {
+            kind: TargetDiscoveryErrorKind::CleanupIncomplete,
             reason: format!(
                 "readonly target discovery cleanup incomplete: {}",
                 dirty_cleanup.join("; ")
             ),
+            candidates: Vec::new(),
             cleanup: report.cleanup,
         });
     }
@@ -118,19 +136,18 @@ pub fn discover_target_session() -> Result<SelectedTargetSession, TargetDiscover
         Selection::Selected(candidate) => *candidate,
         Selection::Declined => {
             return Err(TargetDiscoveryError {
+                kind: TargetDiscoveryErrorKind::Declined,
                 reason: "operator declined the discovered target".into(),
+                candidates: Vec::new(),
                 cleanup: report.cleanup,
             })
         }
-        Selection::Unavailable(reason) => {
-            return Err(TargetDiscoveryError {
-                reason,
-                cleanup: report.cleanup,
-            })
-        }
+        Selection::Unavailable(reason) => return Err(unavailable_error(report, reason)),
     };
     let session = TargetSession::open(candidate).map_err(|error| TargetDiscoveryError {
+        kind: TargetDiscoveryErrorKind::OpenFailed,
         reason: format!("open selected readonly target: {error}"),
+        candidates: Vec::new(),
         cleanup: report.cleanup.clone(),
     })?;
     let target = TargetIdentity {
@@ -146,6 +163,27 @@ pub fn discover_target_session() -> Result<SelectedTargetSession, TargetDiscover
         inventory: report.inventory,
         discovery_cleanup: report.cleanup,
     })
+}
+
+fn unavailable_error(
+    report: crate::target::discovery::DiscoveryReport,
+    reason: String,
+) -> TargetDiscoveryError {
+    let candidates = report
+        .candidates
+        .iter()
+        .map(crate::selection_ui::summary)
+        .collect::<Vec<_>>();
+    TargetDiscoveryError {
+        kind: if candidates.is_empty() {
+            TargetDiscoveryErrorKind::NotFound
+        } else {
+            TargetDiscoveryErrorKind::Ambiguous
+        },
+        reason,
+        candidates,
+        cleanup: report.cleanup,
+    }
 }
 
 /// Map a [`TargetPlan`] to a [`TargetSelection`] without any field
@@ -194,6 +232,52 @@ mod tests {
             root_subvol: Some("/@".into()),
             root_uuid: Some("root-uuid".into()),
         }
+    }
+
+    fn candidate(path: &str) -> crate::target::discovery::TargetCandidate {
+        crate::target::discovery::TargetCandidate {
+            root_device: PathBuf::from(path),
+            root_fstype: "btrfs".into(),
+            root_uuid: Some(format!("uuid-{path}")),
+            root_subvolume: Some("/@".into()),
+            root_subvolume_id: Some(256),
+            filesystem_id: Some("fsid".into()),
+            label: None,
+            os_release: crate::target::model::OsRelease {
+                pretty_name: Some("CatOS".into()),
+                ..Default::default()
+            },
+            fstab_identity: None,
+            currently_mounted: false,
+            running_environment_member: false,
+            confidence: crate::target::model::RootCandidateConfidence::High,
+            evidence: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn unavailable_discovery_with_candidates_is_ambiguous() {
+        let report = crate::target::discovery::DiscoveryReport {
+            candidates: vec![candidate("/dev/vda"), candidate("/dev/vdb")],
+            ..Default::default()
+        };
+        let error = unavailable_error(
+            report,
+            "multiple target candidates require an interactive terminal".into(),
+        );
+        assert_eq!(error.kind, TargetDiscoveryErrorKind::Ambiguous);
+        assert_eq!(error.candidates.len(), 2);
+        assert!(error.candidates[0].contains("/dev/vda"));
+    }
+
+    #[test]
+    fn unavailable_discovery_without_candidates_is_not_found() {
+        let error = unavailable_error(
+            crate::target::discovery::DiscoveryReport::default(),
+            "no CatOS candidate".into(),
+        );
+        assert_eq!(error.kind, TargetDiscoveryErrorKind::NotFound);
+        assert!(error.candidates.is_empty());
     }
 
     #[test]

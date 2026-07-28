@@ -247,12 +247,12 @@ mod tests {
     }
 
     #[test]
-    fn is_phase1_classification_is_correct() {
-        assert!(Command::Environment.is_phase1());
-        assert!(Command::Capabilities.is_phase1());
-        assert!(Command::Inspect.is_phase1());
-        assert!(!Command::StorageScan.is_phase1());
-        assert!(!Command::TargetPlan.is_phase1());
-        assert!(!Command::TargetMount.is_phase1());
+    fn is_inspection_command_classification_is_correct() {
+        assert!(Command::Environment.is_inspection_command());
+        assert!(Command::Capabilities.is_inspection_command());
+        assert!(Command::Inspect.is_inspection_command());
+        assert!(!Command::StorageScan.is_inspection_command());
+        assert!(!Command::TargetPlan.is_inspection_command());
+        assert!(!Command::TargetMount.is_inspection_command());
     }
 }

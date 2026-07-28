@@ -6,11 +6,11 @@
 //!    `inspect`/`preflight`/`fs`/`mount`/`boot`/`recovery` argument
 //!    on `catos-doctor` (spec section 二 is explicit: argumentless
 //!    only).
-//! 2. The new aggregated Doctor re-introduces the phase-1-only
+//! 2. The new aggregated Doctor re-introduces the inspection-only
 //!    "Runtime / Capabilities / Target" headings.
 //! 3. `catos-doctor` inherits any `catos-system` subcommand.
-//! 4. The Doctor exit code becomes non-zero for an unhealthy report
-//!    (scheme B regression).
+//! 4. A non-interactive unprivileged invocation starts probing and emits a
+//!    mostly-empty report instead of failing before diagnosis.
 
 use std::env;
 use std::os::unix::fs::symlink;
@@ -56,21 +56,30 @@ fn link_doctor() -> (TempDir, PathBuf) {
 }
 
 #[test]
-fn doctor_no_candidate_exits_nonzero_without_waiting_for_input() {
+fn doctor_noninteractive_unprivileged_fails_before_diagnosis() {
+    if unsafe { libc::geteuid() } == 0 {
+        return;
+    }
     let (_tmp, link) = link_doctor();
     let output = Command::new(&link).output().expect("spawn doctor");
-    assert!(!output.status.success());
-    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(output.status.code(), Some(4));
+    assert!(
+        output.stdout.is_empty(),
+        "stdout must not contain an empty report"
+    );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("no diagnosable CatOS system")
-            || stdout.contains("DOCTOR_NAMESPACE_UNAVAILABLE"),
-        "unexpected Doctor infrastructure failure: stdout={stdout:?} stderr={stderr:?}"
+        stderr.contains("administrator privileges are required"),
+        "stderr={stderr:?}"
+    );
+    assert!(
+        stderr.contains("sudo catos-system doctor"),
+        "stderr={stderr:?}"
     );
 }
 
 #[test]
-fn doctor_help_succeeds_and_documents_scheme_b() {
+fn doctor_help_explains_exit_behavior_without_internal_scheme_names() {
     let (_tmp, link) = link_doctor();
     let output = Command::new(&link)
         .arg("--help")
@@ -79,11 +88,17 @@ fn doctor_help_succeeds_and_documents_scheme_b() {
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("catos-doctor"));
-    assert!(stdout.contains("scheme B"));
-    assert!(stdout.contains("filesystem"));
-    assert!(stdout.contains("mount"));
-    assert!(stdout.contains("boot"));
-    assert!(stdout.contains("recovery"));
+    assert!(stdout.contains("Exit status is zero when a selected target was"));
+    assert!(stdout.contains("diagnosed, even when problems were found"));
+    assert!(stdout.contains("target-selection"));
+    assert!(stdout.contains("internal pager"));
+    assert!(stdout.contains("Enter advances and q quits"));
+    assert!(!stdout.to_ascii_lowercase().contains("scheme b"));
+    let lower = stdout.to_ascii_lowercase();
+    assert!(lower.contains("filesystem"));
+    assert!(lower.contains("mount"));
+    assert!(lower.contains("boot"));
+    assert!(lower.contains("recovery"));
 }
 
 #[test]
@@ -161,7 +176,7 @@ fn doctor_rejects_repeated_or_combined_flags() {
 #[test]
 fn doctor_does_not_inherit_catos_system_subcommands() {
     let (_tmp, link) = link_doctor();
-    // The phase-1 surfaces that catos-system owns MUST NOT appear on
+    // The low-level inspection surfaces that catos-system owns MUST NOT appear on
     // catos-doctor. We assert each one returns ARG_ERROR.
     for sub in [
         "environment",
@@ -176,10 +191,12 @@ fn doctor_does_not_inherit_catos_system_subcommands() {
 }
 
 #[test]
-fn doctor_outputs_all_seven_diagnostic_sections() {
+fn doctor_noninteractive_permission_failure_does_not_render_sections() {
+    if unsafe { libc::geteuid() } == 0 {
+        return;
+    }
     let (_tmp, link) = link_doctor();
     let output = Command::new(&link).output().unwrap();
-    assert!(!output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
     for section in [
         "Environment",
@@ -191,29 +208,18 @@ fn doctor_outputs_all_seven_diagnostic_sections() {
         "Recovery",
     ] {
         assert!(
-            stdout.contains(section),
-            "doctor output missing section {section}: {stdout}"
+            !stdout.contains(section),
+            "permission failure rendered {section}: {stdout}"
         );
     }
 }
 
 #[test]
-fn doctor_overall_status_is_emitted_with_complete_flag() {
-    let (_tmp, link) = link_doctor();
-    let output = Command::new(&link).output().unwrap();
-    assert!(!output.status.success());
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("Overall status"));
-    assert!(stdout.contains("status:"));
-    assert!(stdout.contains("complete:"));
-}
-
-#[test]
-fn doctor_does_not_print_phase1_only_headings() {
+fn doctor_does_not_print_legacy_inspection_headings() {
     let (_tmp, link) = link_doctor();
     let output = Command::new(&link).output().unwrap();
     let stdout = String::from_utf8_lossy(&output.stdout);
-    // Stage-5 Doctor replaces the phase-1-only inspector output. The
+    // Doctor replaces the legacy inspection-only output. The
     // previous "Runtime / Capabilities / Target" section trio is
     // gone for good — a regression here would mean someone wired
     // Doctor back to `inspect`.

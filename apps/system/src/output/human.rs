@@ -18,7 +18,7 @@ pub fn render_human<W: Write>(
     view: View,
     out: &mut W,
 ) -> std::io::Result<()> {
-    writeln!(out, "CatOS system backend (phase 1, read-only)")?;
+    writeln!(out, "CatOS System Inspection")?;
     writeln!(out, "  program version : {}", report.program_version)?;
     writeln!(out, "  schema version  : {}", report.schema_version)?;
     writeln!(out, "  invocation      : {}", report.invocation)?;

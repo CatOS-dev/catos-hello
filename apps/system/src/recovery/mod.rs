@@ -1,4 +1,4 @@
-//! Phase-3 recovery orchestrators.
+//! Btrfs snapshot recovery orchestration.
 //!
 //! Sits between `entry.rs` and the `snapshot` capability. Owns the
 //! side-effects the engine does NOT own: discovering the target
@@ -9,7 +9,7 @@
 //! `list`, `inspect`, `plan`, `apply`, `status`, `resume`, `revert`.
 //!
 //! `list`, `inspect`, `plan` are READ-ONLY. They mount targets only
-//! via the read-only `mount::probe` infrastructure from phase 2.
+//! via the shared read-only target-probe infrastructure.
 //!
 //! `apply`, `resume`, `revert` mount the btrfs top-level READ-WRITE.
 //! These application paths coordinate snapshot-specific persistent writes;
@@ -33,14 +33,14 @@ use crate::snapshot::model::{
     TransactionState,
 };
 
-/// Outcome of a phase-3 subcommand. Each variant carries the model
+/// Outcome of a recovery command. Each variant carries the model
 /// the matching output renderer consumes.
 //
 // `Error` boxes `SnapshotError` so the variant stays small relative
 // to the others. Boxing here keeps clippy's `large_enum_variant`
 // quiet (the alternatives — making every variant boxed or accepting
 // the warning globally — are worse). The renderer dereferences once.
-pub enum Phase3Outcome {
+pub enum RecoveryOutcome {
     List(RecoveryListReport),
     Inspect(RecoveryInspectReport),
     Plan(RecoveryPlan),
@@ -65,47 +65,47 @@ pub enum Phase3Outcome {
 
 /// Run a recovery subcommand. Called by `entry.rs` after the CLI has
 /// routed `recovery <SUB>` here.
-pub fn run_recovery(args: RecoveryArgs) -> Phase3Outcome {
+pub fn run_recovery(args: RecoveryArgs) -> RecoveryOutcome {
     match args.subcommand {
         RecoverySubcommand::List => match read::run_list(&args) {
-            Ok(report) => Phase3Outcome::List(report),
-            Err(error) => Phase3Outcome::Error(Box::new(error)),
+            Ok(report) => RecoveryOutcome::List(report),
+            Err(error) => RecoveryOutcome::Error(Box::new(error)),
         },
         RecoverySubcommand::Inspect => match read::run_inspect(&args) {
-            Ok(report) => Phase3Outcome::Inspect(report),
-            Err(error) => Phase3Outcome::Error(Box::new(error)),
+            Ok(report) => RecoveryOutcome::Inspect(report),
+            Err(error) => RecoveryOutcome::Error(Box::new(error)),
         },
         RecoverySubcommand::Plan => match read::run_plan(&args) {
-            Ok(plan) => Phase3Outcome::Plan(plan),
-            Err(error) => Phase3Outcome::Error(Box::new(error)),
+            Ok(plan) => RecoveryOutcome::Plan(plan),
+            Err(error) => RecoveryOutcome::Error(Box::new(error)),
         },
         RecoverySubcommand::Apply => match write::run_apply(&args) {
-            Ok((record, final_state, cleanup)) => Phase3Outcome::Apply {
+            Ok((record, final_state, cleanup)) => RecoveryOutcome::Apply {
                 record,
                 final_state,
                 cleanup,
             },
-            Err(error) => Phase3Outcome::Error(Box::new(error)),
+            Err(error) => RecoveryOutcome::Error(Box::new(error)),
         },
         RecoverySubcommand::Status => match read::run_status(&args) {
-            Ok(report) => Phase3Outcome::Status(Box::new(report)),
-            Err(error) => Phase3Outcome::Error(Box::new(error)),
+            Ok(report) => RecoveryOutcome::Status(Box::new(report)),
+            Err(error) => RecoveryOutcome::Error(Box::new(error)),
         },
         RecoverySubcommand::Resume => match write::run_resume(&args) {
-            Ok((record, final_state, cleanup)) => Phase3Outcome::Resume {
+            Ok((record, final_state, cleanup)) => RecoveryOutcome::Resume {
                 record,
                 final_state,
                 cleanup,
             },
-            Err(error) => Phase3Outcome::Error(Box::new(error)),
+            Err(error) => RecoveryOutcome::Error(Box::new(error)),
         },
         RecoverySubcommand::Revert => match write::run_revert(&args) {
-            Ok((record, final_state, cleanup)) => Phase3Outcome::Revert {
+            Ok((record, final_state, cleanup)) => RecoveryOutcome::Revert {
                 record,
                 final_state,
                 cleanup,
             },
-            Err(error) => Phase3Outcome::Error(Box::new(error)),
+            Err(error) => RecoveryOutcome::Error(Box::new(error)),
         },
     }
 }
@@ -116,8 +116,8 @@ pub fn run_recovery(args: RecoveryArgs) -> Phase3Outcome {
 
 /// Convert a [`SnapshotError`] into a top-level exit code. Used by
 /// `entry.rs` when the recovery subcommand returned
-/// `Phase3Outcome::Error`.
-pub fn recovery_error_to_phase3_exit_code(_error: &SnapshotError) -> i32 {
+/// `RecoveryOutcome::Error`.
+pub fn recovery_error_exit_code(_error: &SnapshotError) -> i32 {
     exit_code::PROBE_FAILED
 }
 
@@ -139,18 +139,18 @@ fn exit_code_for_recovery(
     }
 }
 
-/// Convenience used by `entry.rs` to detect whether a phase-3 command
+/// Convenience used by `entry.rs` to map a recovery result
 /// should set a non-success exit code based on its outcome.
-pub fn exit_code_for(outcome: &Phase3Outcome) -> i32 {
+pub fn exit_code_for(outcome: &RecoveryOutcome) -> i32 {
     match outcome {
-        Phase3Outcome::Error(error) => {
+        RecoveryOutcome::Error(error) => {
             if matches!(error.kind, SnapshotErrorKind::CurrentRootRefused) {
                 exit_code::PERMISSION_DENIED
             } else {
                 exit_code::PROBE_FAILED
             }
         }
-        Phase3Outcome::Status(report) => {
+        RecoveryOutcome::Status(report) => {
             if matches!(
                 report.reconciled_state,
                 TransactionState::FailedManualIntervention | TransactionState::FailedRecoverable
@@ -160,17 +160,17 @@ pub fn exit_code_for(outcome: &Phase3Outcome) -> i32 {
                 exit_code::SUCCESS
             }
         }
-        Phase3Outcome::Apply {
+        RecoveryOutcome::Apply {
             record,
             final_state,
             cleanup,
         }
-        | Phase3Outcome::Resume {
+        | RecoveryOutcome::Resume {
             record,
             final_state,
             cleanup,
         } => exit_code_for_recovery(*final_state, cleanup, record, TransactionState::Completed),
-        Phase3Outcome::Revert {
+        RecoveryOutcome::Revert {
             record,
             final_state,
             cleanup,
@@ -273,7 +273,7 @@ impl RecoveryArgs {
             return Err(SnapshotError::new(
                 SnapshotErrorKind::UnsupportedExplicitEsp,
                 format!(
-                    "phase 3 does not maintain or write to the ESP; \
+                    "snapshot recovery does not maintain or write to the ESP; \
                      --esp-device {} is not supported. The recovery \
                      root swap is bounded to the btrfs top-level and a \
                      read-only boot-consistency report. Omit --esp-device \

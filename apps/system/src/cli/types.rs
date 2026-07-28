@@ -1,12 +1,12 @@
 use crate::target::diagnose::system_root::SystemRoot;
 use std::path::PathBuf;
 
-/// One of the phase-1, phase-2, or phase-3 commands.
+/// One low-level inspection, storage, target-mount, or recovery command.
 ///
-/// Phase 1 commands (`environment`, `capabilities`, `inspect`) share a
+/// Inspection commands (`environment`, `capabilities`, `inspect`) share a
 /// rendering [`View`] over the same underlying inspection report.
 ///
-/// Phase 2 commands are read-only storage discovery and target mount:
+/// Storage commands perform read-only discovery and target mounting:
 ///   * `storage scan` — walks sysfs + blkid + mountinfo and emits a
 ///     [`crate::target::model::StorageReport`].
 ///   * `target plan` — reads a target fstab + discovers devices and emits
@@ -15,7 +15,7 @@ use std::path::PathBuf;
 ///     private mount namespace, inspects the target, cleans up, and emits
 ///     the final session/cleanup report.
 ///
-/// Phase 3 commands drive the btrfs snapshot recovery transaction.
+/// Recovery commands drive the Btrfs snapshot recovery transaction.
 /// See [`crate::recovery`] for the orchestrators.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Command {
@@ -28,7 +28,7 @@ pub enum Command {
     Recovery(RecoverySubcommand),
 }
 
-/// Phase-3 recovery subcommands.
+/// Btrfs recovery subcommands.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum RecoverySubcommand {
     #[default]
@@ -66,32 +66,30 @@ impl Command {
         }
     }
 
-    /// True iff this command emits a phase-1 InspectionReport (vs a
-    /// phase-2 StorageReport / MountPlan / MountSession or a phase-3
-    /// recovery outcome).
-    pub fn is_phase1(self) -> bool {
+    /// True when this command emits an inspection report.
+    pub fn is_inspection_command(self) -> bool {
         matches!(
             self,
             Command::Environment | Command::Capabilities | Command::Inspect
         )
     }
 
-    /// True iff this command is a phase-2 command.
-    pub fn is_phase2(self) -> bool {
+    /// True when this command performs storage or target-mount inspection.
+    pub fn is_storage_command(self) -> bool {
         matches!(
             self,
             Command::StorageScan | Command::TargetPlan | Command::TargetMount
         )
     }
 
-    /// True iff this command is a phase-3 recovery command.
-    pub fn is_phase3(self) -> bool {
+    /// True when this command belongs to snapshot recovery.
+    pub fn is_recovery_command(self) -> bool {
         matches!(self, Command::Recovery(_))
     }
 
     /// The rendering view this command selects. The probe layer always
     /// builds the full report (cheap); the view filters what is emitted.
-    /// Panics for phase-2 commands (they do not use View).
+    /// Panics for commands that do not use an inspection view.
     pub fn view(self) -> View {
         match self {
             Command::Environment => View {
@@ -109,7 +107,7 @@ impl Command {
                 capabilities: true,
                 target: true,
             },
-            other => panic!("view() called on phase-2 command {other:?}"),
+            other => panic!("view() called on a non-inspection command {other:?}"),
         }
     }
 }
@@ -132,12 +130,12 @@ pub struct CliArgs {
     pub root: SystemRoot,
     pub json: bool,
     pub target: TargetSelection,
-    /// Phase-3 recovery arguments. Only present when `command` is a
+    /// Recovery arguments. Only present when `command` is a
     /// `Command::Recovery(_)` variant; `None` otherwise.
     pub recovery: Option<RecoveryArgs>,
 }
 
-/// Phase-3 recovery arguments. Built by the parser when the user
+/// Recovery arguments. Built by the parser when the user
 /// invokes `catos-system recovery <SUB>`.
 #[derive(Debug, Clone, Default)]
 pub struct RecoveryArgs {

@@ -2,12 +2,11 @@
 //! stitches together the existing pure diagnosis surfaces from
 //! stages 1–4:
 //!
-//! * environment / target discovery: phase 1 (`entry::build_report`,
-//!   phase2 storage scan)
-//! * filesystem: stage 2 (`fs::diagnose::check_only_for`)
-//! * mount layout / fstab: stage 3 (`repair::mount_repair::diagnose`)
-//! * boot provider: stage 4 (`boot::diagnose::provider::detect`)
-//! * recovery: stage 4 (`recovery::engine::Engine::load` +
+//! * environment and target discovery: `entry::build_report` and storage scan
+//! * filesystem: `fs::diagnose::check_only_for`
+//! * mount layout and fstab: `repair::mount_repair::diagnose`
+//! * boot provider: `boot::diagnose::provider::detect`
+//! * recovery: `recovery::engine::Engine::load` and
 //!   `reconcile_status`, both read-only)
 //!
 //! ## Hard rules
@@ -40,11 +39,11 @@ use crate::doctor::model::{
     DoctorSectionStatus, DoctorSeverity, DoctorTarget, DoctorTargetKind,
 };
 use crate::fs::command::FsCommandRunner;
-use crate::target::Evidence;
 use crate::target::discovery::{ReadonlySession, TargetCandidate, TargetSession};
+use crate::target::Evidence;
 
 pub mod target_selection;
-use target_selection::TargetSelection;
+use target_selection::{TargetDiscoveryErrorKind, TargetSelection};
 
 /// The single selected target and its readonly lifetime.  Section code receives
 /// this context instead of independently rediscovering a target.
@@ -85,7 +84,11 @@ impl DoctorTargetContext {
         discovery_cleanup: Vec<crate::target::discovery::ProbeCleanup>,
     ) -> Result<Self, ContextOpenError> {
         let mut session = Some(session);
-        let session_ref = || session.as_ref().expect("target session remains owned during context open");
+        let session_ref = || {
+            session
+                .as_ref()
+                .expect("target session remains owned during context open")
+        };
         let candidate = session_ref().candidate().clone();
         let fstab = match sections::read_target_file(&target.root, "etc/fstab") {
             Ok(Some(value)) => value,
@@ -112,7 +115,16 @@ impl DoctorTargetContext {
         };
         let mut esp = match open_target_esp(&fstab, &devices) {
             Ok(value) => value,
-            Err(error) => return Err(context_open_error(error, discovery_cleanup, session.take().expect("target session"), None, None, None)),
+            Err(error) => {
+                return Err(context_open_error(
+                    error,
+                    discovery_cleanup,
+                    session.take().expect("target session"),
+                    None,
+                    None,
+                    None,
+                ))
+            }
         };
         let boot_layout = match target.root_device.as_deref() {
             Some(root_device) => crate::mount::diagnose::target::detect_boot_mount_layout(
@@ -125,7 +137,16 @@ impl DoctorTargetContext {
         };
         let boot_layout = match boot_layout {
             Ok(value) => value,
-            Err(error) => return Err(context_open_error(error, discovery_cleanup, session.take().expect("target session"), esp, None, None)),
+            Err(error) => {
+                return Err(context_open_error(
+                    error,
+                    discovery_cleanup,
+                    session.take().expect("target session"),
+                    esp,
+                    None,
+                    None,
+                ))
+            }
         };
         let boot = open_dependency_with_cleanup(
             || open_target_boot(&boot_layout, &candidate, &devices),
@@ -139,32 +160,69 @@ impl DoctorTargetContext {
             },
         )?;
         let top_level = if candidate.root_fstype == "btrfs" {
-            ReadonlySession::open_with_options(&candidate.root_device, "btrfs", "ro,norecovery,subvolid=5").map(Some)
+            ReadonlySession::open_with_options(
+                &candidate.root_device,
+                "btrfs",
+                "ro,norecovery,subvolid=5",
+            )
+            .map(Some)
         } else {
             Ok(None)
         };
         let top_level = match top_level {
             Ok(value) => value,
-            Err(error) => return Err(context_open_error(format!("cannot open selected Btrfs top-level: {error}"), discovery_cleanup, session.take().expect("target session"), esp, boot, None)),
+            Err(error) => {
+                return Err(context_open_error(
+                    format!("cannot open selected Btrfs top-level: {error}"),
+                    discovery_cleanup,
+                    session.take().expect("target session"),
+                    esp,
+                    boot,
+                    None,
+                ))
+            }
         };
         let recovery_options = match &top_level {
-            Some(top_level) => crate::snapshot::diagnose::identity::validate_mounted_filesystem(top_level.root(), &candidate.root_device)
-                .map(|validated| Some(crate::snapshot::execute::engine::EngineOptions {
+            Some(top_level) => crate::snapshot::diagnose::identity::validate_mounted_filesystem(
+                top_level.root(),
+                &candidate.root_device,
+            )
+            .map(|validated| {
+                Some(crate::snapshot::execute::engine::EngineOptions {
                     top_level_mount: top_level.root().to_path_buf(),
                     device_path: validated.canonical_device,
                     validated_filesystem: validated.filesystem,
-                }))
-                .map_err(|error| format!("cannot validate selected Btrfs top-level: {error}")),
+                })
+            })
+            .map_err(|error| format!("cannot validate selected Btrfs top-level: {error}")),
             None => Ok(None),
         };
-        Ok(Self { target, candidate, fstab: Ok(fstab), devices, esp: Ok(esp), boot_layout: Ok(boot_layout), boot: Ok(boot), top_level: Ok(top_level), recovery_options, discovery_cleanup, session: session.take().expect("target session") })
+        Ok(Self {
+            target,
+            candidate,
+            fstab: Ok(fstab),
+            devices,
+            esp: Ok(esp),
+            boot_layout: Ok(boot_layout),
+            boot: Ok(boot),
+            top_level: Ok(top_level),
+            recovery_options,
+            discovery_cleanup,
+            session: session.take().expect("target session"),
+        })
     }
 
     fn cleanup(self) -> Vec<crate::target::discovery::ProbeCleanup> {
         let mut cleanup = self.discovery_cleanup;
-        if let Ok(Some(session)) = self.top_level { cleanup.push(session.cleanup()); }
-        if let Ok(Some(session)) = self.boot { cleanup.push(session.cleanup()); }
-        if let Ok(Some(esp)) = self.esp { cleanup.push(esp.root.cleanup()); }
+        if let Ok(Some(session)) = self.top_level {
+            cleanup.push(session.cleanup());
+        }
+        if let Ok(Some(session)) = self.boot {
+            cleanup.push(session.cleanup());
+        }
+        if let Ok(Some(esp)) = self.esp {
+            cleanup.push(esp.root.cleanup());
+        }
         cleanup.push(self.session.cleanup());
         cleanup
     }
@@ -177,7 +235,11 @@ impl DoctorTargetContext {
             } else {
                 DoctorTargetKind::Offline
             },
-            root_device: self.target.root_device.as_ref().map(|path| path.display().to_string()),
+            root_device: self
+                .target
+                .root_device
+                .as_ref()
+                .map(|path| path.display().to_string()),
             root_fstype: self.target.root_fstype.clone(),
             root_subvolume: self.target.root_subvol.clone(),
             esp_device: esp.map(|value| value.device.display().to_string()),
@@ -195,9 +257,15 @@ fn context_open_error(
     top_level: Option<ReadonlySession>,
 ) -> ContextOpenError {
     let mut cleanup = discovery_cleanup;
-    if let Some(session) = top_level { cleanup.push(session.cleanup()); }
-    if let Some(session) = boot { cleanup.push(session.cleanup()); }
-    if let Some(esp) = esp { cleanup.push(esp.root.cleanup()); }
+    if let Some(session) = top_level {
+        cleanup.push(session.cleanup());
+    }
+    if let Some(session) = boot {
+        cleanup.push(session.cleanup());
+    }
+    if let Some(esp) = esp {
+        cleanup.push(esp.root.cleanup());
+    }
     cleanup.push(session.cleanup());
     ContextOpenError { cause, cleanup }
 }
@@ -207,7 +275,10 @@ where
     O: FnOnce() -> Result<T, String>,
     C: FnOnce() -> Vec<crate::target::discovery::ProbeCleanup>,
 {
-    open().map_err(|cause| ContextOpenError { cause, cleanup: cleanup() })
+    open().map_err(|cause| ContextOpenError {
+        cause,
+        cleanup: cleanup(),
+    })
 }
 
 fn open_target_boot(
@@ -222,18 +293,40 @@ fn open_target_boot(
             let device = devices
                 .iter()
                 .find(|device| device.dev_path.as_deref() == Some(boot_device.as_path()))
-                .ok_or_else(|| format!("selected target /boot device {} is absent from shared inventory", boot_device.display()))?;
-            let fstype = device.filesystem.as_deref().ok_or_else(|| format!("selected target /boot device {} has no filesystem type", boot_device.display()))?;
-            ReadonlySession::open(boot_device, fstype).map(Some)
-                .map_err(|error| format!("cannot open selected target /boot {} read-only: {error}", boot_device.display()))
+                .ok_or_else(|| {
+                    format!(
+                        "selected target /boot device {} is absent from shared inventory",
+                        boot_device.display()
+                    )
+                })?;
+            let fstype = device.filesystem.as_deref().ok_or_else(|| {
+                format!(
+                    "selected target /boot device {} has no filesystem type",
+                    boot_device.display()
+                )
+            })?;
+            ReadonlySession::open(boot_device, fstype)
+                .map(Some)
+                .map_err(|error| {
+                    format!(
+                        "cannot open selected target /boot {} read-only: {error}",
+                        boot_device.display()
+                    )
+                })
         }
-        BootMountLayout::BootBtrfsSubvolume { subvolume, .. } => ReadonlySession::open_with_options(
-            &candidate.root_device,
-            "btrfs",
-            &format!("ro,norecovery,subvol={}", subvolume.trim_start_matches('/')),
-        )
-        .map(Some)
-        .map_err(|error| format!("cannot open selected target /boot subvolume {subvolume} read-only: {error}")),
+        BootMountLayout::BootBtrfsSubvolume { subvolume, .. } => {
+            ReadonlySession::open_with_options(
+                &candidate.root_device,
+                "btrfs",
+                &format!("ro,norecovery,subvol={}", subvolume.trim_start_matches('/')),
+            )
+            .map(Some)
+            .map_err(|error| {
+                format!(
+                    "cannot open selected target /boot subvolume {subvolume} read-only: {error}"
+                )
+            })
+        }
         BootMountLayout::BootInsideRoot
         | BootMountLayout::EspAtBootEfi { .. }
         | BootMountLayout::EspAtEfi { .. }
@@ -250,7 +343,10 @@ fn open_target_esp(
         .filter(|entry| {
             matches!(entry.target.as_str(), "/efi" | "/boot/efi")
                 || (entry.target == "/boot"
-                    && matches!(entry.fstype.as_str(), "vfat" | "fat" | "fat32" | "fat16" | "fat12"))
+                    && matches!(
+                        entry.fstype.as_str(),
+                        "vfat" | "fat" | "fat32" | "fat16" | "fat12"
+                    ))
         })
         .collect();
     match entries.as_slice() {
@@ -258,18 +354,48 @@ fn open_target_esp(
         [entry] => {
             let matches: Vec<_> = devices
                 .iter()
-                .filter(|device| crate::target::diagnose::candidate::device_matches_fstab_source(device, &entry.source))
-                .filter(|device| matches!(device.filesystem.as_deref(), Some("vfat" | "fat" | "fat32" | "fat16" | "fat12")))
+                .filter(|device| {
+                    crate::target::diagnose::candidate::device_matches_fstab_source(
+                        device,
+                        &entry.source,
+                    )
+                })
+                .filter(|device| {
+                    matches!(
+                        device.filesystem.as_deref(),
+                        Some("vfat" | "fat" | "fat32" | "fat16" | "fat12")
+                    )
+                })
                 .collect();
             let device = match matches.as_slice() {
                 [device] => *device,
-                [] => return Err(format!("selected target ESP entry {} does not resolve to one FAT device", entry.target)),
-                _ => return Err(format!("selected target ESP entry {} resolves to multiple FAT devices", entry.target)),
+                [] => {
+                    return Err(format!(
+                        "selected target ESP entry {} does not resolve to one FAT device",
+                        entry.target
+                    ))
+                }
+                _ => {
+                    return Err(format!(
+                        "selected target ESP entry {} resolves to multiple FAT devices",
+                        entry.target
+                    ))
+                }
             };
-            let path = device.dev_path.as_ref().ok_or_else(|| "resolved selected target ESP has no device path".to_string())?;
-            let fstype = device.filesystem.as_deref().ok_or_else(|| "resolved selected target ESP has no filesystem type".to_string())?;
-            let root = ReadonlySession::open(path, fstype)
-                .map_err(|error| format!("cannot open selected target ESP {} read-only: {error}", path.display()))?;
+            let path = device
+                .dev_path
+                .as_ref()
+                .ok_or_else(|| "resolved selected target ESP has no device path".to_string())?;
+            let fstype = device
+                .filesystem
+                .as_deref()
+                .ok_or_else(|| "resolved selected target ESP has no filesystem type".to_string())?;
+            let root = ReadonlySession::open(path, fstype).map_err(|error| {
+                format!(
+                    "cannot open selected target ESP {} read-only: {error}",
+                    path.display()
+                )
+            })?;
             Ok(Some(DoctorEsp {
                 device: path.clone(),
                 uuid: device.uuid.clone(),
@@ -294,7 +420,11 @@ pub fn run_doctor() -> DoctorReport {
                 environment,
                 ..DoctorReport::default()
             };
-            report.sections = handle_no_target(error.reason.clone(), &mut report);
+            report.sections = if error.kind == TargetDiscoveryErrorKind::Ambiguous {
+                handle_ambiguous_target(error.candidates, &mut report)
+            } else {
+                handle_no_target(error.reason.clone(), &mut report)
+            };
             report.cleanup = cleanup_report(error.cleanup, None);
             aggregate(&mut report);
             return report;
@@ -314,11 +444,13 @@ pub fn run_doctor() -> DoctorReport {
                 target: TargetSelection::Identified(target).to_target_summary(),
                 ..DoctorReport::default()
             };
-            report.limitations.push(crate::doctor::model::DoctorLimitation::new(
-                DoctorSectionId::Storage,
-                "DOCTOR_CONTEXT_OPEN_FAILED",
-                error.cause.clone(),
-            ));
+            report
+                .limitations
+                .push(crate::doctor::model::DoctorLimitation::new(
+                    DoctorSectionId::Storage,
+                    "DOCTOR_CONTEXT_OPEN_FAILED",
+                    error.cause.clone(),
+                ));
             report.cleanup = cleanup_report(error.cleanup, Some(error.cause));
             report.sections = DoctorSectionId::all()
                 .iter()
@@ -336,39 +468,55 @@ pub fn run_doctor() -> DoctorReport {
     report.evidence.push(Evidence::new(
         "DOCTOR_TARGET_CONTEXT",
         "doctor::context",
-        format!("selected candidate {}", context.candidate.root_device.display()),
+        format!(
+            "selected candidate {}",
+            context.candidate.root_device.display()
+        ),
     ));
     if let Err(error) = &context.fstab {
-        report.limitations.push(crate::doctor::model::DoctorLimitation::new(
-            DoctorSectionId::Mount,
-            "MOUNT_FACTS_INCOMPLETE",
-            error.clone(),
-        ));
+        report
+            .limitations
+            .push(crate::doctor::model::DoctorLimitation::new(
+                DoctorSectionId::Mount,
+                "MOUNT_FACTS_INCOMPLETE",
+                error.clone(),
+            ));
     }
     if let Err(error) = &context.recovery_options {
-        report.limitations.push(crate::doctor::model::DoctorLimitation::new(
-            DoctorSectionId::Recovery,
-            "RECOVERY_FACTS_INCOMPLETE",
-            error.clone(),
-        ));
+        report
+            .limitations
+            .push(crate::doctor::model::DoctorLimitation::new(
+                DoctorSectionId::Recovery,
+                "RECOVERY_FACTS_INCOMPLETE",
+                error.clone(),
+            ));
     }
     if let Err(error) = &context.esp {
-        report.limitations.push(crate::doctor::model::DoctorLimitation::new(
-            DoctorSectionId::Storage,
-            "ESP_FACTS_INCOMPLETE",
-            error.clone(),
-        ));
+        report
+            .limitations
+            .push(crate::doctor::model::DoctorLimitation::new(
+                DoctorSectionId::Storage,
+                "ESP_FACTS_INCOMPLETE",
+                error.clone(),
+            ));
     }
-    report.sections = run_sections(&runner, Some(&context), context.recovery_options.as_ref().ok().and_then(Option::as_ref), &environment, &mut report);
+    report.sections = run_sections(
+        &runner,
+        Some(&context),
+        context
+            .recovery_options
+            .as_ref()
+            .ok()
+            .and_then(Option::as_ref),
+        &environment,
+        &mut report,
+    );
     aggregate(&mut report);
     report.cleanup = cleanup_report(context.cleanup(), None);
     report
 }
 
-fn namespace_failure_report(
-    environment: DoctorEnvironment,
-    reason: String,
-) -> DoctorReport {
+fn namespace_failure_report(environment: DoctorEnvironment, reason: String) -> DoctorReport {
     let mut report = DoctorReport {
         environment,
         sections: DoctorSectionId::all()
@@ -377,11 +525,13 @@ fn namespace_failure_report(
             .collect(),
         ..DoctorReport::default()
     };
-    report.limitations.push(crate::doctor::model::DoctorLimitation::new(
-        DoctorSectionId::Storage,
-        "DOCTOR_NAMESPACE_UNAVAILABLE",
-        format!("cannot establish private mount namespace: {reason}"),
-    ));
+    report
+        .limitations
+        .push(crate::doctor::model::DoctorLimitation::new(
+            DoctorSectionId::Storage,
+            "DOCTOR_NAMESPACE_UNAVAILABLE",
+            format!("cannot establish private mount namespace: {reason}"),
+        ));
     report.cleanup = DoctorCleanup::not_required();
     aggregate(&mut report);
     report
@@ -391,12 +541,23 @@ fn cleanup_report(
     cleanup: Vec<crate::target::discovery::ProbeCleanup>,
     context_failure: Option<String>,
 ) -> DoctorCleanup {
-    let mut residual: Vec<String> = cleanup.iter().filter_map(|item| item.error.as_ref().map(|error| format!("{}: {error}", item.mountpoint.display()))).collect();
+    let mut residual: Vec<String> = cleanup
+        .iter()
+        .filter_map(|item| {
+            item.error
+                .as_ref()
+                .map(|error| format!("{}: {error}", item.mountpoint.display()))
+        })
+        .collect();
     if let Some(failure) = context_failure {
         residual.push(format!("context initialization failed: {failure}"));
     }
     DoctorCleanup {
-        cleaned: cleanup.iter().filter(|item| item.is_clean()).map(|item| item.mountpoint.display().to_string()).collect(),
+        cleaned: cleanup
+            .iter()
+            .filter(|item| item.is_clean())
+            .map(|item| item.mountpoint.display().to_string())
+            .collect(),
         all_clean: residual.is_empty() && cleanup.iter().all(|item| item.is_clean()),
         residual,
     }
@@ -710,10 +871,7 @@ pub mod tests {
 
     #[test]
     fn configured_esp_without_inventory_match_fails_closed() {
-        let result = open_target_esp(
-            "UUID=esp-uuid /efi vfat defaults 0 2\n",
-            &[],
-        );
+        let result = open_target_esp("UUID=esp-uuid /efi vfat defaults 0 2\n", &[]);
 
         assert!(matches!(result, Err(ref error) if error.contains("does not resolve")));
     }
@@ -749,6 +907,9 @@ pub mod tests {
         assert_eq!(error.cause, "boot readonly open failed");
         let report = cleanup_report(error.cleanup, Some(error.cause));
         assert!(!report.all_clean);
-        assert!(report.residual.iter().any(|item| item.contains("context initialization failed")));
+        assert!(report
+            .residual
+            .iter()
+            .any(|item| item.contains("context initialization failed")));
     }
 }

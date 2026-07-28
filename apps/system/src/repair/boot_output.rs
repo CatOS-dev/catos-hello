@@ -28,7 +28,7 @@ pub fn render_boot_repair_human<W: Write>(
     report: &BootRepairReport,
     out: &mut W,
 ) -> std::io::Result<()> {
-    writeln!(out, "CatOS system backend (repair boot)")?;
+    writeln!(out, "CatOS Boot Repair")?;
     writeln!(out, "  program version : {}", crate::PROGRAM_VERSION)?;
     writeln!(out, "  schema version  : {}", crate::SCHEMA_VERSION)?;
     writeln!(out)?;

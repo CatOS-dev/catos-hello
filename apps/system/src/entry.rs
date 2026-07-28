@@ -7,13 +7,16 @@ use std::fmt;
 use crate::error::{exit_code, Error};
 
 mod chroot;
+mod elevation;
+mod menu;
+mod pager;
 
 /// The set of argv[0] names this binary recognises. Anything else falls
 /// back silently to the canonical `catos-system` name. The fallback is
 /// deliberate so the binary is still usable when renamed or copied; we do
 /// not warn because there is no caller-configured warning channel in
-/// phase 1 (warnings in the JSON report are probe-level, not invocation-
-/// level). A future phase may surface this via a `--strict-invocation`
+/// low-level inspection (warnings in the JSON report are probe-level, not
+/// invocation-level). A future option may surface this via a strict mode
 /// flag if downstream tooling wants to detect renaming.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Invocation {
@@ -105,14 +108,17 @@ const REPAIR_DOMAINS: &[&str] = &["fs", "mount", "boot"];
 /// Run the program. Returns the exit code; `main.rs` forwards it to
 /// `std::process::exit`.
 pub fn run(invocation: Invocation, argv: &[String]) -> i32 {
-    // Per-invocation `--help` / `--version` handling.
-    //
-    // `catos-doctor` keeps its strict single-argument contract: any
-    // non-help / non-version argument is an error, and the help text is
-    // only emitted for the exact `[--help]` / `[-h]` shape. The other
-    // entry points follow the conventional Unix behaviour of
-    // short-circuiting on `--help` / `--version` appearing anywhere in
-    // argv.
+    if invocation == Invocation::CatosSystem {
+        return run_system(argv);
+    }
+
+    if invocation == Invocation::CatosRepair && argv.is_empty() {
+        return run_repair_menu();
+    }
+    if invocation == Invocation::CatosRecovery && argv.is_empty() {
+        return run_recovery_menu();
+    }
+
     if invocation == Invocation::CatosDoctor {
         match argv {
             [arg] if matches!(arg.as_str(), "-h" | "--help") => {
@@ -124,18 +130,27 @@ pub fn run(invocation: Invocation, argv: &[String]) -> i32 {
             }
             [] => {}
             _ => {
-                eprintln!("{invocation}: argument error: catos-doctor does not accept arguments");
-                return exit_code::ARG_ERROR;
+                return usage_error(
+                    invocation.as_str(),
+                    "doctor does not take additional arguments",
+                    "Run `catos-doctor` by itself, or use `catos-doctor --help`.",
+                );
             }
         }
+        if let Some(exit) = elevation::require_root_or_reexec("doctor", &[], invocation.as_str()) {
+            return exit;
+        }
     } else if argv.iter().any(|a| a == "--help" || a == "-h") {
-        if invocation == Invocation::CatosRecovery {
-            if let Some(command) = argv
-                .iter()
-                .find(|argument| !argument.starts_with('-'))
-                .map(String::as_str)
-            {
+        if let Some(command) = argv
+            .iter()
+            .find(|argument| !argument.starts_with('-'))
+            .map(String::as_str)
+        {
+            if invocation == Invocation::CatosRecovery {
                 return print_recovery_command_help(command);
+            }
+            if invocation == Invocation::CatosRepair {
+                return print_repair_command_help(command);
             }
         }
         return print_help(invocation);
@@ -145,6 +160,652 @@ pub fn run(invocation: Invocation, argv: &[String]) -> i32 {
     }
 
     invocation_dispatch(invocation, argv)
+}
+
+fn run_system(argv: &[String]) -> i32 {
+    let Some(command) = argv.first().map(String::as_str) else {
+        return run_system_menu();
+    };
+    let rest = &argv[1..];
+    match command {
+        "-h" | "--help" => print_help(Invocation::CatosSystem),
+        "-V" | "--version" => {
+            println!("catos-system {}", crate::PROGRAM_VERSION);
+            exit_code::SUCCESS
+        }
+        "help" => run_system_help(rest),
+        "doctor" => run(Invocation::CatosDoctor, rest),
+        "chroot" => run(Invocation::CatosChroot, rest),
+        "repair" => run(Invocation::CatosRepair, rest),
+        "recovery" => run(Invocation::CatosRecovery, rest),
+        "update" => run(Invocation::CatosUpdate, rest),
+        "advanced" => {
+            if rest.is_empty()
+                || rest
+                    .iter()
+                    .any(|arg| matches!(arg.as_str(), "-h" | "--help"))
+            {
+                print_advanced_help()
+            } else {
+                run_via_full_parser(Invocation::CatosSystem, rest)
+            }
+        }
+        // Compatibility for scripts using the old low-level spellings. They
+        // remain functional, but no longer dominate the normal help surface.
+        "inspect" | "environment" | "capabilities" | "storage" | "target" => {
+            run_via_full_parser(Invocation::CatosSystem, argv)
+        }
+        option if is_legacy_low_level_option(option) => {
+            run_via_full_parser(Invocation::CatosSystem, argv)
+        }
+        other if other.starts_with('-') => usage_error(
+            "catos-system",
+            &format!("unknown option {other:?}"),
+            "Run `catos-system --help` to see the available options.",
+        ),
+        other => usage_error(
+            "catos-system",
+            &format!("unknown command {other:?}"),
+            "Run `catos-system --help` to see the available maintenance actions.",
+        ),
+    }
+}
+
+fn is_legacy_low_level_option(argument: &str) -> bool {
+    matches!(
+        argument,
+        "--json"
+            | "--root"
+            | "--root-device"
+            | "--root-subvolume"
+            | "--esp-device"
+            | "--snapshot-subvolume"
+            | "--plan-id"
+            | "--plan-file"
+            | "--confirm"
+            | "--transaction"
+    ) || [
+        "--root=",
+        "--root-device=",
+        "--root-subvolume=",
+        "--esp-device=",
+        "--snapshot-subvolume=",
+        "--plan-id=",
+        "--plan-file=",
+        "--confirm=",
+        "--transaction=",
+    ]
+    .iter()
+    .any(|prefix| argument.starts_with(prefix))
+}
+
+fn run_system_help(topic: &[String]) -> i32 {
+    match topic {
+        [] => print_help(Invocation::CatosSystem),
+        [name] if name == "doctor" => print_help(Invocation::CatosDoctor),
+        [name] if name == "chroot" => print_help(Invocation::CatosChroot),
+        [name] if name == "repair" => print_help(Invocation::CatosRepair),
+        [name] if name == "recovery" => print_help(Invocation::CatosRecovery),
+        [name] if name == "update" => print_help(Invocation::CatosUpdate),
+        [name] if name == "advanced" => print_advanced_help(),
+        [name, command] if name == "recovery" => print_recovery_command_help(command),
+        [name, command] if name == "repair" => print_repair_command_help(command),
+        [other, ..] => usage_error(
+            "catos-system",
+            &format!("no help topic named {other:?}"),
+            "Run `catos-system --help` to see the available commands.",
+        ),
+    }
+}
+
+fn run_system_menu() -> i32 {
+    loop {
+        let selected = match menu::choose(
+            "CatOS System Tools",
+            &[
+                "Check system health",
+                "Open installed system",
+                "Repair",
+                "Recover from a Btrfs snapshot",
+                "Update the running system",
+                "Advanced diagnostics",
+            ],
+        ) {
+            Ok(selected) => selected,
+            Err(error) => {
+                eprintln!("catos-system: {error}");
+                return exit_code::PROBE_FAILED;
+            }
+        };
+        match selected {
+            None => return exit_code::SUCCESS,
+            Some(0) => return run(Invocation::CatosDoctor, &[]),
+            Some(1) => return run(Invocation::CatosChroot, &[]),
+            Some(2) => {
+                if let Some(exit) =
+                    elevation::elevate_interactive_if_needed("repair", &[], "catos-system")
+                {
+                    return exit;
+                }
+                match interactive_repair() {
+                    Ok(Some(exit)) => return exit,
+                    Ok(None) => continue,
+                    Err(error) => {
+                        eprintln!("catos-system: {error}");
+                        return exit_code::PROBE_FAILED;
+                    }
+                }
+            }
+            Some(3) => {
+                if let Some(exit) =
+                    elevation::elevate_interactive_if_needed("recovery", &[], "catos-system")
+                {
+                    return exit;
+                }
+                match interactive_recovery() {
+                    Ok(Some(exit)) => return exit,
+                    Ok(None) => continue,
+                    Err(error) => {
+                        eprintln!("catos-system: {error}");
+                        return exit_code::PROBE_FAILED;
+                    }
+                }
+            }
+            Some(4) => return run(Invocation::CatosUpdate, &[]),
+            Some(5) => match interactive_advanced() {
+                Ok(Some(exit)) => return exit,
+                Ok(None) => continue,
+                Err(error) => {
+                    eprintln!("catos-system: {error}");
+                    return exit_code::PROBE_FAILED;
+                }
+            },
+            Some(_) => unreachable!("menu returned an out-of-range action"),
+        }
+    }
+}
+
+fn run_repair_menu() -> i32 {
+    if let Some(exit) = elevation::elevate_interactive_if_needed("repair", &[], "catos-repair") {
+        return exit;
+    }
+    match interactive_repair() {
+        Ok(Some(exit)) => exit,
+        Ok(None) => exit_code::SUCCESS,
+        Err(error) => {
+            eprintln!("catos-repair: {error}");
+            exit_code::PROBE_FAILED
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum InteractiveTarget {
+    Automatic,
+    Explicit {
+        device: String,
+        root_subvolume: Option<String>,
+    },
+}
+
+fn interactive_repair() -> Result<Option<i32>, String> {
+    let selected = menu::choose(
+        "Repair",
+        &[
+            "Check and repair a filesystem",
+            "Repair fstab and mount layout",
+            "Repair the boot setup",
+        ],
+    )?;
+    let Some(selected) = selected else {
+        return Ok(None);
+    };
+    let (domain, description) = match selected {
+        0 => ("fs", "Run filesystem repair now?"),
+        1 => (
+            "mount",
+            "Repair the selected system's mount configuration now?",
+        ),
+        2 => ("boot", "Repair the selected system's boot setup now?"),
+        _ => unreachable!("menu returned an out-of-range repair action"),
+    };
+
+    let Some(target) = choose_repair_target()? else {
+        return Ok(None);
+    };
+    let args = repair_args(domain, &target);
+    if !menu::confirm(description)? {
+        return Ok(None);
+    }
+    Ok(Some(run_repair(&args)))
+}
+
+fn choose_repair_target() -> Result<Option<InteractiveTarget>, String> {
+    let choice = menu::choose(
+        "Repair Target",
+        &[
+            "Choose a detected CatOS installation",
+            "Let CatOS choose the only safe target automatically",
+            "Enter a root device manually",
+        ],
+    )?;
+    match choice {
+        None => Ok(None),
+        Some(0) => select_detected_target("catos-repair"),
+        Some(1) => Ok(Some(InteractiveTarget::Automatic)),
+        Some(2) => prompt_manual_target(),
+        Some(_) => unreachable!("menu returned an out-of-range repair target action"),
+    }
+}
+
+fn choose_recovery_target() -> Result<Option<InteractiveTarget>, String> {
+    let choice = menu::choose(
+        "Recovery Target",
+        &[
+            "Choose a detected CatOS installation",
+            "Enter a root device manually",
+        ],
+    )?;
+    match choice {
+        None => Ok(None),
+        Some(0) => select_detected_target("catos-recovery"),
+        Some(1) => prompt_manual_target(),
+        Some(_) => unreachable!("menu returned an out-of-range recovery target action"),
+    }
+}
+
+fn select_detected_target(program: &str) -> Result<Option<InteractiveTarget>, String> {
+    crate::mount::execute::namespace::establish_private_namespace().map_err(|error| {
+        format!("cannot establish a private mount namespace for target discovery: {error}")
+    })?;
+    let report = crate::target::discovery::discover_targets();
+    let cleanup_errors = report
+        .cleanup
+        .iter()
+        .filter(|cleanup| !cleanup.is_clean())
+        .map(|cleanup| {
+            format!(
+                "{}: {}",
+                cleanup.mountpoint.display(),
+                cleanup
+                    .error
+                    .as_deref()
+                    .unwrap_or("temporary probe was not fully cleaned up")
+            )
+        })
+        .collect::<Vec<_>>();
+    if !cleanup_errors.is_empty() {
+        return Err(format!(
+            "target discovery cleanup was incomplete: {}",
+            cleanup_errors.join("; ")
+        ));
+    }
+
+    match crate::selection_ui::select_target(&report, program) {
+        crate::selection_ui::Selection::Selected(candidate) => {
+            Ok(Some(InteractiveTarget::Explicit {
+                device: candidate.root_device.display().to_string(),
+                root_subvolume: candidate.root_subvolume.clone(),
+            }))
+        }
+        crate::selection_ui::Selection::Declined => Ok(None),
+        crate::selection_ui::Selection::Unavailable(reason) => Err(reason),
+    }
+}
+
+fn prompt_manual_target() -> Result<Option<InteractiveTarget>, String> {
+    let Some(device) = menu::prompt("Root device, for example /dev/nvme0n1p2")? else {
+        return Ok(None);
+    };
+    Ok(Some(InteractiveTarget::Explicit {
+        device,
+        root_subvolume: None,
+    }))
+}
+
+fn repair_args(domain: &str, target: &InteractiveTarget) -> Vec<String> {
+    let mut args = vec![domain.to_string()];
+    match target {
+        InteractiveTarget::Automatic => {}
+        InteractiveTarget::Explicit {
+            device,
+            root_subvolume,
+        } if domain == "fs" => args.push(device.clone()),
+        InteractiveTarget::Explicit {
+            device,
+            root_subvolume,
+        } => {
+            args.extend(["--root-device".into(), device.clone()]);
+            if let Some(root_subvolume) = root_subvolume {
+                args.extend(["--root-subvolume".into(), root_subvolume.clone()]);
+            }
+        }
+    }
+    args
+}
+
+fn append_recovery_target_args(args: &mut Vec<String>, target: &InteractiveTarget) {
+    let InteractiveTarget::Explicit {
+        device,
+        root_subvolume,
+    } = target
+    else {
+        unreachable!("recovery target cannot use automatic selection")
+    };
+    args.extend(["--root-device".into(), device.clone()]);
+    if let Some(root_subvolume) = root_subvolume {
+        args.extend(["--root-subvolume".into(), root_subvolume.clone()]);
+    }
+}
+
+fn recovery_target_selection(target: &InteractiveTarget) -> crate::cli::TargetSelection {
+    let InteractiveTarget::Explicit {
+        device,
+        root_subvolume,
+    } = target
+    else {
+        unreachable!("recovery target cannot use automatic selection")
+    };
+    crate::cli::TargetSelection {
+        root_device: Some(std::path::PathBuf::from(device)),
+        root_subvolume: root_subvolume.clone(),
+        esp_device: None,
+    }
+}
+
+fn load_recovery_choices(
+    target: &InteractiveTarget,
+) -> Result<crate::recovery::model::RecoveryListReport, String> {
+    let outcome = crate::recovery::run_recovery(crate::cli::RecoveryArgs {
+        subcommand: crate::cli::RecoverySubcommand::List,
+        target: recovery_target_selection(target),
+        ..Default::default()
+    });
+    match outcome {
+        crate::recovery::RecoveryOutcome::List(report) => Ok(report),
+        crate::recovery::RecoveryOutcome::Error(error) => {
+            Err(format!("cannot enumerate recovery choices: {error}"))
+        }
+        _ => unreachable!("recovery list returned a non-list outcome"),
+    }
+}
+
+fn snapshot_menu_items(
+    report: &crate::recovery::model::RecoveryListReport,
+) -> Vec<(String, String)> {
+    report
+        .readonly_snapshots
+        .iter()
+        .filter(|snapshot| {
+            !crate::snapshot::diagnose::identity::is_protected_recovery_path(&snapshot.path)
+        })
+        .map(|snapshot| {
+            (
+                snapshot.path.clone(),
+                format!(
+                    "{} (subvolid {}, generation {})",
+                    snapshot.path, snapshot.subvolume_id, snapshot.generation
+                ),
+            )
+        })
+        .collect()
+}
+
+fn transaction_menu_items(
+    report: &crate::recovery::model::RecoveryListReport,
+) -> Vec<(String, String)> {
+    report
+        .transactions
+        .iter()
+        .map(|transaction| {
+            (
+                transaction.transaction_id.clone(),
+                format!(
+                    "{} — {} — snapshot {}",
+                    transaction.transaction_id,
+                    transaction.state.code(),
+                    transaction.source_snapshot_path
+                ),
+            )
+        })
+        .collect()
+}
+
+fn choose_snapshot(target: &InteractiveTarget) -> Result<Option<String>, String> {
+    let report = load_recovery_choices(target)?;
+    let choices = snapshot_menu_items(&report);
+    if choices.is_empty() {
+        println!("No eligible read-only snapshots were detected.");
+        return menu::prompt("Snapshot subvolume, for example /.snapshots/42/snapshot");
+    }
+    choose_recovery_item(
+        "Recovery Snapshot",
+        &choices,
+        "Enter a snapshot path manually",
+        "Snapshot subvolume, for example /.snapshots/42/snapshot",
+    )
+}
+
+fn choose_transaction(target: &InteractiveTarget) -> Result<Option<String>, String> {
+    let report = load_recovery_choices(target)?;
+    let choices = transaction_menu_items(&report);
+    if choices.is_empty() {
+        println!("No recovery transactions were detected.");
+        return menu::prompt("Transaction ID");
+    }
+    choose_recovery_item(
+        "Recovery Transaction",
+        &choices,
+        "Enter a transaction ID manually",
+        "Transaction ID",
+    )
+}
+
+fn choose_recovery_item(
+    title: &str,
+    choices: &[(String, String)],
+    manual_label: &str,
+    manual_prompt: &str,
+) -> Result<Option<String>, String> {
+    let mut labels = choices
+        .iter()
+        .map(|(_, label)| label.as_str())
+        .collect::<Vec<_>>();
+    labels.push(manual_label);
+    let Some(selected) = menu::choose(title, &labels)? else {
+        return Ok(None);
+    };
+    if selected == choices.len() {
+        menu::prompt(manual_prompt)
+    } else {
+        Ok(Some(choices[selected].0.clone()))
+    }
+}
+
+fn load_recovery_status(
+    target: &InteractiveTarget,
+    transaction: &str,
+) -> Result<crate::recovery::model::RecoveryStatusReport, String> {
+    let outcome = crate::recovery::run_recovery(crate::cli::RecoveryArgs {
+        subcommand: crate::cli::RecoverySubcommand::Status,
+        target: recovery_target_selection(target),
+        transaction: Some(transaction.to_string()),
+        ..Default::default()
+    });
+    match outcome {
+        crate::recovery::RecoveryOutcome::Status(report) => Ok(*report),
+        crate::recovery::RecoveryOutcome::Error(error) => Err(format!(
+            "cannot inspect recovery transaction {transaction:?}: {error}"
+        )),
+        _ => unreachable!("recovery status returned a non-status outcome"),
+    }
+}
+
+fn load_interactive_recovery_plan(
+    path: &str,
+) -> Result<crate::snapshot::model::RecoveryPlan, String> {
+    crate::snapshot::store::load_plan(std::path::Path::new(path))
+        .map_err(|error| format!("cannot load recovery plan {path:?}: {error}"))
+}
+
+fn print_recovery_plan_summary(plan: &crate::snapshot::model::RecoveryPlan) {
+    println!("Recovery plan:");
+    println!("  Plan ID         : {}", plan.plan_id);
+    println!("  Filesystem      : {}", plan.filesystem.fsid);
+    println!("  Current root    : {}", plan.current_root.path);
+    println!("  Source snapshot : {}", plan.source_snapshot.path);
+    if !plan.risks_and_warnings.is_empty() {
+        println!("  Risks and warnings:");
+        for warning in &plan.risks_and_warnings {
+            println!("    - {warning}");
+        }
+    }
+}
+
+fn run_recovery_menu() -> i32 {
+    if let Some(exit) = elevation::elevate_interactive_if_needed("recovery", &[], "catos-recovery")
+    {
+        return exit;
+    }
+    match interactive_recovery() {
+        Ok(Some(exit)) => exit,
+        Ok(None) => exit_code::SUCCESS,
+        Err(error) => {
+            eprintln!("catos-recovery: {error}");
+            exit_code::PROBE_FAILED
+        }
+    }
+}
+
+fn interactive_recovery() -> Result<Option<i32>, String> {
+    let selected = menu::choose(
+        "Btrfs Snapshot Recovery",
+        &[
+            "List recovery transactions",
+            "Inspect a snapshot",
+            "Create a recovery plan",
+            "Apply a recovery plan",
+            "Check a transaction",
+            "Resume an interrupted transaction",
+            "Revert a completed transaction",
+        ],
+    )?;
+    let Some(selected) = selected else {
+        return Ok(None);
+    };
+    let command = match selected {
+        0 => "list",
+        1 => "inspect",
+        2 => "plan",
+        3 => "apply",
+        4 => "status",
+        5 => "resume",
+        6 => "revert",
+        _ => unreachable!("menu returned an out-of-range recovery action"),
+    };
+    let Some(target) = choose_recovery_target()? else {
+        return Ok(None);
+    };
+    let mut args = vec![command.to_string()];
+    append_recovery_target_args(&mut args, &target);
+    match command {
+        "inspect" | "plan" => {
+            let Some(snapshot) = choose_snapshot(&target)? else {
+                return Ok(None);
+            };
+            args.extend(["--snapshot-subvolume".into(), snapshot]);
+        }
+        "apply" => {
+            let Some(plan_file) = menu::prompt("Recovery plan file")? else {
+                return Ok(None);
+            };
+            let plan = load_interactive_recovery_plan(&plan_file)?;
+            print_recovery_plan_summary(&plan);
+            args.extend([
+                "--plan-file".into(),
+                plan_file,
+                "--plan-id".into(),
+                plan.plan_id.clone(),
+                "--confirm".into(),
+                plan.confirmation_token.clone(),
+            ]);
+            if !menu::confirm("Apply this recovery plan now?")? {
+                return Ok(None);
+            }
+        }
+        "status" | "resume" | "revert" => {
+            let Some(transaction) = choose_transaction(&target)? else {
+                return Ok(None);
+            };
+            if command == "revert" {
+                let status = load_recovery_status(&target, &transaction)?;
+                println!("Transaction state: {}", status.reconciled_state.code());
+                let Some(token) = status.revert_confirmation_token else {
+                    return Err(format!(
+                        "transaction {transaction:?} cannot be reverted from state {}",
+                        status.reconciled_state.code()
+                    ));
+                };
+                args.extend(["--confirm".into(), token]);
+            }
+            args.extend(["--transaction".into(), transaction]);
+            if matches!(command, "resume" | "revert")
+                && !menu::confirm(if command == "resume" {
+                    "Resume this transaction now?"
+                } else {
+                    "Revert this transaction now?"
+                })?
+            {
+                return Ok(None);
+            }
+        }
+        "list" => {}
+        _ => unreachable!("unknown recovery menu command"),
+    }
+    Ok(Some(run(Invocation::CatosRecovery, &args)))
+}
+
+fn interactive_advanced() -> Result<Option<i32>, String> {
+    let selected = menu::choose(
+        "Advanced Diagnostics",
+        &[
+            "Inspect runtime, capabilities, and target",
+            "Inspect runtime environment",
+            "Inspect maintenance capabilities",
+            "Scan storage devices",
+            "Build a read-only target mount plan",
+            "Mount and inspect a target read-only",
+        ],
+    )?;
+    let Some(selected) = selected else {
+        return Ok(None);
+    };
+    let args = match selected {
+        0 => vec!["inspect"],
+        1 => vec!["environment"],
+        2 => vec!["capabilities"],
+        3 => vec!["storage", "scan"],
+        4 => vec!["target", "plan"],
+        5 => vec!["target", "mount"],
+        _ => unreachable!("menu returned an out-of-range advanced action"),
+    }
+    .into_iter()
+    .map(str::to_string)
+    .collect::<Vec<_>>();
+    Ok(Some(run_via_full_parser(Invocation::CatosSystem, &args)))
+}
+
+fn print_advanced_help() -> i32 {
+    use std::io::Write;
+    print!("{}", crate::cli::advanced_help_text());
+    std::io::stdout().flush().ok();
+    exit_code::SUCCESS
+}
+
+fn usage_error(program: &str, message: &str, hint: &str) -> i32 {
+    eprintln!("{program}: {message}");
+    eprintln!("{hint}");
+    exit_code::ARG_ERROR
 }
 
 /// Per-invocation routing once help / version has been handled. Each
@@ -175,39 +836,45 @@ fn invocation_dispatch(invocation: Invocation, argv: &[String]) -> i32 {
     }
 }
 
-/// Run the aggregated Doctor diagnosis and render the report. Per
-/// scheme B, the process exit code is `0` whenever Doctor produced a
-/// report — even if every section found a problem — and non-zero only
-/// when Doctor itself failed (broken invariant, namespace failure for
-/// a required offline probe, ...).
+/// Run the aggregated Doctor diagnosis and render its compact terminal report.
+/// Target health is carried by the report; process failure is reserved for a
+/// diagnosis that could not start or could not clean up its own resources.
 fn run_doctor() -> i32 {
-    use std::io::Write;
-
     let report = crate::doctor::run_doctor();
     let exit = crate::output::doctor_exit_code_for(&report);
-    let mut out = std::io::stdout();
-    if let Err(e) = crate::output::render_doctor_human(&report, &mut out) {
-        eprintln!("catos-doctor: {e}");
-        return e.exit_code();
+    let mut rendered = Vec::new();
+    if let Err(error) = crate::output::render_doctor_human(&report, &mut rendered) {
+        eprintln!("catos-doctor: {error}");
+        return error.exit_code();
     }
-    if let Err(e) = out.flush() {
-        eprintln!("catos-doctor: stdout write failed: {e}");
+    let rendered = match String::from_utf8(rendered) {
+        Ok(rendered) => rendered,
+        Err(error) => {
+            eprintln!("catos-doctor: rendered report is not UTF-8: {error}");
+            return crate::error::exit_code::SERIALIZE_FAILED;
+        }
+    };
+    if let Err(error) = pager::present(&rendered) {
+        eprintln!("catos-doctor: stdout write failed: {error}");
         return crate::error::exit_code::PROBE_FAILED;
     }
-    if matches!(report.target.kind, crate::doctor::model::DoctorTargetKind::None) {
+    if matches!(
+        report.target.kind,
+        crate::doctor::model::DoctorTargetKind::None
+    ) {
         crate::error::exit_code::PROBE_FAILED
     } else {
         exit
     }
 }
 
-/// Drive the canonical `catos-system` parser + phase orchestrators.
+/// Drive the low-level inspection, storage, and recovery parser.
 /// Used by every invocation that intentionally reuses the full command
 /// surface (`catos-system`, `catos-recovery`, and the argumentless
 /// `catos-doctor` diagnosis).
 fn run_via_full_parser(invocation: Invocation, argv: &[String]) -> i32 {
     use std::io::Write;
-    // Validate the default target root. In phase 1 the default is `/`;
+    // Validate the default target root. The default is `/`;
     // if `/` is somehow inaccessible we cannot proceed.
     let default_root = match crate::target::diagnose::system_root::SystemRoot::from_user_input("/")
     {
@@ -234,12 +901,12 @@ fn run_via_full_parser(invocation: Invocation, argv: &[String]) -> i32 {
             exit_code::SUCCESS
         }
         Ok(crate::cli::ParseOutcome::Run(args)) => {
-            if args.command.is_phase1() {
-                run_phase1(invocation, *args)
-            } else if args.command.is_phase2() {
-                run_phase2(invocation, *args)
+            if args.command.is_inspection_command() {
+                run_inspection_command(invocation, *args)
+            } else if args.command.is_storage_command() {
+                run_storage_command(invocation, *args)
             } else {
-                run_phase3(invocation, *args)
+                run_recovery_command(invocation, *args)
             }
         }
         Err(e) => {
@@ -249,8 +916,7 @@ fn run_via_full_parser(invocation: Invocation, argv: &[String]) -> i32 {
     }
 }
 
-/// `catos-repair` routing. `fs` is implemented in stage 2; `mount`
-/// is implemented in stage 3; `boot` is implemented in stage 4.
+/// `catos-repair` routing for filesystem, mount-layout, and boot repair.
 /// Any other name — including names that exist on `catos-system` or
 /// `catos-recovery` (inspect, recovery, plan, apply, status, ...) —
 /// is rejected with `ARG_ERROR` before any work happens. This is
@@ -260,9 +926,7 @@ fn run_repair(argv: &[String]) -> i32 {
     let domain_list = REPAIR_DOMAINS.join("|");
     match argv.first().map(String::as_str) {
         None => {
-            eprintln!(
-                "catos-repair: argument error: missing repair domain; expected one of {domain_list}"
-            );
+            eprintln!("catos-repair: missing repair domain; expected one of {domain_list}");
             exit_code::ARG_ERROR
         }
         Some("fs") => run_repair_fs(&argv[1..]),
@@ -276,7 +940,7 @@ fn run_repair(argv: &[String]) -> i32 {
         }
         Some(other) => {
             eprintln!(
-                "catos-repair: argument error: unknown repair domain {other:?}; expected one of {domain_list}"
+                "catos-repair: unknown repair domain {other:?}; expected one of {domain_list}"
             );
             exit_code::ARG_ERROR
         }
@@ -311,18 +975,14 @@ fn run_repair_fs(argv: &[String]) -> i32 {
             }
             other if !other.starts_with('-') => {
                 if explicit_device.is_some() {
-                    eprintln!(
-                        "catos-repair: argument error: only one positional <device> may be supplied"
-                    );
+                    eprintln!("catos-repair: only one positional <device> may be supplied");
                     return exit_code::ARG_ERROR;
                 }
                 explicit_device = Some(other.to_string());
                 idx += 1;
             }
             other => {
-                eprintln!(
-                    "catos-repair: argument error: unknown flag {other:?}; expected [--json] [<device>]"
-                );
+                eprintln!("catos-repair: unknown flag {other:?}; expected [--json] [<device>]");
                 return exit_code::ARG_ERROR;
             }
         }
@@ -333,7 +993,7 @@ fn run_repair_fs(argv: &[String]) -> i32 {
             let path = std::path::Path::new(&device);
             if !validate_repair_device_arg(path) {
                 eprintln!(
-                    "catos-repair: argument error: <device> must be an absolute /dev/... path without .. or prefix components"
+                    "catos-repair: <device> must be an absolute /dev/... path without .. or prefix components"
                 );
                 return exit_code::ARG_ERROR;
             }
@@ -369,7 +1029,7 @@ fn run_repair_fs(argv: &[String]) -> i32 {
 }
 
 /// Compute the process exit code for a repair outcome. The exit
-/// codes are chosen to align with the existing phase-1 contract:
+/// Exit codes remain compatible with the existing command contract:
 ///
 /// * `0` for any success (clean / repaired / repaired_with_risk).
 ///   RepairedWithRisk is still a success: the spec says repair may
@@ -438,9 +1098,7 @@ fn run_repair_mount(argv: &[String]) -> i32 {
             "--root-device" => {
                 idx += 1;
                 if idx >= argv.len() {
-                    eprintln!(
-                        "catos-repair: argument error: --root-device requires a /dev/... value"
-                    );
+                    eprintln!("catos-repair: --root-device requires a /dev/... value");
                     return exit_code::ARG_ERROR;
                 }
                 root_device = Some(argv[idx].clone());
@@ -449,9 +1107,7 @@ fn run_repair_mount(argv: &[String]) -> i32 {
             "--root-subvolume" => {
                 idx += 1;
                 if idx >= argv.len() {
-                    eprintln!(
-                        "catos-repair: argument error: --root-subvolume requires a PATH value"
-                    );
+                    eprintln!("catos-repair: --root-subvolume requires a PATH value");
                     return exit_code::ARG_ERROR;
                 }
                 root_subvolume = Some(argv[idx].clone());
@@ -460,9 +1116,7 @@ fn run_repair_mount(argv: &[String]) -> i32 {
             "--esp-device" => {
                 idx += 1;
                 if idx >= argv.len() {
-                    eprintln!(
-                        "catos-repair: argument error: --esp-device requires a /dev/... value"
-                    );
+                    eprintln!("catos-repair: --esp-device requires a /dev/... value");
                     return exit_code::ARG_ERROR;
                 }
                 esp_device = Some(argv[idx].clone());
@@ -482,7 +1136,7 @@ fn run_repair_mount(argv: &[String]) -> i32 {
             }
             other => {
                 eprintln!(
-                    "catos-repair: argument error: unknown flag {other:?}; expected [--json] [--root-device /dev/...] [--root-subvolume PATH] [--esp-device /dev/...]"
+                    "catos-repair: unknown flag {other:?}; expected [--json] [--root-device /dev/...] [--root-subvolume PATH] [--esp-device /dev/...]"
                 );
                 return exit_code::ARG_ERROR;
             }
@@ -492,7 +1146,7 @@ fn run_repair_mount(argv: &[String]) -> i32 {
     if let Some(rd) = root_device.as_deref() {
         if !validate_repair_device_arg(std::path::Path::new(rd)) {
             eprintln!(
-                "catos-repair: argument error: --root-device must be an absolute /dev/... path without .. or prefix components"
+                "catos-repair: --root-device must be an absolute /dev/... path without .. or prefix components"
             );
             return exit_code::ARG_ERROR;
         }
@@ -500,7 +1154,7 @@ fn run_repair_mount(argv: &[String]) -> i32 {
     if let Some(ed) = esp_device.as_deref() {
         if !validate_repair_device_arg(std::path::Path::new(ed)) {
             eprintln!(
-                "catos-repair: argument error: --esp-device must be an absolute /dev/... path without .. or prefix components"
+                "catos-repair: --esp-device must be an absolute /dev/... path without .. or prefix components"
             );
             return exit_code::ARG_ERROR;
         }
@@ -587,9 +1241,7 @@ fn run_repair_boot(argv: &[String]) -> i32 {
             "--root-device" => {
                 idx += 1;
                 if idx >= argv.len() {
-                    eprintln!(
-                        "catos-repair: argument error: --root-device requires a /dev/... value"
-                    );
+                    eprintln!("catos-repair: --root-device requires a /dev/... value");
                     return exit_code::ARG_ERROR;
                 }
                 root_device = Some(argv[idx].clone());
@@ -598,9 +1250,7 @@ fn run_repair_boot(argv: &[String]) -> i32 {
             "--root-subvolume" => {
                 idx += 1;
                 if idx >= argv.len() {
-                    eprintln!(
-                        "catos-repair: argument error: --root-subvolume requires a PATH value"
-                    );
+                    eprintln!("catos-repair: --root-subvolume requires a PATH value");
                     return exit_code::ARG_ERROR;
                 }
                 root_subvolume = Some(argv[idx].clone());
@@ -609,9 +1259,7 @@ fn run_repair_boot(argv: &[String]) -> i32 {
             "--esp-device" => {
                 idx += 1;
                 if idx >= argv.len() {
-                    eprintln!(
-                        "catos-repair: argument error: --esp-device requires a /dev/... value"
-                    );
+                    eprintln!("catos-repair: --esp-device requires a /dev/... value");
                     return exit_code::ARG_ERROR;
                 }
                 esp_device = Some(argv[idx].clone());
@@ -631,7 +1279,7 @@ fn run_repair_boot(argv: &[String]) -> i32 {
             }
             other => {
                 eprintln!(
-                    "catos-repair: argument error: unknown flag {other:?}; expected [--json] [--root-device /dev/...] [--root-subvolume PATH] [--esp-device /dev/...]"
+                    "catos-repair: unknown flag {other:?}; expected [--json] [--root-device /dev/...] [--root-subvolume PATH] [--esp-device /dev/...]"
                 );
                 return exit_code::ARG_ERROR;
             }
@@ -641,7 +1289,7 @@ fn run_repair_boot(argv: &[String]) -> i32 {
     if let Some(rd) = root_device.as_deref() {
         if !validate_repair_device_arg(std::path::Path::new(rd)) {
             eprintln!(
-                "catos-repair: argument error: --root-device must be an absolute /dev/... path without .. or prefix components"
+                "catos-repair: --root-device must be an absolute /dev/... path without .. or prefix components"
             );
             return exit_code::ARG_ERROR;
         }
@@ -649,7 +1297,7 @@ fn run_repair_boot(argv: &[String]) -> i32 {
     if let Some(ed) = esp_device.as_deref() {
         if !validate_repair_device_arg(std::path::Path::new(ed)) {
             eprintln!(
-                "catos-repair: argument error: --esp-device must be an absolute /dev/... path without .. or prefix components"
+                "catos-repair: --esp-device must be an absolute /dev/... path without .. or prefix components"
             );
             return exit_code::ARG_ERROR;
         }
@@ -702,7 +1350,7 @@ fn boot_outcome_exit_code(outcome: crate::boot::model::BootRepairOutcome) -> i32
 
 /// Validate the positional `<device>` argument: absolute, under
 /// `/dev/`, no `..` or platform prefix. Reuses the same checks as
-/// `cli::parse_device_path` without dragging in the phase-2
+/// `cli::parse_device_path` without dragging in the target-selection
 /// TargetSelection parser (which has its own per-option quirks).
 fn validate_repair_device_arg(path: &std::path::Path) -> bool {
     use std::path::Component;
@@ -733,13 +1381,81 @@ fn run_update(argv: &[String]) -> i32 {
 
 /// `catos-chroot` routing. Delegates to the dedicated `chroot` module
 /// which owns the lsblk + LUKS + btrfs-subvolume + fstab auto-mount +
-/// arch-chroot workflow. The module handles
-/// `--skip-root-check`, `--no-auto-mount`, `--no-systemd-chroot`, and
-/// `--show-btrfs-dot-snapshots`; any other token is rejected before
+/// arch-chroot workflow. The module handles `--no-auto-mount`,
+/// `--no-systemd-chroot`, and `--show-btrfs-dot-snapshots`; any other token is rejected before
 /// any external command runs. This MUST NOT inherit any
 /// `catos-system` subcommand.
 fn run_chroot(argv: &[String]) -> i32 {
     chroot::run(argv)
+}
+
+fn print_repair_command_help(command: &str) -> i32 {
+    use std::io::Write;
+    let version = crate::PROGRAM_VERSION;
+    let body = match command {
+        "fs" => format!(
+            r#"catos-repair {version} - check and repair a filesystem
+
+USAGE:
+    catos-repair fs [--json] [DEVICE]
+    catos-system repair fs [--json] [DEVICE]
+
+DEVICE:
+    Optional absolute path below /dev. When omitted, exactly one verified
+    offline CatOS root must be discoverable.
+
+OPTIONS:
+    --json        Emit machine-readable JSON.
+    -h, --help    Show this help message.
+"#
+        ),
+        "mount" => format!(
+            r#"catos-repair {version} - repair fstab and the mount layout
+
+USAGE:
+    catos-repair mount [OPTIONS]
+    catos-system repair mount [OPTIONS]
+
+OPTIONS:
+    --root-device /dev/...    Select an offline root device.
+    --root-subvolume PATH     Select its Btrfs root subvolume.
+    --esp-device /dev/...     Select the EFI System Partition.
+    --json                    Emit machine-readable JSON.
+    -h, --help                Show this help message.
+
+The command preserves comments and unrelated fstab entries, verifies the
+resulting mount graph, and reports any cleanup that could not be completed.
+"#
+        ),
+        "boot" => format!(
+            r#"catos-repair {version} - repair the detected boot setup
+
+USAGE:
+    catos-repair boot [OPTIONS]
+    catos-system repair boot [OPTIONS]
+
+OPTIONS:
+    --root-device /dev/...    Select an offline root device.
+    --root-subvolume PATH     Select its Btrfs root subvolume.
+    --esp-device /dev/...     Select the EFI System Partition.
+    --json                    Emit machine-readable JSON.
+    -h, --help                Show this help message.
+
+The existing provider is detected from the selected installation. This
+command does not migrate the installation to a different boot provider.
+"#
+        ),
+        other => {
+            return usage_error(
+                "catos-repair",
+                &format!("unknown repair command {other:?}"),
+                "Choose `fs`, `mount`, or `boot`.",
+            );
+        }
+    };
+    print!("{body}");
+    std::io::stdout().flush().ok();
+    exit_code::SUCCESS
 }
 
 fn print_recovery_command_help(command: &str) -> i32 {
@@ -770,7 +1486,7 @@ fn print_recovery_command_help(command: &str) -> i32 {
         ),
         _ => {
             eprintln!(
-                "catos-recovery: argument error: unknown recovery command {command:?}; expected list|inspect|plan|apply|status|resume|revert"
+                "catos-recovery: unknown recovery command {command:?}; expected list|inspect|plan|apply|status|resume|revert"
             );
             return exit_code::ARG_ERROR;
         }
@@ -789,41 +1505,82 @@ fn print_help(invocation: Invocation) -> i32 {
     match invocation {
         Invocation::CatosDoctor => {
             print!(
-                "catos-doctor {version} - CatOS aggregated diagnosis\n\nUSAGE:\n    catos-doctor\n\nOPTIONS:\n    -h, --help    Show this help message and exit.\n    -V, --version Print program version and exit.\n\nDIAGNOSTIC SECTIONS:\n    environment   Runtime facts and primary mode.\n    storage       Block devices and target identity.\n    filesystem    Read-only fsck check (e2fsck -n, xfs_repair -n,\n                  btrfs check --readonly, fsck.fat -n).\n    mount         fstab, root source, standard subvolumes, ESP,\n                  and the six /boot/ESP layouts.\n    boot          Bootloader provider detection (GRUB, Limine,\n                  systemd-boot, UKI, EFI Stub) from target evidence.\n    secure_boot   Firmware runtime + target policy consistency.\n    recovery      Btrfs snapshot transaction state.\n\nEXIT CODES (scheme B):\n    0   Doctor completed the diagnosis and produced a report,\n        regardless of whether the target is healthy.\n    !=0 Doctor itself could not complete the diagnosis.\n\nNOTES:\n    * catos-doctor takes no functional arguments. There is no\n      `inspect`, `preflight`, `--root-device`, or `--json` form.\n    * catos-doctor is read-only. It never invokes a repair flow;\n      the only resources it may clean up are mounts it created\n      itself inside its private mount namespace.\n",
+                r#"catos-doctor {version} - check a CatOS installation
+
+USAGE:
+    catos-doctor
+
+CHECKS:
+    Runtime environment and target selection
+    Filesystem health
+    fstab and mount layout
+    Boot setup and Secure Boot policy
+    Snapshot recovery state
+
+The check is read-only. Administrator privileges are requested before storage
+probing. Reports that exceed the terminal height use an internal pager:
+Enter advances and q quits. Exit status is zero when a selected target was
+diagnosed, even when problems were found; privilege, target-selection,
+namespace, and cleanup failures return non-zero. Run without arguments.
+"#
             );
         }
         Invocation::CatosRepair => {
             print!(
-                "catos-repair {version} - CatOS fs/mount/boot repair entry point\n\nUSAGE:\n    catos-repair <DOMAIN> [OPTIONS] [<DEVICE>]\n    catos-repair --help\n    catos-repair --version\n\nREPAIR DOMAINS:\n    fs      Filesystem repair through official system fsck tools.\n            Supports ext2/ext3/ext4, vfat/fat, f2fs, xfs, and\n            single-device btrfs after strict safety checks.\n    mount   Transactional fstab and mount-layout repair. Supports\n            CatOS Btrfs standard subvolumes plus plain ext2/3/4,\n            XFS, and F2FS roots; preserves all six /boot/ESP layouts.\n    boot    Bootloader-provider repair (stage 4). Detects the target's\n            current provider (GRUB, Limine, systemd-boot, UKI, EFI Stub)\n            from its own configuration and re-applies the provider's\n            recipe through a fixed-whitelist target command executor.\n\nOPTIONS:\n    --json        Emit a stable JSON report on stdout.\n    -h, --help    Show this help message and exit.\n    -V, --version Print program version and exit.\n\nFS DOMAIN:\n    catos-repair fs [--json] [<device>]\n        The running root and pre-existing mounts are refused. With no\n        device, only one verified high-confidence CatOS root may be\n        selected automatically; ambiguity fails closed.\n\nMOUNT DOMAIN:\n    catos-repair mount [--json]\n        [--root-device /dev/...] [--root-subvolume /@]\n        [--esp-device /dev/...]\n        The command itself authorises repair. It may repair a uniquely\n        verified running CatOS root without unmounting it, or an offline\n        Btrfs/plain root. Existing data is never migrated or overwritten.\n\nBOOT DOMAIN:\n    catos-repair boot [--json]\n        [--root-device /dev/...] [--root-subvolume /@]\n        [--esp-device /dev/...]\n        Re-applies the detected bootloader provider's recipe. The\n        provider is identified from the target's own configuration\n        and deployed artefacts; the live host's installed tools are\n        never used as the trigger. Partial success from non-atomic\n        operations (EFI NVRAM, signatures) is reported honestly.\n\nNOTES:\n    * Only fs, mount, and boot are recognised. This entry point does\n      not inherit catos-system or catos-recovery commands.\n    * Filesystem repair is best-effort and reports high-risk fallbacks.\n    * Mount repair preserves comments and unrelated fstab entries,\n      validates the complete repaired mount graph, and rolls back\n      newly-created empty resources if verification fails.\n    * Boot repair preserves the target's existing provider; it never\n      migrates GRUB to systemd-boot, swaps providers, or auto-enables\n      Secure Boot because the live host happens to have it on.\n",
+                r#"catos-repair {version} - repair a CatOS installation
+
+USAGE:
+    catos-repair
+    catos-repair <COMMAND> [OPTIONS]
+
+COMMANDS:
+    fs       Check and repair a filesystem.
+    mount    Repair fstab and the mount layout.
+    boot     Repair the detected boot setup.
+
+OPTIONS:
+    --json           Emit machine-readable JSON.
+    --root-device    Select an offline root device.
+    --root-subvolume Select its Btrfs root subvolume.
+    --esp-device     Select the EFI System Partition.
+    -h, --help       Show this help message.
+
+Run without a command to choose the repair interactively.
+"#
             );
         }
-        Invocation::CatosUpdate => {
-            crate::update::print_help();
-        }
-        Invocation::CatosChroot => {
-            chroot::print_help();
-        }
+        Invocation::CatosUpdate => crate::update::print_help(),
+        Invocation::CatosChroot => chroot::print_help(),
         Invocation::CatosRecovery => {
             print!(
-                "catos-recovery {version} - CatOS Btrfs snapshot recovery\n\nUSAGE:\n    catos-recovery <COMMAND> [OPTIONS]\n\nCOMMANDS:\n    list      List existing recovery transactions.\n    inspect   Inspect the selected recovery target read-only.\n    plan      Create an immutable recovery plan.\n    apply     Apply a confirmed recovery plan.\n    status    Read and reconcile a transaction record.\n    resume    Continue an in-flight transaction.\n    revert    Restore the pre-recovery root.\n\nOPTIONS:\n    -h, --help    Show this help message and exit.\n    -V, --version Print program version and exit.\n\nNOTES:\n    * Commands are direct: use `catos-recovery plan`, not\n      `catos-recovery recovery plan`.\n    * This entry point does not provide environment, capabilities,\n      storage, or target subcommands.\n",
+                r#"catos-recovery {version} - recover a Btrfs CatOS installation
+
+USAGE:
+    catos-recovery
+    catos-recovery <COMMAND> [OPTIONS]
+
+COMMANDS:
+    list      List recovery transactions.
+    inspect   Inspect a snapshot and target read-only.
+    plan      Create a recovery plan.
+    apply     Apply a confirmed recovery plan.
+    status    Check a transaction.
+    resume    Resume an interrupted transaction.
+    revert    Restore the previous root.
+
+Run without a command to choose an action interactively.
+"#
             );
         }
-        Invocation::CatosSystem => {
-            // These invocations intentionally reuse the full parser
-            // surface, so the full help text is appropriate. The
-            // leading name is rebranded so operators invoking via a
-            // symlink see their entry point identified.
-            let text = crate::cli::help_text().replacement_help_name(invocation);
-            print!("{text}");
-        }
+        Invocation::CatosSystem => print!("{}", crate::cli::help_text()),
     }
     std::io::stdout().flush().ok();
     exit_code::SUCCESS
 }
 
-/// Dispatch a phase-1 command (environment / capabilities / inspect).
+/// Dispatch a low-level inspection command.
 /// Builds an InspectionReport and renders the selected view.
-fn run_phase1(invocation: Invocation, args: crate::cli::CliArgs) -> i32 {
+fn run_inspection_command(invocation: Invocation, args: crate::cli::CliArgs) -> i32 {
     use std::io::Write;
 
     let view = args.command.view();
@@ -855,9 +1612,9 @@ fn run_phase1(invocation: Invocation, args: crate::cli::CliArgs) -> i32 {
     }
 }
 
-/// Dispatch a phase-2 command (storage scan / target plan / target mount).
-/// Builds the phase-2 outcome and renders it via the phase-2 output layer.
-fn run_phase2(invocation: Invocation, args: crate::cli::CliArgs) -> i32 {
+/// Dispatch a storage or read-only target-mount command.
+/// Build and render the selected storage outcome.
+fn run_storage_command(invocation: Invocation, args: crate::cli::CliArgs) -> i32 {
     use std::io::Write;
 
     let outcome_result = match args.command {
@@ -866,14 +1623,14 @@ fn run_phase2(invocation: Invocation, args: crate::cli::CliArgs) -> i32 {
         crate::cli::Command::TargetMount => {
             crate::system::run_target_mount(&args.root, &args.target)
         }
-        // Phase-1 commands never reach here (is_phase1() routes them away).
-        other => unreachable!("run_phase2 called with phase-1 command {other:?}"),
+        // Inspection commands never reach this function.
+        other => unreachable!("run_storage_command called with non-storage command {other:?}"),
     };
 
     match outcome_result {
         Ok(outcome) => {
             let result = if args.json {
-                crate::output::render_phase2_json(
+                crate::output::render_system_json(
                     &outcome,
                     invocation.as_str(),
                     args.root.as_path(),
@@ -884,7 +1641,7 @@ fn run_phase2(invocation: Invocation, args: crate::cli::CliArgs) -> i32 {
                 })
             } else {
                 let mut out = std::io::stdout();
-                crate::output::render_phase2_human(&outcome, &mut out)
+                crate::output::render_system_human(&outcome, &mut out)
                     .and_then(|_| out.flush())
                     .map_err(|e| Error::SerializeFailed(format!("stdout write: {e}")))
             };
@@ -899,7 +1656,7 @@ fn run_phase2(invocation: Invocation, args: crate::cli::CliArgs) -> i32 {
         Err(e) => {
             let exit = e.exit_code();
             if args.json {
-                match crate::output::render_phase2_error_json(
+                match crate::output::render_system_error_json(
                     &e,
                     invocation.as_str(),
                     args.root.as_path(),
@@ -922,8 +1679,8 @@ fn run_phase2(invocation: Invocation, args: crate::cli::CliArgs) -> i32 {
     }
 }
 
-/// Dispatch a phase-3 recovery command.
-fn run_phase3(invocation: Invocation, args: crate::cli::CliArgs) -> i32 {
+/// Dispatch a snapshot recovery command.
+fn run_recovery_command(invocation: Invocation, args: crate::cli::CliArgs) -> i32 {
     use std::io::Write;
 
     let recovery_args = match args.recovery.clone() {
@@ -935,7 +1692,7 @@ fn run_phase3(invocation: Invocation, args: crate::cli::CliArgs) -> i32 {
     };
     let outcome = crate::recovery::run_recovery(recovery_args);
     let result = if args.json {
-        crate::recovery::output::render_phase3_json(
+        crate::recovery::output::render_recovery_json(
             &outcome,
             invocation.as_str(),
             args.root.as_path(),
@@ -945,7 +1702,7 @@ fn run_phase3(invocation: Invocation, args: crate::cli::CliArgs) -> i32 {
         })
     } else {
         let mut out = std::io::stdout();
-        crate::recovery::output::render_phase3_human(&outcome, &mut out)
+        crate::recovery::output::render_recovery_human(&outcome, &mut out)
             .and_then(|_| out.flush())
             .map_err(|e| Error::SerializeFailed(format!("stdout write: {e}")))
     };
@@ -969,7 +1726,7 @@ impl HelpRewrite for String {
 }
 
 /// Write a JSON document to stdout followed by a newline, propagating I/O
-/// errors instead of silently dropping them. Phase 1 reports pipe failures
+/// errors instead of silently dropping them. Inspection reports treat pipe failures
 /// (e.g. broken pipe to `head`) as serialization errors so the exit code
 /// reflects that the consumer did not receive the full document.
 fn write_json_stdout(json: &str) -> std::io::Result<()> {
@@ -985,6 +1742,95 @@ fn write_json_stdout(json: &str) -> std::io::Result<()> {
 mod tests {
     use super::*;
     use crate::boot::model::BootRepairOutcome;
+
+    #[test]
+    fn recovery_choice_labels_preserve_machine_values() {
+        let report = crate::recovery::model::RecoveryListReport {
+            readonly_snapshots: vec![crate::snapshot::model::BtrfsSubvolumeIdentity {
+                path: "/.snapshots/42/snapshot".into(),
+                subvolume_id: 420,
+                generation: 99,
+                uuid: None,
+                parent_uuid: None,
+                read_only: true,
+                evidence: Vec::new(),
+            }],
+            transactions: vec![crate::recovery::model::TransactionSummary {
+                transaction_id: "tx-123".into(),
+                state: crate::snapshot::model::TransactionState::Completed,
+                plan_id: "plan-123".into(),
+                created_at_unix: 1,
+                last_updated_unix: 2,
+                source_snapshot_path: "/.snapshots/42/snapshot".into(),
+            }],
+            ..Default::default()
+        };
+        let snapshots = snapshot_menu_items(&report);
+        assert_eq!(snapshots[0].0, "/.snapshots/42/snapshot");
+        assert!(snapshots[0].1.contains("subvolid 420"));
+        let transactions = transaction_menu_items(&report);
+        assert_eq!(transactions[0].0, "tx-123");
+        assert!(transactions[0].1.contains("completed"));
+    }
+
+    #[test]
+    fn protected_recovery_subvolumes_are_not_offered_as_snapshots() {
+        let report = crate::recovery::model::RecoveryListReport {
+            readonly_snapshots: vec![crate::snapshot::model::BtrfsSubvolumeIdentity {
+                path: "/.catos-recovery/backups/tx/root-before".into(),
+                subvolume_id: 500,
+                generation: 1,
+                uuid: None,
+                parent_uuid: None,
+                read_only: true,
+                evidence: Vec::new(),
+            }],
+            ..Default::default()
+        };
+        assert!(snapshot_menu_items(&report).is_empty());
+    }
+
+    #[test]
+    fn repair_arguments_follow_the_two_valid_command_shapes() {
+        let target = InteractiveTarget::Explicit {
+            device: "/dev/nvme0n1p2".into(),
+            root_subvolume: Some("/@".into()),
+        };
+        assert_eq!(repair_args("fs", &target), ["fs", "/dev/nvme0n1p2"]);
+        assert_eq!(
+            repair_args("mount", &target),
+            [
+                "mount",
+                "--root-device",
+                "/dev/nvme0n1p2",
+                "--root-subvolume",
+                "/@",
+            ]
+        );
+        assert_eq!(repair_args("boot", &InteractiveTarget::Automatic), ["boot"]);
+    }
+
+    #[test]
+    fn recovery_target_arguments_preserve_the_selected_subvolume() {
+        let mut args = vec!["plan".to_string()];
+        append_recovery_target_args(
+            &mut args,
+            &InteractiveTarget::Explicit {
+                device: "/dev/vda2".into(),
+                root_subvolume: Some("/@".into()),
+            },
+        );
+        assert_eq!(
+            args,
+            [
+                "plan",
+                "--root-device",
+                "/dev/vda2",
+                "--root-subvolume",
+                "/@",
+            ]
+        );
+    }
 
     #[test]
     fn partially_repaired_boot_is_not_a_success_exit() {

@@ -13,7 +13,7 @@ mod planner {
     //!
     //! ## Per-filesystem read-only safety
     //!
-    //! Phase 2 supports ONLY read-only mounts and only of filesystems where
+    //! Target inspection supports ONLY read-only mounts and only of filesystems where
     //! the kernel can guarantee zero writes to the underlying device on mount.
     //! The decision matrix is derived from kernel source behaviour, NOT from
     //! `mount(8)` man pages (which describe intent, not behaviour):
@@ -31,7 +31,7 @@ mod planner {
     //!
     //! `noload` on ext4 and `norecovery` on xfs have a real cost: on a dirty
     //! filesystem they mount the *pre-journal* state, which may be slightly
-    //! stale. For phase-2 read-only inspection that is the correct tradeoff
+    //! stale. For read-only target inspection that is the correct tradeoff
     //! (we explicitly prefer "no writes" over "current data"). The plan
     //! surfaces this tradeoff via [`MountStep::failure_modes`] so the human
     //! renderer can show it to the user before they say "go".
@@ -56,7 +56,7 @@ mod planner {
     // Per-fstype option table
     // ---------------------------------------------------------------------------
 
-    /// Classification of a fstype for phase-2 mount safety. Pure data; the
+    /// Classification of a filesystem for read-only target-mount safety. Pure data; the
     /// planner consults [`FstypePolicy::for_fstype`] to decide what to do.
     #[derive(Debug, Clone)]
     pub enum FstypePolicy {
@@ -69,7 +69,7 @@ mod planner {
             /// "stale data on dirty journal"). Empty when there is no cost.
             failure_modes: Vec<&'static str>,
         },
-        /// Refused for phase 2. The reason is part of the JSON contract so
+        /// Refused for read-only target mounting. The reason is part of the JSON contract so
         /// downstream tooling can show why we refused instead of guessing.
         Refused {
             kind: MountErrorKind,
@@ -78,7 +78,7 @@ mod planner {
     }
 
     impl FstypePolicy {
-        /// The single source of truth for which fstypes phase 2 will mount.
+        /// The single source of truth for which filesystems read-only target inspection will mount.
         /// Adding a fstype here requires a kernel-source citation above and
         /// a test that pins the option set.
         pub fn for_fstype(fstype: &str) -> FstypePolicy {
@@ -124,7 +124,7 @@ mod planner {
             },
             _ => FstypePolicy::Refused {
                 kind: MountErrorKind::UnsupportedFilesystem,
-                reason: "fstype not in the phase-2 read-only allow-list",
+                reason: "filesystem not in the read-only target-mount allow-list",
             },
         }
         }
@@ -288,7 +288,7 @@ mod planner {
         pub fstab: &'a [FstabEntry],
         /// Whether the caller wants ESP/boot mounts included.
         pub include_boot: bool,
-        /// Whether ordinary local fstab entries should be mounted. Phase 2 keeps
+        /// Whether ordinary local fstab entries should be mounted. Read-only target mounting keeps
         /// this false to minimise probe surface; mount-repair verification sets
         /// it true so every repaired standard subvolume is acceptance-tested.
         pub include_local: bool,
@@ -548,7 +548,7 @@ mod planner {
             steps,
             selection_rationale: rationale,
             safety_constraints: vec![
-                "phase 2 supports only read-only mounts".into(),
+                "target inspection supports only read-only mounts".into(),
                 "any step that cannot be mounted ro is refused, not silently downgraded".into(),
                 "the session unmounts in reverse order; pre-existing mounts are never unmounted"
                     .into(),

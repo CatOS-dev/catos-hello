@@ -28,7 +28,7 @@ pub fn render_mount_repair_human<W: Write>(
     report: &MountRepairReport,
     out: &mut W,
 ) -> std::io::Result<()> {
-    writeln!(out, "CatOS system backend (repair mount)")?;
+    writeln!(out, "CatOS Mount Configuration Repair")?;
     writeln!(out, "  program version : {}", crate::PROGRAM_VERSION)?;
     writeln!(out, "  schema version  : {}", crate::SCHEMA_VERSION)?;
     writeln!(out)?;
