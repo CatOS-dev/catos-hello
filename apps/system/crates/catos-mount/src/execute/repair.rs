@@ -21,6 +21,28 @@ use crate::verify::verify_written_target;
 use catos_target::execute::confined;
 use catos_target::Evidence;
 
+struct FstabSnapshot {
+    text: String,
+    mode: u32,
+}
+
+fn read_fstab_snapshot(top: &Path, rooted_path: &str) -> Result<FstabSnapshot, String> {
+    let (bytes, mode) = confined::read_rooted_file_with_mode(top, rooted_path)
+        .map_err(|error| error.to_string())?;
+    let text = String::from_utf8(bytes)
+        .map_err(|error| format!("target fstab is not UTF-8: {error}"))?;
+    Ok(FstabSnapshot { text, mode })
+}
+
+fn write_fstab_snapshot(
+    top: &Path,
+    rooted_path: &str,
+    contents: &[u8],
+    mode: u32,
+) -> Result<(), catos_target::FsError> {
+    confined::atomic_write_rooted(top, rooted_path, contents, mode)
+}
+
 /// Execute a verified plan against the mounted target root `top`.
 ///
 /// `create_subvolume` is invoked for each planned subvolume; the
@@ -68,20 +90,17 @@ pub fn execute_mount_repair(
             return MountRepairReport::refused(outcome, "fstab edits could not be applied safely");
         }
     };
-    let current =
-        match confined::read_rooted_file(top, &target_rooted_path(&inputs.target, "/etc/fstab"))
-            .ok()
-            .and_then(|bytes| String::from_utf8(bytes).ok())
-        {
-            Some(text) => text,
-            None => {
-                return MountRepairReport::refused(
-                    MountRepairOutcome::FstabChanged,
-                    "cannot safely re-read target fstab",
-                );
-            }
-        };
-    if digest_of(&current) != plan.fstab_digest {
+    let fstab_path = target_rooted_path(&inputs.target, "/etc/fstab");
+    let fstab_snapshot = match read_fstab_snapshot(top, &fstab_path) {
+        Ok(snapshot) => snapshot,
+        Err(error) => {
+            return MountRepairReport::refused(
+                MountRepairOutcome::FstabChanged,
+                &format!("cannot safely re-read target fstab: {error}"),
+            );
+        }
+    };
+    if digest_of(&fstab_snapshot.text) != plan.fstab_digest {
         return MountRepairReport::refused(
             MountRepairOutcome::FstabChanged,
             "target fstab changed after planning",
@@ -213,12 +232,21 @@ pub fn execute_mount_repair(
         );
     }
 
-    let fstab_path = target_rooted_path(&inputs.target, "/etc/fstab");
-    if let Err(error) = confined::atomic_write_rooted(top, &fstab_path, rewritten.as_bytes(), 0o644)
+    if let Err(error) = write_fstab_snapshot(
+        top,
+        &fstab_path,
+        rewritten.as_bytes(),
+        fstab_snapshot.mode,
+    )
     {
         let rollback_succeeded =
-            confined::atomic_write_rooted(top, &fstab_path, inputs.fstab_text.as_bytes(), 0o644)
-                .is_ok();
+            write_fstab_snapshot(
+                top,
+                &fstab_path,
+                inputs.fstab_text.as_bytes(),
+                fstab_snapshot.mode,
+            )
+            .is_ok();
         let transaction = FstabTransaction {
             original_path: PathBuf::from("/etc/fstab"),
             backup_path: Some(PathBuf::from("/etc/fstab.catos-repair.backup")),
@@ -257,8 +285,13 @@ pub fn execute_mount_repair(
     let verification = verify_written_target(devices, &inputs.target, &rewritten, top);
     if !verification.mounted {
         let rollback_succeeded =
-            confined::atomic_write_rooted(top, &fstab_path, inputs.fstab_text.as_bytes(), 0o644)
-                .is_ok();
+            write_fstab_snapshot(
+                top,
+                &fstab_path,
+                inputs.fstab_text.as_bytes(),
+                fstab_snapshot.mode,
+            )
+            .is_ok();
         let transaction = FstabTransaction {
             original_path: PathBuf::from("/etc/fstab"),
             backup_path: Some(PathBuf::from("/etc/fstab.catos-repair.backup")),
@@ -412,4 +445,60 @@ fn failure_after_created_resources(
 fn _apply_in_memory_anchor() {
     let _: fn(&str, &MountRepairPlan) -> Result<String, MountRepairOutcome> = apply_in_memory;
     let _: fn(&str) -> crate::model::FstabDigest = digest_of;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+    struct TempRoot(PathBuf);
+
+    impl TempRoot {
+        fn new() -> Self {
+            let sequence = SEQUENCE.fetch_add(1, Ordering::Relaxed);
+            let root = std::env::temp_dir().join(format!(
+                "catos-mount-fstab-mode-{}-{sequence}",
+                std::process::id()
+            ));
+            fs::create_dir_all(root.join("etc")).unwrap();
+            Self(root)
+        }
+    }
+
+    impl Drop for TempRoot {
+        fn drop(&mut self) {
+            fs::remove_dir_all(&self.0).unwrap();
+        }
+    }
+
+    #[test]
+    fn fstab_replacement_and_restore_preserve_original_mode() {
+        let root = TempRoot::new();
+        let path = root.0.join("etc/fstab");
+        fs::write(&path, b"before\n").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+
+        let snapshot = read_fstab_snapshot(&root.0, "/etc/fstab").unwrap();
+        assert_eq!(snapshot.text, "before\n");
+        assert_eq!(snapshot.mode, 0o600);
+
+        write_fstab_snapshot(&root.0, "/etc/fstab", b"after\n", snapshot.mode).unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), "after\n");
+        assert_eq!(fs::metadata(&path).unwrap().mode() & 0o7777, 0o600);
+
+        write_fstab_snapshot(
+            &root.0,
+            "/etc/fstab",
+            snapshot.text.as_bytes(),
+            snapshot.mode,
+        )
+        .unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), "before\n");
+        assert_eq!(fs::metadata(&path).unwrap().mode() & 0o7777, 0o600);
+    }
 }
