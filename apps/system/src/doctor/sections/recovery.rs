@@ -9,7 +9,7 @@ use crate::snapshot::model::TransactionRecord;
 use crate::snapshot::store;
 use crate::target::Evidence;
 
-use super::{push_evidence, push_issue, set_section};
+use super::{push_evidence, push_issue, set_section, shell_quote_command_arg};
 use crate::doctor::DoctorTargetContext;
 
 #[derive(Debug, Clone)]
@@ -308,14 +308,15 @@ fn inspect_single_record(
         let recommendation = match report.target.root_device.as_deref() {
             Some(root_device) => {
                 let mut command = format!(
-                    "catos-recovery resume --root-device {root_device}"
+                    "catos-recovery resume --root-device {}",
+                    shell_quote_command_arg(root_device)
                 );
                 if let Some(subvolume) = report.target.root_subvolume.as_deref() {
                     command.push_str(" --root-subvolume ");
-                    command.push_str(subvolume);
+                    command.push_str(&shell_quote_command_arg(subvolume));
                 }
                 command.push_str(" --transaction ");
-                command.push_str(&record.transaction_id);
+                command.push_str(&shell_quote_command_arg(&record.transaction_id));
                 recommendation.with_command(command)
             }
             None => recommendation,
@@ -437,6 +438,39 @@ mod tests {
             report.recommendations[0].command.as_deref(),
             Some(
                 "catos-recovery resume --root-device /dev/vda --root-subvolume /@root --transaction tx-00000000000000000000000000000004"
+            )
+        );
+    }
+
+    #[test]
+    fn interrupted_transaction_recommendation_quotes_special_target_paths() {
+        let record = RecoveryRecordView {
+            transaction_id: "tx-00000000000000000000000000000005".into(),
+            state: crate::snapshot::model::TransactionState::Locked,
+            last_error: None,
+            last_cleanup: None,
+        };
+        let mut sections: Vec<(DoctorSectionId, DoctorSection)> = DoctorSectionId::all()
+            .iter()
+            .map(|id| (*id, DoctorSection::new(*id, DoctorSectionStatus::Unknown)))
+            .collect();
+        let mut report = DoctorReport::default();
+        report.target.root_device = Some("/dev/mapper/catos root".into());
+        report.target.root_subvolume = Some("/@ root".into());
+        let mut status = DoctorSectionStatus::Healthy;
+
+        inspect_single_record(
+            &mut sections,
+            &mut report,
+            DoctorSectionId::Recovery,
+            &record,
+            &mut status,
+        );
+
+        assert_eq!(
+            report.recommendations[0].command.as_deref(),
+            Some(
+                "catos-recovery resume --root-device '/dev/mapper/catos root' --root-subvolume '/@ root' --transaction tx-00000000000000000000000000000005"
             )
         );
     }

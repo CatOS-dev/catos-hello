@@ -73,6 +73,18 @@ pub(in crate::doctor) fn target_supports_standard_root_repair(
     }
 }
 
+pub(in crate::doctor) fn shell_quote_command_arg(value: &str) -> String {
+    if !value.is_empty()
+        && value.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric()
+                || matches!(byte, b'_' | b'@' | b'%' | b'+' | b'=' | b':' | b',' | b'.' | b'/' | b'-')
+        })
+    {
+        return value.to_string();
+    }
+    format!("'{}'", value.replace('\'', "'\"'\"'"))
+}
+
 pub(in crate::doctor) fn target_bound_repair_command(
     program: &str,
     target: &crate::target::model::TargetIdentity,
@@ -81,18 +93,18 @@ pub(in crate::doctor) fn target_bound_repair_command(
     if !target_supports_standard_root_repair(target) {
         return None;
     }
-    let root_device = target.root_device.as_deref()?;
+    let root_device = target.root_device.as_deref()?.to_str()?;
     let mut command = format!(
         "{program} --root-device {}",
-        root_device.display()
+        shell_quote_command_arg(root_device)
     );
     if let Some(subvolume) = target.root_subvol.as_deref() {
         command.push_str(" --root-subvolume ");
-        command.push_str(subvolume);
+        command.push_str(&shell_quote_command_arg(subvolume));
     }
     if let Some(esp_device) = esp_device {
         command.push_str(" --esp-device ");
-        command.push_str(&esp_device.display().to_string());
+        command.push_str(&shell_quote_command_arg(esp_device.to_str()?));
     }
     Some(command)
 }
@@ -165,8 +177,8 @@ pub(in crate::doctor) fn is_device_mounted_rw(device: &Path) -> Result<MountStat
 #[cfg(test)]
 mod tests {
     use super::{
-        device_mount_state, read_target_file, target_bound_repair_command,
-        target_repair_recommendation, target_root_path, MountState,
+        device_mount_state, read_target_file, shell_quote_command_arg,
+        target_bound_repair_command, target_repair_recommendation, target_root_path, MountState,
     };
     use crate::doctor::model::recommendation_code;
     use crate::target::model::TargetIdentity;
@@ -183,6 +195,15 @@ mod tests {
             target_root_path(&target),
             PathBuf::from("/run/catos-target-session/root")
         );
+    }
+
+    #[test]
+    fn command_arguments_are_shell_quoted_only_when_needed() {
+        assert_eq!(shell_quote_command_arg("/dev/mapper/catos-root"), "/dev/mapper/catos-root");
+        assert_eq!(shell_quote_command_arg("/@"), "/@");
+        assert_eq!(shell_quote_command_arg("/dev/mapper/catos root"), "'/dev/mapper/catos root'");
+        assert_eq!(shell_quote_command_arg("x';echo bad"), "'x'\"'\"';echo bad'");
+        assert_eq!(shell_quote_command_arg(""), "''");
     }
 
     #[test]
