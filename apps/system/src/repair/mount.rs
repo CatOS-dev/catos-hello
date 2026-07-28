@@ -279,19 +279,31 @@ fn observe_mount_point(
 ) -> Result<MountPointObservation, String> {
     let relative = Path::new(mount_point.trim_start_matches('/'));
     match fs.rooted_metadata(root, relative) {
-        Ok(metadata) => Ok(MountPointObservation {
-            exists: true,
-            is_symlink: metadata.is_symlink,
-            is_directory: metadata.is_dir,
-            is_other_object: !metadata.is_dir,
-            entry_count: if metadata.is_dir {
-                fs.read_dir_names(&root.join(relative))
-                    .ok()
-                    .map(|entries| entries.len())
+        Ok(metadata) => {
+            let entry_count = if metadata.is_dir {
+                Some(
+                    catos_target::execute::confined::list_rooted_directory_names(
+                        root,
+                        mount_point,
+                    )
+                    .map_err(|error| {
+                        format!(
+                            "cannot safely enumerate target mount point {mount_point}: {error}"
+                        )
+                    })?
+                    .len(),
+                )
             } else {
                 None
-            },
-        }),
+            };
+            Ok(MountPointObservation {
+                exists: true,
+                is_symlink: metadata.is_symlink,
+                is_directory: metadata.is_dir,
+                is_other_object: !metadata.is_dir,
+                entry_count,
+            })
+        }
         Err(crate::error::FsError::NotFound) => Ok(MountPointObservation::missing()),
         Err(error) => Err(format!(
             "cannot safely inspect target mount point {mount_point}: {error}"
@@ -1394,6 +1406,25 @@ mod boot_session_tests {
                 .unwrap_err()
                 .contains("filesystem")
         );
+    }
+
+    #[test]
+    fn unreadable_mountpoint_directory_is_rejected() {
+        use std::os::unix::fs::PermissionsExt;
+
+        if unsafe { libc::geteuid() } == 0 {
+            return;
+        }
+        let root = TempRoot::new();
+        let home = root.0.join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::write(home.join("sentinel"), b"data").unwrap();
+        std::fs::set_permissions(&home, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+        let result = observe_mount_point(&RealFilesystem, &root.0, "/home");
+        std::fs::set_permissions(&home, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+        assert!(result.is_err(), "unreadable directory was treated as empty");
     }
 
     #[test]
