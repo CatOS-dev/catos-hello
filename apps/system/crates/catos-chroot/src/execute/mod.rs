@@ -54,7 +54,7 @@ pub trait ChrootEffects {
         runtime: ChrootRuntimeMount,
     ) -> Result<(), String>;
     fn read_mountinfo(&mut self) -> Result<String, String>;
-    fn enter(&mut self, root: &Path, use_systemd_chroot: bool) -> Result<(), String>;
+    fn enter(&mut self, root: &Path, use_systemd_chroot: bool, shell: &str) -> Result<(), String>;
     fn unmount(&mut self, target: &Path) -> Result<(), String>;
     fn confirm_unverified(&mut self, _verification: &ChrootVerification) -> Result<bool, String> {
         Ok(false)
@@ -264,7 +264,7 @@ impl ChrootEffects for SystemChrootEffects {
             .map_err(|error| format!("cannot read /proc/self/mountinfo: {error}"))
     }
 
-    fn enter(&mut self, root: &Path, use_systemd_chroot: bool) -> Result<(), String> {
+    fn enter(&mut self, root: &Path, use_systemd_chroot: bool, shell: &str) -> Result<(), String> {
         let arch_chroot = trusted_tool_path("arch-chroot")
             .ok_or_else(|| "arch-chroot not found in trusted system directories".to_string())?;
         let mut command = Command::new(arch_chroot);
@@ -273,6 +273,8 @@ impl ChrootEffects for SystemChrootEffects {
         }
         let status = command
             .arg(root)
+            .arg(shell)
+            .arg("-i")
             .status()
             .map_err(|error| format!("failed to run arch-chroot: {error}"))?;
         if status.success() {
@@ -476,7 +478,22 @@ pub fn execute_plan_with_policy<E: ChrootEffects>(
         ));
     }
 
-    match effects.enter(session_root, plan.use_systemd_chroot) {
+    let Some(shell) = verification.shell.as_deref() else {
+        return finish_with_cleanup(
+            ChrootExecutionOutcome::VerificationFailed,
+            Some("no usable target maintenance shell was found".into()),
+            mounted_paths,
+            warnings,
+            effects,
+        );
+    };
+    if !matches!(shell, "/bin/bash" | "/usr/bin/bash") {
+        warnings.push(format!(
+            "using fallback maintenance shell {shell} because Bash is unavailable"
+        ));
+    }
+
+    match effects.enter(session_root, plan.use_systemd_chroot, shell) {
         Ok(()) => finish_with_cleanup(
             ChrootExecutionOutcome::Entered,
             None,

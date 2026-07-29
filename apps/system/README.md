@@ -139,8 +139,11 @@ may still offer a root with a credible system layout as an explicitly
 `Unverified system` target. Such a target is never auto-selected: it requires
 interactive selection and must also pass or explicitly override final target
 verification. Repair and Recovery discovery remain verified-only. Failures that
-make a chroot impossible, such as inability to mount the selected root or
-runtime filesystems, remain errors.
+Bash is preferred but not mandatory: when `/bin/bash` and `/usr/bin/bash` are
+unavailable, Chroot falls back to an executable `/bin/sh` or `/usr/bin/sh` and
+passes that shell explicitly to `arch-chroot`. Conditions that make a chroot
+actually impossible, such as inability to mount the selected root or runtime
+filesystems or absence of every usable maintenance shell, remain errors.
 
 Snapshot recovery mounts the Btrfs top level read-write inside a private mount
 namespace, validates the immutable plan and target identity, performs the root

@@ -157,4 +157,5 @@ pub struct ChrootVerification {
     pub ready: bool,
     pub checks: Vec<String>,
     pub reasons: Vec<String>,
+    pub shell: Option<String>,
 }

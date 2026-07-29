@@ -647,6 +647,52 @@ pub fn read_rooted_file_following_target_symlinks(
     read_owned_fd(fd, &display)
 }
 
+/// Inspect a regular target file while following ordinary symbolic links
+/// inside the pinned target root. Absolute links are rebased to `top_level`;
+/// magic links and escapes remain forbidden. Missing paths return `Ok(None)`.
+pub fn rooted_regular_file_facts_following_target_symlinks(
+    top_level: &Path,
+    rooted_path: &str,
+) -> Result<Option<(u64, u32)>, FsError> {
+    let components = rooted_components(rooted_path)?;
+    let mut relative = PathBuf::new();
+    for component in components {
+        relative.push(component);
+    }
+    let root = open_top_level_directory(top_level)?;
+    let c_path = cstring(relative.as_os_str(), Path::new(rooted_path))?;
+    let how = OpenHow {
+        flags: (libc::O_RDONLY | libc::O_CLOEXEC) as u64,
+        mode: 0,
+        resolve: TARGET_SYMLINK_RESOLVE,
+    };
+    let display = top_level.join(&relative);
+    let fd = match openat2_raw(root.as_raw_fd(), &c_path, &how)
+        .map_err(|error| map_path_error(&display, "open rooted target file", error))
+    {
+        Ok(fd) => fd,
+        Err(FsError::NotFound) => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    let mut stat = std::mem::MaybeUninit::<libc::stat>::zeroed();
+    let rc = unsafe { libc::fstat(fd.as_raw_fd(), stat.as_mut_ptr()) };
+    if rc != 0 {
+        return Err(io_error(
+            &display,
+            "inspect rooted target file",
+            std::io::Error::last_os_error(),
+        ));
+    }
+    let stat = unsafe { stat.assume_init() };
+    if stat.st_mode & libc::S_IFMT != libc::S_IFREG {
+        return Err(unsafe_path(
+            &display,
+            "rooted target object is not a regular file",
+        ));
+    }
+    Ok(Some((stat.st_size.max(0) as u64, stat.st_mode as u32)))
+}
+
 /// Read a regular file and capture its permission bits from the same opened
 /// file descriptor. This prevents callers from observing contents and mode
 /// from different pathname objects if the leaf is replaced concurrently.

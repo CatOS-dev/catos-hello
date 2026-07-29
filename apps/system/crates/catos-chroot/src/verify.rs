@@ -4,8 +4,7 @@ use std::path::{Path, PathBuf};
 
 use crate::model::{ChrootMount, ChrootPlan, ChrootVerification};
 use catos_target::execute::confined::{
-    read_rooted_file_following_target_symlinks, rooted_path_kind, rooted_regular_file_mode,
-    rooted_regular_file_size, RootedPathKind,
+    read_rooted_file_following_target_symlinks, rooted_regular_file_facts_following_target_symlinks,
 };
 use catos_target::model::OsRelease;
 use catos_target::mountinfo::{self, MountInfo};
@@ -48,94 +47,51 @@ pub fn verify_target_root(root: &Path) -> ChrootVerification {
         reasons.push("target os-release was not found".into());
     }
 
-    verify_arch_chroot_shell(root, &mut checks, &mut reasons);
+    let shell = match select_target_shell(root) {
+        Ok(shell) => {
+            checks.push(format!("target maintenance shell: {shell}"));
+            Some(shell)
+        }
+        Err(shell_reasons) => {
+            reasons.extend(shell_reasons);
+            None
+        }
+    };
 
     ChrootVerification {
         ready: reasons.is_empty(),
         checks,
         reasons,
+        shell,
     }
 }
 
-fn verify_arch_chroot_shell(root: &Path, checks: &mut Vec<String>, reasons: &mut Vec<String>) {
-    let bash_path = match rooted_path_kind(root, "/bin") {
-        Ok(Some(RootedPathKind::Directory)) => "/bin/bash",
-        Ok(Some(RootedPathKind::Symlink)) => {
-            let link = match std::fs::read_link(root.join("bin")) {
-                Ok(link) => link,
-                Err(error) => {
-                    reasons.push(format!(
-                        "cannot inspect target /bin symlink required by /bin/bash: {error}"
-                    ));
-                    return;
-                }
-            };
-            if link != Path::new("usr/bin") && link != Path::new("/usr/bin") {
-                reasons.push(format!(
-                    "target /bin symlink resolves to {}, not usr/bin required for /bin/bash",
-                    link.display()
-                ));
-                return;
-            }
-            "/usr/bin/bash"
-        }
-        Ok(Some(_)) => {
-            reasons.push("target /bin is neither a directory nor the merged-/usr symlink".into());
-            return;
-        }
-        Ok(None) | Err(FsError::NotFound) => {
-            reasons.push("target /bin required for /bin/bash is missing".into());
-            return;
-        }
-        Err(error) => {
-            reasons.push(format!("cannot inspect target /bin for /bin/bash: {error}"));
-            return;
-        }
-    };
+fn select_target_shell(root: &Path) -> Result<String, Vec<String>> {
+    const CANDIDATES: [&str; 4] = ["/bin/bash", "/usr/bin/bash", "/bin/sh", "/usr/bin/sh"];
+    let mut reasons = Vec::new();
 
-    let size = match rooted_regular_file_size(root, bash_path) {
-        Ok(Some(size)) => size,
-        Ok(None) | Err(FsError::NotFound) => {
-            reasons.push(format!(
-                "target /bin/bash entrypoint is missing ({bash_path} not found)"
-            ));
-            return;
+    for path in CANDIDATES {
+        match rooted_regular_file_facts_following_target_symlinks(root, path) {
+            Ok(Some((size, mode))) if size > 0 && mode & 0o111 != 0 => {
+                return Ok(path.to_string());
+            }
+            Ok(Some((0, _))) => reasons.push(format!("target maintenance shell {path} is empty")),
+            Ok(Some((_, mode))) if mode & 0o111 == 0 => {
+                reasons.push(format!("target maintenance shell {path} is not executable"))
+            }
+            Ok(Some(_)) => {}
+            Ok(None) | Err(FsError::NotFound) => {}
+            Err(error) => reasons.push(format!(
+                "cannot inspect target maintenance shell {path}: {error}"
+            )),
         }
-        Err(error) => {
-            reasons.push(format!(
-                "cannot inspect target /bin/bash at {bash_path}: {error}"
-            ));
-            return;
-        }
-    };
-    if size == 0 {
-        reasons.push(format!(
-            "target /bin/bash entrypoint at {bash_path} is empty"
-        ));
-        return;
     }
-    let mode = match rooted_regular_file_mode(root, bash_path) {
-        Ok(Some(mode)) => mode,
-        Ok(None) | Err(FsError::NotFound) => {
-            reasons.push(format!(
-                "target /bin/bash entrypoint at {bash_path} disappeared"
-            ));
-            return;
-        }
-        Err(error) => {
-            reasons.push(format!(
-                "cannot inspect target /bin/bash permissions at {bash_path}: {error}"
-            ));
-            return;
-        }
-    };
-    if mode & 0o111 == 0 {
-        reasons.push(format!(
-            "target /bin/bash entrypoint at {bash_path} is not executable"
-        ));
-        return;
+
+    if reasons.is_empty() {
+        reasons
+            .push("target has no usable /bin/bash, /usr/bin/bash, /bin/sh, or /usr/bin/sh".into());
     }
-    checks.push(format!("target /bin/bash entrypoint: {bash_path}"));
+    Err(reasons)
 }
 
 pub fn verify_assembled_target(
@@ -431,17 +387,18 @@ mod tests {
     }
 
     #[test]
-    fn usr_bin_sh_does_not_satisfy_arch_chroot_default_entrypoint() {
+    fn usr_bin_sh_is_a_valid_fallback_when_bash_is_unavailable() {
         let root = TempRoot::new();
         fs::write(root.0.join("usr/bin/sh"), b"#!/bin/sh\n").unwrap();
         fs::set_permissions(root.0.join("usr/bin/sh"), fs::Permissions::from_mode(0o755)).unwrap();
 
         let verification = verify_target_root(&root.0);
-        assert!(!verification.ready);
+        assert!(verification.ready);
+        assert_eq!(verification.shell.as_deref(), Some("/usr/bin/sh"));
         assert!(verification
-            .reasons
+            .checks
             .iter()
-            .any(|reason| reason.contains("/bin/bash")));
+            .any(|check| check.contains("/usr/bin/sh")));
     }
 
     #[test]

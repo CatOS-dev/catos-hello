@@ -981,7 +981,7 @@ fn successful_execution_calls(plan: &ChrootPlan, root: &Path) -> VecDeque<String
     }
     calls.push_back("mountinfo".into());
     calls.push_back(format!(
-        "enter:{}:{}",
+        "enter:{}:{}:/bin/bash",
         root.display(),
         plan.use_systemd_chroot
     ));
@@ -1070,8 +1070,11 @@ impl ChrootEffects for RecordedEffects {
             .ok_or_else(|| "synthetic mountinfo was not configured".into())
     }
 
-    fn enter(&mut self, root: &Path, use_systemd_chroot: bool) -> Result<(), String> {
-        self.record(format!("enter:{}:{use_systemd_chroot}", root.display()));
+    fn enter(&mut self, root: &Path, use_systemd_chroot: bool, shell: &str) -> Result<(), String> {
+        self.record(format!(
+            "enter:{}:{use_systemd_chroot}:{shell}",
+            root.display()
+        ));
         if self.fail_enter {
             Err("synthetic shell failure".into())
         } else {
@@ -1296,7 +1299,7 @@ fn auxiliary_mount_failure_warns_skips_descendants_and_still_enters_chroot() {
     }
     expected_calls.push_back("mountinfo".into());
     expected_calls.push_back(format!(
-        "enter:{}:{}",
+        "enter:{}:{}:/bin/bash",
         session_root.display(),
         plan.use_systemd_chroot
     ));
