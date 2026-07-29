@@ -115,7 +115,7 @@ fn provider_execution_and_verification_have_distinct_contracts() {
         "limine-list",
         std::iter::empty::<&str>(),
         0,
-        Vec::new(),
+        b"CatOS\n".to_vec(),
         Vec::new(),
     );
     let verification = LimineProvider.verify(&ctx, &verify_runner);
