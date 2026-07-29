@@ -42,9 +42,49 @@ fn detect_initramfs(fs: &dyn FilesystemProbe) -> Detection {
         evidence.push(Evidence::new(
             "INITRAMFS_RUN_DIR_PRESENT",
             "/run/initramfs",
-            "initramfs run directory exists but marker file does not; ambiguous",
+            "initramfs runtime state exists after the canonical marker disappeared",
         ));
-        return Detection::unknown(evidence);
+        let mountinfo = match fs.read_to_string(Path::new("/proc/self/mountinfo")) {
+            Ok(mountinfo) => mountinfo,
+            Err(_) => {
+                evidence.push(Evidence::new(
+                    "INITRAMFS_ROOT_MOUNT_UNAVAILABLE",
+                    "/proc/self/mountinfo",
+                    "cannot identify the current root filesystem; initramfs state is ambiguous",
+                ));
+                return Detection::unknown(evidence);
+            }
+        };
+        let Some(root_mount) = parse_root_mount(&mountinfo) else {
+            evidence.push(Evidence::new(
+                "INITRAMFS_ROOT_MOUNT_NOT_FOUND",
+                "/proc/self/mountinfo",
+                "root mount entry is missing; initramfs state is ambiguous",
+            ));
+            return Detection::unknown(evidence);
+        };
+        evidence.push(
+            Evidence::new(
+                "INITRAMFS_ROOT_FILESYSTEM",
+                "/proc/self/mountinfo",
+                "current root filesystem observed while initramfs runtime state remains",
+            )
+            .with_value(root_mount.fstype.clone()),
+        );
+        if matches!(root_mount.fstype.as_str(), "rootfs" | "ramfs" | "tmpfs") {
+            evidence.push(Evidence::new(
+                "INITRAMFS_MEMORY_ROOT",
+                "/proc/self/mountinfo",
+                "current root is memory-backed and initramfs runtime state is present",
+            ));
+            return Detection::detected(evidence);
+        }
+        evidence.push(Evidence::new(
+            "PERSISTENT_ROOT_WITH_INITRAMFS_STATE",
+            "/proc/self/mountinfo",
+            "current root is not memory-backed; /run/initramfs is residual early-boot state",
+        ));
+        return Detection::not_detected(evidence);
     }
     Detection::not_detected(evidence)
 }
@@ -943,3 +983,70 @@ use crate::model::{
     Capability as _Capability, CapabilityKind as _CapabilityKind,
     CapabilityStatus as _CapabilityStatus,
 };
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::diagnose::filesystem::{FixtureFilesystem, MetaData};
+    use crate::model::{DetectionStatus, PrimaryRuntimeMode};
+
+    fn root_mountinfo(fstype: &str, source: &str) -> String {
+        format!("36 1 0:32 / / rw,relatime - {fstype} {source} rw\n")
+    }
+
+    #[test]
+    fn residual_run_initramfs_on_persistent_root_is_not_current_initramfs() {
+        let fs = FixtureFilesystem::new().dir("/run/initramfs").file(
+            "/proc/self/mountinfo",
+            root_mountinfo("btrfs", "/dev/nvme0n1p2"),
+        );
+
+        let detection = detect_initramfs(&fs);
+
+        assert_eq!(detection.status, DetectionStatus::NotDetected);
+        assert!(detection
+            .evidence
+            .iter()
+            .any(|item| item.code == "PERSISTENT_ROOT_WITH_INITRAMFS_STATE"));
+    }
+
+    #[test]
+    fn run_initramfs_on_memory_root_is_current_initramfs() {
+        let fs = FixtureFilesystem::new()
+            .dir("/run/initramfs")
+            .file("/proc/self/mountinfo", root_mountinfo("tmpfs", "rootfs"));
+
+        let detection = detect_initramfs(&fs);
+
+        assert_eq!(detection.status, DetectionStatus::Detected);
+        assert!(detection
+            .evidence
+            .iter()
+            .any(|item| item.code == "INITRAMFS_MEMORY_ROOT"));
+    }
+
+    #[test]
+    fn residual_initramfs_state_does_not_hide_a_running_system() {
+        let root_meta = MetaData {
+            ino: 256,
+            dev: 36,
+            mode: 0o755,
+            is_dir: true,
+            is_file: false,
+            is_symlink: false,
+        };
+        let fs = FixtureFilesystem::new()
+            .dir("/run/initramfs")
+            .file("/proc/cmdline", "root=UUID=test rw")
+            .file(
+                "/proc/self/mountinfo",
+                root_mountinfo("btrfs", "/dev/nvme0n1p2"),
+            )
+            .with_meta("/", root_meta)
+            .with_meta("/proc/1/root", root_meta);
+
+        let runtime = detect_runtime(&fs);
+
+        assert_eq!(runtime.primary_mode(), PrimaryRuntimeMode::RunningSystem);
+    }
+}
