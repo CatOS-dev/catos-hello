@@ -1276,6 +1276,20 @@ mod tests {
     }
 
     #[test]
+    fn kernel_discovery_rejects_unsafe_pkgbase_before_provider_execution() {
+        let target_root = TempTargetRoot::new();
+        let module = target_root.path.join("usr/lib/modules/6.18.0-catos");
+        fs::create_dir_all(&module).unwrap();
+        fs::write(module.join("pkgbase"), "../../spoof\n").unwrap();
+        fs::write(module.join("vmlinuz"), b"kernel").unwrap();
+
+        let error = collect_target_kernels(&target_root.path).unwrap_err();
+
+        assert!(error.contains("not a safe package identifier"));
+        assert!(error.contains("../../spoof"));
+    }
+
+    #[test]
     fn kernel_discovery_reads_target_modules_tree() {
         let target_root = TempTargetRoot::new();
         let module = target_root.path.join("usr/lib/modules/6.18.0-catos");

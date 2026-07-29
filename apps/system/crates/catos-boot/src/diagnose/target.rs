@@ -748,6 +748,11 @@ pub fn collect_target_kernels(root: &Path) -> Result<Vec<crate::plan::initramfs:
         if pkgbase.is_empty() {
             continue;
         }
+        if !is_safe_kernel_package_identifier(&pkgbase) {
+            return Err(format!(
+                "target kernel {version} pkgbase {pkgbase:?} is not a safe package identifier"
+            ));
+        }
         let has_vmlinuz = match catos_target::execute::confined::rooted_regular_file_size(
             root,
             &format!("{base}/vmlinuz"),
@@ -763,6 +768,15 @@ pub fn collect_target_kernels(root: &Path) -> Result<Vec<crate::plan::initramfs:
         discovered.push((version, true, has_vmlinuz, pkgbase));
     }
     Ok(crate::plan::initramfs::discover_kernels(&discovered))
+}
+
+fn is_safe_kernel_package_identifier(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    !bytes.is_empty()
+        && bytes.len() <= 255
+        && bytes.iter().all(|byte| {
+            byte.is_ascii_alphanumeric() || matches!(byte, b'@' | b'.' | b'_' | b'+' | b'-')
+        })
 }
 
 fn pacman_package_name(desc: &str) -> Option<String> {
