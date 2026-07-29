@@ -272,9 +272,9 @@ cat > "$INITRAMFS/bin/chroot-child" <<'CHILD'
 #!/bin/sh
 scenario=$1
 case "$scenario" in
-    default|cancel|missing_fstab|missing_os_release|missing_bash|missing_arch_chroot) /bin/catos-chroot --no-systemd-chroot ;;
-    missing_os_release_force) /bin/catos-chroot --no-systemd-chroot --force-unsafe ;;
-    show_snapshots|show_snapshots_cancel) /bin/catos-chroot --no-systemd-chroot --show-btrfs-dot-snapshots ;;
+    default|cancel|missing_fstab|missing_os_release|missing_bash|missing_arch_chroot) /bin/catos-chroot ;;
+    missing_os_release_force) /bin/catos-chroot --force-unsafe ;;
+    show_snapshots|show_snapshots_cancel) /bin/catos-chroot --show-btrfs-dot-snapshots ;;
     *) echo "unknown scenario $scenario" >&2; exit 2 ;;
 esac
 echo $? > /tmp/chroot.rc
@@ -478,4 +478,4 @@ echo "=== scenario: back-from-multiple-targets ==="
 run_qemu show_snapshots_cancel
 assert_contains "$LAST_LOG" "  [0] Back" show_snapshots_cancel
 
-echo "pass: Chroot QEMU acceptance exercised /bin/catos-chroot, target selection, target-local os-release links, unverified-root rescue selection, forced noninteractive unverified selection, missing fstab fallback, Bash-to-sh fallback, arch-chroot-to-chroot fallback, unavailable and failed auxiliary mounts, descendant skipping, runtime setup, shell entry, reverse cleanup and session removal"
+echo "pass: Chroot QEMU acceptance exercised /bin/catos-chroot, default offline entry, target selection, target-local os-release links, unverified-root rescue selection, forced noninteractive unverified selection, missing fstab fallback, Bash-to-sh fallback, arch-chroot-to-chroot fallback, unavailable and failed auxiliary mounts, descendant skipping, runtime setup, shell entry, reverse cleanup and session removal"

@@ -15,7 +15,7 @@ use crate::error::exit_code;
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 struct ChrootOptions {
     no_auto_mount: bool,
-    no_systemd_chroot: bool,
+    use_systemd_chroot: bool,
     show_btrfs_dot_snapshots: bool,
     allow_unsafe: bool,
 }
@@ -211,7 +211,7 @@ pub fn run(argv: &[String], program: &str) -> i32 {
         fstab: &fstab,
         devices: &devices,
         extra_mounts: &extra_mounts,
-        use_systemd_chroot: !options.no_systemd_chroot,
+        use_systemd_chroot: options.use_systemd_chroot,
     }) {
         Ok(plan) => plan,
         Err(error) => {
@@ -438,7 +438,8 @@ cleaned up when the shell exits.
 
 OPTIONS:
     --no-auto-mount            Mount only the selected root filesystem.
-    --no-systemd-chroot        Use the offline arch-chroot mode.
+    --systemd-chroot           Use arch-chroot systemd-run integration.
+    --no-systemd-chroot        Use offline mode (the default).
     --show-btrfs-dot-snapshots Include historical .snapshots entries.
     --force-unsafe             Continue after target verification warnings.
     -h, --help                 Show this help message.
@@ -455,12 +456,13 @@ fn parse_argv(argv: &[String]) -> Result<ChrootOptions, String> {
     for argument in argv {
         match argument.as_str() {
             "--no-auto-mount" => options.no_auto_mount = true,
-            "--no-systemd-chroot" => options.no_systemd_chroot = true,
+            "--systemd-chroot" => options.use_systemd_chroot = true,
+            "--no-systemd-chroot" => options.use_systemd_chroot = false,
             "--show-btrfs-dot-snapshots" => options.show_btrfs_dot_snapshots = true,
             "--force-unsafe" => options.allow_unsafe = true,
             other => {
                 return Err(format!(
-                    "unknown option {other:?}; expected --no-auto-mount, --no-systemd-chroot, --show-btrfs-dot-snapshots, --force-unsafe"
+                    "unknown option {other:?}; expected --no-auto-mount, --systemd-chroot, --no-systemd-chroot, --show-btrfs-dot-snapshots, --force-unsafe"
                 ))
             }
         }
@@ -648,15 +650,19 @@ mod tests {
     fn parse_known_flags() {
         let options = parse_argv(&[
             "--no-auto-mount".into(),
-            "--no-systemd-chroot".into(),
+            "--systemd-chroot".into(),
             "--show-btrfs-dot-snapshots".into(),
             "--force-unsafe".into(),
         ])
         .unwrap();
         assert!(options.no_auto_mount);
-        assert!(options.no_systemd_chroot);
+        assert!(options.use_systemd_chroot);
         assert!(options.show_btrfs_dot_snapshots);
         assert!(options.allow_unsafe);
+
+        let offline =
+            parse_argv(&["--systemd-chroot".into(), "--no-systemd-chroot".into()]).unwrap();
+        assert!(!offline.use_systemd_chroot);
     }
 
     #[test]
@@ -666,7 +672,9 @@ mod tests {
 
     #[test]
     fn empty_argv_is_default() {
-        assert_eq!(parse_argv(&[]).unwrap(), ChrootOptions::default());
+        let options = parse_argv(&[]).unwrap();
+        assert_eq!(options, ChrootOptions::default());
+        assert!(!options.use_systemd_chroot);
     }
 
     #[test]

@@ -1032,6 +1032,7 @@ fn chroot_help_lists_documented_flags() {
     assert!(ok);
     for flag in [
         "--no-auto-mount",
+        "--systemd-chroot",
         "--no-systemd-chroot",
         "--show-btrfs-dot-snapshots",
         "--force-unsafe",

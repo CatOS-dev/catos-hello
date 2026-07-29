@@ -144,9 +144,13 @@ interactive selection and must also pass or explicitly override final target
 verification. Repair and Recovery discovery remain verified-only. Failures that
 Bash is preferred but not mandatory: when `/bin/bash` and `/usr/bin/bash` are
 unavailable, Chroot falls back to an executable `/bin/sh` or `/usr/bin/sh`. The
-selected shell is passed explicitly to the host entry tool. `arch-chroot` is
-preferred; if the rescue environment lacks it but provides a trusted `chroot`,
-CatOS uses plain `chroot` and warns that systemd chroot integration is
+selected shell is passed explicitly to the host entry tool. Offline
+`arch-chroot` mode is the default because `-S` requires a systemd-booted rescue
+host, `systemd-run`, and a sufficiently recent systemd. Operators can request
+that integration explicitly with `--systemd-chroot`;
+`--no-systemd-chroot` remains an explicit compatibility spelling for the
+default. If the rescue environment lacks `arch-chroot` but provides a trusted
+`chroot`, CatOS uses plain `chroot` and warns that systemd chroot integration is
 unavailable. It does not retry a failed, already-started interactive entry with
 a different backend. Conditions that make a chroot actually impossible, such
 as inability to mount the selected root or runtime filesystems, absence of both
