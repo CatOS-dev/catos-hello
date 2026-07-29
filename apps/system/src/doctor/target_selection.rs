@@ -9,7 +9,9 @@
 
 use crate::doctor::model::{DoctorTarget, DoctorTargetKind};
 use crate::selection_ui::{select_target_with_policy, Selection, TargetSelectionPolicy};
-use crate::target::discovery::{discover_running_root, discover_targets, DiscoveryReport, ProbeCleanup, TargetSession};
+use crate::target::discovery::{
+    discover_running_root, discover_targets, DiscoveryReport, ProbeCleanup, TargetSession,
+};
 use crate::target::model::TargetIdentity;
 
 pub struct SelectedTargetSession {
@@ -121,7 +123,11 @@ pub fn discover_target_session() -> Result<SelectedTargetSession, TargetDiscover
 fn discover_for_policy(policy: TargetSelectionPolicy) -> DiscoveryReport {
     if policy == TargetSelectionPolicy::PreferRunningRoot {
         let running = discover_running_root();
-        if running.candidates.iter().any(|candidate| candidate.running_environment_member) {
+        if running
+            .candidates
+            .iter()
+            .any(|candidate| candidate.running_environment_member)
+        {
             return running;
         }
     }
@@ -164,7 +170,10 @@ fn unavailable_error(
         .iter()
         .filter(|candidate| match policy {
             TargetSelectionPolicy::Any => true,
-            TargetSelectionPolicy::OfflineOnly => !candidate.running_environment_member,
+            TargetSelectionPolicy::OfflineOnly
+            | TargetSelectionPolicy::OfflineOnlyAllowUnverified => {
+                !candidate.running_environment_member
+            }
             TargetSelectionPolicy::PreferRunningRoot if running_count > 1 => {
                 candidate.running_environment_member
             }

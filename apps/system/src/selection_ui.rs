@@ -6,8 +6,8 @@
 use std::io::{self, BufRead, IsTerminal, Write};
 
 use crate::target::discovery::{DiscoveryReport, TargetCandidate};
-use crate::target::model::RootCandidateConfidence;
 use crate::target::model::BlockDevice;
+use crate::target::model::RootCandidateConfidence;
 
 #[derive(Debug, Clone)]
 pub enum Selection {
@@ -27,6 +27,7 @@ pub enum LuksSelection {
 pub enum TargetSelectionPolicy {
     Any,
     OfflineOnly,
+    OfflineOnlyAllowUnverified,
     PreferRunningRoot,
 }
 
@@ -136,17 +137,18 @@ fn select_target_with_policy_with<R: BufRead, W: Write>(
             }
         }
     }
+    let offline_only = matches!(
+        policy,
+        TargetSelectionPolicy::OfflineOnly | TargetSelectionPolicy::OfflineOnlyAllowUnverified
+    );
     let candidates = report
         .candidates
         .iter()
-        .filter(|candidate| {
-            policy != TargetSelectionPolicy::OfflineOnly
-                || !candidate.running_environment_member
-        })
+        .filter(|candidate| !offline_only || !candidate.running_environment_member)
         .collect::<Vec<_>>();
     if candidates.is_empty() {
         eprintln!("{program}: no diagnosable CatOS system was found");
-        if policy == TargetSelectionPolicy::OfflineOnly
+        if offline_only
             && report
                 .candidates
                 .iter()
@@ -159,16 +161,24 @@ fn select_target_with_policy_with<R: BufRead, W: Write>(
         for item in report.excluded.iter().chain(&report.rejected) {
             eprintln!("{program}: {}: {}", item.source, item.reason);
         }
-        let reason = if policy == TargetSelectionPolicy::OfflineOnly {
+        let reason = if offline_only {
             "no offline CatOS candidate"
         } else {
             "no CatOS candidate"
         };
         return Selection::Unavailable(reason.into());
     }
-    select_from_candidates(&candidates, program, interactive, input, output)
+    select_from_candidates_with_override(
+        &candidates,
+        program,
+        interactive,
+        policy == TargetSelectionPolicy::OfflineOnlyAllowUnverified,
+        input,
+        output,
+    )
 }
 
+#[cfg(test)]
 fn select_from_candidates<R: BufRead, W: Write>(
     candidates: &[&TargetCandidate],
     program: &str,
@@ -176,10 +186,24 @@ fn select_from_candidates<R: BufRead, W: Write>(
     input: &mut R,
     output: &mut W,
 ) -> Selection {
+    select_from_candidates_with_override(candidates, program, interactive, false, input, output)
+}
+
+fn select_from_candidates_with_override<R: BufRead, W: Write>(
+    candidates: &[&TargetCandidate],
+    program: &str,
+    interactive: bool,
+    allow_unverified_noninteractive: bool,
+    input: &mut R,
+    output: &mut W,
+) -> Selection {
     if !interactive {
         return match candidates {
             [] => Selection::Unavailable("no target candidate was found".into()),
-            [candidate] if candidate.confidence == RootCandidateConfidence::High => {
+            [candidate]
+                if candidate.confidence == RootCandidateConfidence::High
+                    || allow_unverified_noninteractive =>
+            {
                 Selection::Selected(Box::new((*candidate).clone()))
             }
             [candidate] => Selection::Unavailable(format!(
@@ -212,8 +236,8 @@ fn select_from_candidates<R: BufRead, W: Write>(
     } else {
         "Available CatOS targets:"
     };
-    if let Err(error) = writeln!(output, "{heading}")
-        .map_err(|error| format!("stdout write failed: {error}"))
+    if let Err(error) =
+        writeln!(output, "{heading}").map_err(|error| format!("stdout write failed: {error}"))
     {
         return Selection::Unavailable(error);
     }
@@ -224,8 +248,8 @@ fn select_from_candidates<R: BufRead, W: Write>(
             return Selection::Unavailable(error);
         }
     }
-    if let Err(error) = writeln!(output, "  [0] Back")
-        .map_err(|error| format!("stdout write failed: {error}"))
+    if let Err(error) =
+        writeln!(output, "  [0] Back").map_err(|error| format!("stdout write failed: {error}"))
     {
         return Selection::Unavailable(error);
     }
@@ -245,10 +269,7 @@ fn select_from_candidates<R: BufRead, W: Write>(
 /// Pick an encrypted container only when no eligible CatOS candidate exists.
 /// The unlocked mapper is subsequently re-discovered and passed through the
 /// caller's explicit target-selection policy.
-pub fn select_luks_device(
-    devices: &[BlockDevice],
-    program: &str,
-) -> Result<LuksSelection, String> {
+pub fn select_luks_device(devices: &[BlockDevice], program: &str) -> Result<LuksSelection, String> {
     let stdin = io::stdin();
     let stdout = io::stdout();
     let mut input = stdin.lock();
@@ -293,22 +314,32 @@ fn select_luks_device_with<R: BufRead, W: Write>(
         )
         .map_err(|error| format!("stdout write failed: {error}"))?;
     }
-    writeln!(output, "  [0] Back")
-        .map_err(|error| format!("stdout write failed: {error}"))?;
+    writeln!(output, "  [0] Back").map_err(|error| format!("stdout write failed: {error}"))?;
     let Some(index) = read_index_with(
         input,
         output,
         program,
         "encrypted container",
         candidates.len(),
-    )? else {
+    )?
+    else {
         return Ok(LuksSelection::Declined);
     };
-    Ok(LuksSelection::Selected(Box::new((*candidates[index]).clone())))
+    Ok(LuksSelection::Selected(Box::new(
+        (*candidates[index]).clone(),
+    )))
 }
 
 fn luks_candidates(devices: &[BlockDevice]) -> Vec<&BlockDevice> {
-    devices.iter().filter(|device| device.filesystem.as_deref().is_some_and(|fs| fs.eq_ignore_ascii_case("crypto_LUKS"))).collect()
+    devices
+        .iter()
+        .filter(|device| {
+            device
+                .filesystem
+                .as_deref()
+                .is_some_and(|fs| fs.eq_ignore_ascii_case("crypto_LUKS"))
+        })
+        .collect()
 }
 
 pub fn summary(candidate: &TargetCandidate) -> String {
@@ -343,10 +374,7 @@ pub fn summary(candidate: &TargetCandidate) -> String {
     )
 }
 
-fn write_summary<W: Write>(
-    output: &mut W,
-    candidate: &TargetCandidate,
-) -> Result<(), String> {
+fn write_summary<W: Write>(output: &mut W, candidate: &TargetCandidate) -> Result<(), String> {
     writeln!(output, "Selected target: {}", summary(candidate))
         .map_err(|error| format!("stdout write failed: {error}"))
 }
@@ -380,7 +408,6 @@ fn read_confirm_with<R: BufRead, W: Write>(
     }
 }
 
-
 fn read_index_with<R: BufRead, W: Write>(
     input: &mut R,
     output: &mut W,
@@ -391,7 +418,9 @@ fn read_index_with<R: BufRead, W: Write>(
     loop {
         write!(output, "{program}: pick {noun} [0-{count}]: ")
             .map_err(|e| format!("stdout write failed: {e}"))?;
-        output.flush().map_err(|e| format!("stdout write failed: {e}"))?;
+        output
+            .flush()
+            .map_err(|e| format!("stdout write failed: {e}"))?;
         let mut line = String::new();
         let read = input
             .read_line(&mut line)
@@ -414,7 +443,24 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
     fn candidate(path: &str, running: bool) -> TargetCandidate {
-        TargetCandidate { root_device: PathBuf::from(path), root_fstype: "btrfs".into(), root_uuid: Some(format!("uuid-{path}")), root_subvolume: Some("/@".into()), root_subvolume_id: Some(256), filesystem_id: Some("fsid".into()), label: None, os_release: crate::target::model::OsRelease { pretty_name: Some("CatOS".into()), ..Default::default() }, fstab_identity: None, currently_mounted: running, running_environment_member: running, confidence: RootCandidateConfidence::High, evidence: Vec::new() }
+        TargetCandidate {
+            root_device: PathBuf::from(path),
+            root_fstype: "btrfs".into(),
+            root_uuid: Some(format!("uuid-{path}")),
+            root_subvolume: Some("/@".into()),
+            root_subvolume_id: Some(256),
+            filesystem_id: Some("fsid".into()),
+            label: None,
+            os_release: crate::target::model::OsRelease {
+                pretty_name: Some("CatOS".into()),
+                ..Default::default()
+            },
+            fstab_identity: None,
+            currently_mounted: running,
+            running_environment_member: running,
+            confidence: RootCandidateConfidence::High,
+            evidence: Vec::new(),
+        }
     }
 
     struct FailingWriter;
@@ -489,6 +535,65 @@ mod tests {
     }
 
     #[test]
+    fn forced_offline_policy_selects_one_unverified_candidate_noninteractively() {
+        let mut low = candidate("/dev/uncertain", false);
+        low.confidence = RootCandidateConfidence::Low;
+        low.os_release = Default::default();
+        let report = DiscoveryReport {
+            candidates: vec![low],
+            ..Default::default()
+        };
+
+        match select_target_with_policy_for_terminal(
+            &report,
+            "catos-chroot",
+            TargetSelectionPolicy::OfflineOnlyAllowUnverified,
+            false,
+        ) {
+            Selection::Selected(selected) => {
+                assert_eq!(selected.root_device, PathBuf::from("/dev/uncertain"));
+                assert_eq!(selected.confidence, RootCandidateConfidence::Low);
+            }
+            other => panic!("expected forced selection, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn forced_offline_policy_still_refuses_ambiguous_or_running_targets() {
+        let mut first = candidate("/dev/first", false);
+        first.confidence = RootCandidateConfidence::Low;
+        let mut second = candidate("/dev/second", false);
+        second.confidence = RootCandidateConfidence::Medium;
+        let ambiguous = DiscoveryReport {
+            candidates: vec![first, second],
+            ..Default::default()
+        };
+        assert!(matches!(
+            select_target_with_policy_for_terminal(
+                &ambiguous,
+                "catos-chroot",
+                TargetSelectionPolicy::OfflineOnlyAllowUnverified,
+                false,
+            ),
+            Selection::Unavailable(_)
+        ));
+
+        let running_only = DiscoveryReport {
+            candidates: vec![candidate("/dev/running", true)],
+            ..Default::default()
+        };
+        assert!(matches!(
+            select_target_with_policy_for_terminal(
+                &running_only,
+                "catos-chroot",
+                TargetSelectionPolicy::OfflineOnlyAllowUnverified,
+                false,
+            ),
+            Selection::Unavailable(_)
+        ));
+    }
+
+    #[test]
     fn target_selection_output_failure_is_unavailable_not_a_panic() {
         let report = DiscoveryReport {
             candidates: vec![candidate("/dev/root", false)],
@@ -511,31 +616,57 @@ mod tests {
 
     #[test]
     fn prefer_running_root_selects_it_before_offline_candidates() {
-        let report = DiscoveryReport { candidates: vec![candidate("/dev/running", true), candidate("/dev/offline", false)], ..Default::default() };
-        match select_target_with_policy(&report, "catos-doctor", TargetSelectionPolicy::PreferRunningRoot) {
-            Selection::Selected(selected) => { assert_eq!(selected.root_device, PathBuf::from("/dev/running")); assert!(selected.running_environment_member); }
+        let report = DiscoveryReport {
+            candidates: vec![
+                candidate("/dev/running", true),
+                candidate("/dev/offline", false),
+            ],
+            ..Default::default()
+        };
+        match select_target_with_policy(
+            &report,
+            "catos-doctor",
+            TargetSelectionPolicy::PreferRunningRoot,
+        ) {
+            Selection::Selected(selected) => {
+                assert_eq!(selected.root_device, PathBuf::from("/dev/running"));
+                assert!(selected.running_environment_member);
+            }
             other => panic!("expected running root selection, got {other:?}"),
         }
     }
 
     #[test]
     fn offline_only_policy_never_returns_the_running_root() {
-        let report = DiscoveryReport { candidates: vec![candidate("/dev/running", true), candidate("/dev/offline", false)], ..Default::default() };
+        let report = DiscoveryReport {
+            candidates: vec![
+                candidate("/dev/running", true),
+                candidate("/dev/offline", false),
+            ],
+            ..Default::default()
+        };
         match select_target_with_policy_for_terminal(
             &report,
             "catos-chroot",
             TargetSelectionPolicy::OfflineOnly,
             false,
         ) {
-            Selection::Selected(selected) => { assert_eq!(selected.root_device, PathBuf::from("/dev/offline")); assert!(!selected.running_environment_member); }
+            Selection::Selected(selected) => {
+                assert_eq!(selected.root_device, PathBuf::from("/dev/offline"));
+                assert!(!selected.running_environment_member);
+            }
             other => panic!("expected offline selection, got {other:?}"),
         }
     }
 
     #[test]
     fn offline_only_policy_refuses_a_running_root_only_report() {
-        let report = DiscoveryReport { candidates: vec![candidate("/dev/running", true)], ..Default::default() };
-        match select_target_with_policy(&report, "catos-chroot", TargetSelectionPolicy::OfflineOnly) {
+        let report = DiscoveryReport {
+            candidates: vec![candidate("/dev/running", true)],
+            ..Default::default()
+        };
+        match select_target_with_policy(&report, "catos-chroot", TargetSelectionPolicy::OfflineOnly)
+        {
             Selection::Unavailable(reason) => assert!(reason.contains("offline")),
             other => panic!("expected unavailable selection, got {other:?}"),
         }
@@ -563,13 +694,8 @@ mod tests {
 
         let mut input = io::Cursor::new(b"0\n".to_vec());
         let mut output = Vec::new();
-        let result = select_from_candidates(
-            &[&target],
-            "catos-chroot",
-            true,
-            &mut input,
-            &mut output,
-        );
+        let result =
+            select_from_candidates(&[&target], "catos-chroot", true, &mut input, &mut output);
         assert!(matches!(result, Selection::Declined));
         let output = String::from_utf8(output).unwrap();
         assert!(output.contains("Available maintenance targets:"));
@@ -578,18 +704,60 @@ mod tests {
 
     #[test]
     fn summary_includes_device_uuid_and_subvolume() {
-        let candidate = TargetCandidate { root_device: PathBuf::from("/dev/nvme0n1p3"), root_fstype: "btrfs".into(), root_uuid: Some("uuid".into()), root_subvolume: Some("/@".into()), root_subvolume_id: Some(256), filesystem_id: Some("fsid".into()), label: None, os_release: crate::target::model::OsRelease { pretty_name: Some("CatOS".into()), ..Default::default() }, fstab_identity: None, currently_mounted: false, running_environment_member: false, confidence: RootCandidateConfidence::High, evidence: Vec::new() };
-        assert_eq!(summary(&candidate), "CatOS — /dev/nvme0n1p3 — btrfs UUID=uuid subvol=/@");
+        let candidate = TargetCandidate {
+            root_device: PathBuf::from("/dev/nvme0n1p3"),
+            root_fstype: "btrfs".into(),
+            root_uuid: Some("uuid".into()),
+            root_subvolume: Some("/@".into()),
+            root_subvolume_id: Some(256),
+            filesystem_id: Some("fsid".into()),
+            label: None,
+            os_release: crate::target::model::OsRelease {
+                pretty_name: Some("CatOS".into()),
+                ..Default::default()
+            },
+            fstab_identity: None,
+            currently_mounted: false,
+            running_environment_member: false,
+            confidence: RootCandidateConfidence::High,
+            evidence: Vec::new(),
+        };
+        assert_eq!(
+            summary(&candidate),
+            "CatOS — /dev/nvme0n1p3 — btrfs UUID=uuid subvol=/@"
+        );
     }
 
     #[test]
     fn luks_picker_only_exposes_encrypted_containers_before_rediscovery() {
         let encrypted = crate::target::model::BlockDevice {
-            name: "sda2".into(), dev_path: Some(PathBuf::from("/dev/sda2")), major_minor: None, parent: String::new(), class: Default::default(), disk_kind: Default::default(), partition_role: crate::target::model::PartitionRole::Unknown, partition_number: None, size_sectors: None, read_only: false, removable: false, filesystem: Some("crypto_LUKS".into()), uuid: Some("luks-id".into()), part_uuid: None, label: None, part_label: None, mount_point: None, mounts: Vec::new(), mounted_before_session: false, evidence: Vec::new(),
+            name: "sda2".into(),
+            dev_path: Some(PathBuf::from("/dev/sda2")),
+            major_minor: None,
+            parent: String::new(),
+            class: Default::default(),
+            disk_kind: Default::default(),
+            partition_role: crate::target::model::PartitionRole::Unknown,
+            partition_number: None,
+            size_sectors: None,
+            read_only: false,
+            removable: false,
+            filesystem: Some("crypto_LUKS".into()),
+            uuid: Some("luks-id".into()),
+            part_uuid: None,
+            label: None,
+            part_label: None,
+            mount_point: None,
+            mounts: Vec::new(),
+            mounted_before_session: false,
+            evidence: Vec::new(),
         };
         let mut plain = encrypted.clone();
         plain.filesystem = Some("ext4".into());
-        assert_eq!(luks_candidates(&[plain, encrypted.clone()]), vec![&encrypted]);
+        assert_eq!(
+            luks_candidates(&[plain, encrypted.clone()]),
+            vec![&encrypted]
+        );
     }
 
     #[test]
@@ -620,8 +788,7 @@ mod tests {
         let mut no_input = std::io::Cursor::new(Vec::<u8>::new());
         let mut output = Vec::new();
         assert!(matches!(
-            select_luks_device_with(&[], "catos-chroot", true, &mut no_input, &mut output)
-                .unwrap(),
+            select_luks_device_with(&[], "catos-chroot", true, &mut no_input, &mut output).unwrap(),
             LuksSelection::Unavailable
         ));
 
@@ -662,16 +829,14 @@ mod tests {
         let mut selected = std::io::Cursor::new(b"2\n".to_vec());
         let mut output = Vec::new();
         assert_eq!(
-            read_index_with(&mut selected, &mut output, "catos-repair", "target", 2)
-                .unwrap(),
+            read_index_with(&mut selected, &mut output, "catos-repair", "target", 2).unwrap(),
             Some(1)
         );
 
         let mut back = std::io::Cursor::new(b"0\n".to_vec());
         let mut output = Vec::new();
         assert_eq!(
-            read_index_with(&mut back, &mut output, "catos-repair", "target", 2)
-                .unwrap(),
+            read_index_with(&mut back, &mut output, "catos-repair", "target", 2).unwrap(),
             None
         );
     }
@@ -681,8 +846,7 @@ mod tests {
         let mut input = std::io::Cursor::new(b"3\n1\n".to_vec());
         let mut output = Vec::new();
         assert_eq!(
-            read_index_with(&mut input, &mut output, "catos-repair", "target", 2)
-                .unwrap(),
+            read_index_with(&mut input, &mut output, "catos-repair", "target", 2).unwrap(),
             Some(0)
         );
         let output = String::from_utf8(output).unwrap();
@@ -691,8 +855,7 @@ mod tests {
         let mut eof = std::io::Cursor::new(Vec::<u8>::new());
         let mut output = Vec::new();
         assert_eq!(
-            read_index_with(&mut eof, &mut output, "catos-repair", "target", 2)
-                .unwrap(),
+            read_index_with(&mut eof, &mut output, "catos-repair", "target", 2).unwrap(),
             None
         );
     }

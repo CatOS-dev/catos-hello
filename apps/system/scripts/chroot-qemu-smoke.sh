@@ -273,6 +273,7 @@ cat > "$INITRAMFS/bin/chroot-child" <<'CHILD'
 scenario=$1
 case "$scenario" in
     default|cancel|missing_fstab|missing_os_release|missing_bash|missing_arch_chroot) /bin/catos-chroot --no-systemd-chroot ;;
+    missing_os_release_force) /bin/catos-chroot --no-systemd-chroot --force-unsafe ;;
     show_snapshots|show_snapshots_cancel) /bin/catos-chroot --no-systemd-chroot --show-btrfs-dot-snapshots ;;
     *) echo "unknown scenario $scenario" >&2; exit 2 ;;
 esac
@@ -306,6 +307,7 @@ done
 case "$scenario" in
     default|missing_fstab) input='y\nn\n' ;;
     missing_os_release) input='1\nn\ny\n' ;;
+    missing_os_release_force) input='' ;;
     missing_bash) input='y\nn\n/usr/bin/chroot-acceptance\nexit\n' ;;
     missing_arch_chroot) input='y\nn\n' ;;
     show_snapshots) input='1\nn\n' ;;
@@ -319,6 +321,7 @@ if [ "$scenario" = missing_arch_chroot ]; then
 fi
 if [ "$scenario" = missing_fstab ] \
     || [ "$scenario" = missing_os_release ] \
+    || [ "$scenario" = missing_os_release_force ] \
     || [ "$scenario" = missing_bash ]; then
     mkdir -p /mnt/target
     mount -t btrfs -o subvol=@ /dev/vda /mnt/target
@@ -327,7 +330,7 @@ if [ "$scenario" = missing_fstab ] \
             rm -f /mnt/target/etc/fstab
             touch /run/catos-chroot-root-only
             ;;
-        missing_os_release)
+        missing_os_release|missing_os_release_force)
             rm -f /mnt/target/etc/os-release /mnt/target/usr/lib/os-release
             ;;
         missing_bash)
@@ -337,9 +340,14 @@ if [ "$scenario" = missing_fstab ] \
     umount /mnt/target
 fi
 rm -f /tmp/chroot.rc /tmp/chroot.out /tmp/chroot.err /tmp/typescript
-printf '%b' "$input" | timeout -s KILL 45 script -q \
-    -c "/bin/chroot-child $scenario" /tmp/typescript \
-    > /tmp/chroot.out 2> /tmp/chroot.err
+if [ "$scenario" = missing_os_release_force ]; then
+    timeout -s KILL 45 /bin/chroot-child "$scenario" \
+        </dev/null > /tmp/chroot.out 2> /tmp/chroot.err
+else
+    printf '%b' "$input" | timeout -s KILL 45 script -q \
+        -c "/bin/chroot-child $scenario" /tmp/typescript \
+        > /tmp/chroot.out 2> /tmp/chroot.err
+fi
 echo __CHROOT_BEGIN__
 cat /tmp/chroot.out
 echo __CHROOT_STDERR__
@@ -439,6 +447,12 @@ assert_contains "$LAST_LOG" "target os-release was not found" missing_os_release
 assert_contains "$LAST_LOG" "Enter the chroot anyway? [y/N]" missing_os_release
 assert_contains "$LAST_LOG" "__CHROOT_TARGET_VERIFIED__" missing_os_release
 
+echo "=== scenario: forced-noninteractive-unverified-root ==="
+run_qemu missing_os_release_force
+assert_contains "$LAST_LOG" "__CHROOT_TARGET_VERIFIED__" missing_os_release_force
+assert_not_contains "$LAST_LOG" "Available maintenance targets:" missing_os_release_force
+assert_not_contains "$LAST_LOG" "Enter the chroot anyway?" missing_os_release_force
+
 echo "=== scenario: missing-bash-sh-fallback ==="
 run_qemu missing_bash
 assert_contains "$LAST_LOG" "using fallback maintenance shell /bin/sh because Bash is unavailable" missing_bash
@@ -464,4 +478,4 @@ echo "=== scenario: back-from-multiple-targets ==="
 run_qemu show_snapshots_cancel
 assert_contains "$LAST_LOG" "  [0] Back" show_snapshots_cancel
 
-echo "pass: Chroot QEMU acceptance exercised /bin/catos-chroot, target selection, target-local os-release links, unverified-root rescue selection, missing fstab fallback, Bash-to-sh fallback, arch-chroot-to-chroot fallback, unavailable and failed auxiliary mounts, descendant skipping, runtime setup, shell entry, reverse cleanup and session removal"
+echo "pass: Chroot QEMU acceptance exercised /bin/catos-chroot, target selection, target-local os-release links, unverified-root rescue selection, forced noninteractive unverified selection, missing fstab fallback, Bash-to-sh fallback, arch-chroot-to-chroot fallback, unavailable and failed auxiliary mounts, descendant skipping, runtime setup, shell entry, reverse cleanup and session removal"

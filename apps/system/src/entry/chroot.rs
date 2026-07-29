@@ -66,80 +66,85 @@ pub fn run(argv: &[String], program: &str) -> i32 {
         return exit_code::PROBE_FAILED;
     }
 
+    let selection_policy = if options.allow_unsafe {
+        crate::selection_ui::TargetSelectionPolicy::OfflineOnlyAllowUnverified
+    } else {
+        crate::selection_ui::TargetSelectionPolicy::OfflineOnly
+    };
     let mut opened_luks: Option<OpenedLuks> = None;
-    let selected_target = match crate::selection_ui::select_target_with_policy(
-        &discovery,
-        program,
-        crate::selection_ui::TargetSelectionPolicy::OfflineOnly,
-    ) {
-        crate::selection_ui::Selection::Selected(candidate) => *candidate,
-        crate::selection_ui::Selection::Declined => return exit_code::SUCCESS,
-        crate::selection_ui::Selection::Unavailable(reason) if discovery.candidates.is_empty() => {
-            let encrypted =
-                match crate::selection_ui::select_luks_device(&discovery.inventory, program) {
-                    Ok(crate::selection_ui::LuksSelection::Selected(device)) => *device,
-                    Ok(crate::selection_ui::LuksSelection::Declined) => {
-                        return exit_code::SUCCESS;
-                    }
-                    Ok(crate::selection_ui::LuksSelection::Unavailable) => {
-                        eprintln!("{program}: {reason}");
-                        return exit_code::PROBE_FAILED;
-                    }
+    let selected_target =
+        match crate::selection_ui::select_target_with_policy(&discovery, program, selection_policy)
+        {
+            crate::selection_ui::Selection::Selected(candidate) => *candidate,
+            crate::selection_ui::Selection::Declined => return exit_code::SUCCESS,
+            crate::selection_ui::Selection::Unavailable(reason)
+                if discovery.candidates.is_empty() =>
+            {
+                let encrypted =
+                    match crate::selection_ui::select_luks_device(&discovery.inventory, program) {
+                        Ok(crate::selection_ui::LuksSelection::Selected(device)) => *device,
+                        Ok(crate::selection_ui::LuksSelection::Declined) => {
+                            return exit_code::SUCCESS;
+                        }
+                        Ok(crate::selection_ui::LuksSelection::Unavailable) => {
+                            eprintln!("{program}: {reason}");
+                            return exit_code::PROBE_FAILED;
+                        }
+                        Err(error) => {
+                            eprintln!("{program}: {error}");
+                            return exit_code::PROBE_FAILED;
+                        }
+                    };
+                let Some(luks_device) = target_block_to_chroot(&encrypted) else {
+                    eprintln!("{program}: encrypted inventory device has no path");
+                    return exit_code::PROBE_FAILED;
+                };
+                let opened = match open_luks(&luks_device, authorization) {
+                    Ok(opened) => opened,
                     Err(error) => {
                         eprintln!("{program}: {error}");
                         return exit_code::PROBE_FAILED;
                     }
                 };
-            let Some(luks_device) = target_block_to_chroot(&encrypted) else {
-                eprintln!("{program}: encrypted inventory device has no path");
-                return exit_code::PROBE_FAILED;
-            };
-            let opened = match open_luks(&luks_device, authorization) {
-                Ok(opened) => opened,
-                Err(error) => {
-                    eprintln!("{program}: {error}");
-                    return exit_code::PROBE_FAILED;
-                }
-            };
-            let mut opened = Some(opened);
-            match resolve_after_luks(
-                || {
-                    crate::target::discovery::discover_targets_with_options(
-                        crate::target::discovery::DiscoveryOptions {
-                            include_dot_snapshots: options.show_btrfs_dot_snapshots,
-                            include_unverified_roots: true,
-                        },
-                    )
-                },
-                |report| {
-                    crate::selection_ui::select_target_with_policy(
-                        report,
-                        program,
-                        crate::selection_ui::TargetSelectionPolicy::OfflineOnly,
-                    )
-                },
-                || opened.take().expect("opened LUKS token").close(),
-            ) {
-                Ok(Some(resolved)) => {
-                    for warning in resolved.warnings {
-                        eprintln!("{program}: warning: {warning}");
+                let mut opened = Some(opened);
+                match resolve_after_luks(
+                    || {
+                        crate::target::discovery::discover_targets_with_options(
+                            crate::target::discovery::DiscoveryOptions {
+                                include_dot_snapshots: options.show_btrfs_dot_snapshots,
+                                include_unverified_roots: true,
+                            },
+                        )
+                    },
+                    |report| {
+                        crate::selection_ui::select_target_with_policy(
+                            report,
+                            program,
+                            selection_policy,
+                        )
+                    },
+                    || opened.take().expect("opened LUKS token").close(),
+                ) {
+                    Ok(Some(resolved)) => {
+                        for warning in resolved.warnings {
+                            eprintln!("{program}: warning: {warning}");
+                        }
+                        devices = resolved.inventory;
+                        opened_luks = opened;
+                        resolved.candidate
                     }
-                    devices = resolved.inventory;
-                    opened_luks = opened;
-                    resolved.candidate
-                }
-                Ok(None) => return exit_code::SUCCESS,
-                Err(error) => {
-                    eprintln!("{program}: {error}");
-                    return exit_code::PROBE_FAILED;
+                    Ok(None) => return exit_code::SUCCESS,
+                    Err(error) => {
+                        eprintln!("{program}: {error}");
+                        return exit_code::PROBE_FAILED;
+                    }
                 }
             }
-        }
-        crate::selection_ui::Selection::Unavailable(reason) => {
-            eprintln!("{program}: {reason}");
-            return exit_code::PROBE_FAILED;
-        }
-    };
+            crate::selection_ui::Selection::Unavailable(reason) => {
+                eprintln!("{program}: {reason}");
+                return exit_code::PROBE_FAILED;
+            }
+        };
     let root_device = match find_selected_device(&devices, &selected_target.root_device) {
         Some(device) => device.clone(),
         None => {

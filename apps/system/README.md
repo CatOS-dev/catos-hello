@@ -129,8 +129,11 @@ preflight findings. Target-local symbolic links such as
 target are resolved inside the selected installation. Invalid secondary fstab
 mount points are skipped with warnings. If final target verification still
 fails, an interactive operator may continue after reviewing the reasons;
-non-interactive rescue workflows can use `--force-unsafe`. Missing, malformed,
-or stale fstab data falls back to the selected root. Unavailable, ambiguous,
+non-interactive rescue workflows can use `--force-unsafe`. In that mode, one
+and only one offline Medium/Low-confidence maintenance target may be selected
+without a terminal; multiple targets are still rejected rather than guessed.
+Missing, malformed, or stale fstab data falls back to the selected root.
+Unavailable, ambiguous,
 conflicting, or invalid secondary fstab entries are skipped with warnings. If
 an auxiliary filesystem fails to mount, Chroot keeps unrelated successful
 mounts, skips descendants of the failed mount point, and still opens the shell.
