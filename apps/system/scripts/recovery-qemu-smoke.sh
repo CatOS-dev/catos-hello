@@ -236,11 +236,11 @@ case "$scenario" in
             --transaction "$plan_id" --json
         ;;
     apply|apply_fault)
-        [ -n "$plan_id" ] && [ -n "$token" ] && [ -f /plan.json ] \
-            || { echo "===RECOVERY_FATAL=== apply missing plan inputs"; poweroff -f; }
+        [ -n "$plan_id" ] && [ -n "$token" ] \
+            || { echo "===RECOVERY_FATAL=== apply missing plan identity"; poweroff -f; }
         # shellcheck disable=SC2086
-        run_and_poweroff APPLY "$BIN" recovery apply $ROOT_ARGS $SNAPSHOT_ARGS \
-            --plan-file /plan.json --plan-id "$plan_id" --confirm "$token" --json
+        run_and_poweroff APPLY "$BIN" recovery apply $ROOT_ARGS \
+            --plan-id "$plan_id" --confirm "$token" --json
         ;;
     resume|resume_fault)
         [ -n "$plan_id" ] || { echo "===RECOVERY_FATAL=== resume missing plan id"; poweroff -f; }
@@ -297,8 +297,20 @@ case "$scenario" in
             verify_untouched)
                 [ -f "$active_root_dir/var/lib/pacman/local/CURRENT_MARKER" ] \
                     || { echo "===VERIFY_FAIL=== untouched root marker missing"; ok=0; }
-                [ ! -e /mnt/.catos-recovery/transactions ] \
-                    || { echo "===VERIFY_FAIL=== refusal path wrote a transaction"; ok=0; }
+                [ ! -e /mnt/.catos-recovery/backups ] \
+                    || { echo "===VERIFY_FAIL=== refusal path created a backup"; ok=0; }
+                [ ! -e /mnt/.catos-recovery/staging ] \
+                    || { echo "===VERIFY_FAIL=== refusal path created staging state"; ok=0; }
+                if [ -n "$plan_id" ]; then
+                    plan_dir="/mnt/.catos-recovery/transactions/$plan_id"
+                    [ -f "$plan_dir/plan.json" ] \
+                        || { echo "===VERIFY_FAIL=== persisted plan is missing"; ok=0; }
+                    [ ! -e "$plan_dir/state.json" ] \
+                        || { echo "===VERIFY_FAIL=== refusal path started a transaction"; ok=0; }
+                else
+                    [ ! -e /mnt/.catos-recovery/transactions ] \
+                        || { echo "===VERIFY_FAIL=== rejected plan wrote target metadata"; ok=0; }
+                fi
                 ;;
         esac
         umount /mnt
@@ -316,9 +328,11 @@ GUEST
 }
 
 build_initramfs() {
-    plan=${1:-}
+    _legacy_plan_argument=${1:-}
     output=$2
-    if [ -n "$plan" ]; then cp "$plan" "$INITRAMFS/plan.json"; else rm -f "$INITRAMFS/plan.json"; fi
+    # Recovery plans must be discovered from the selected target's canonical
+    # /.catos-recovery path. Never inject a host-side plan into initramfs.
+    rm -f "$INITRAMFS/plan.json"
     (cd "$INITRAMFS" && find . -print0 | cpio --null --create --format=newc 2>/dev/null) \
         | gzip -9 > "$output"
 }
@@ -476,7 +490,7 @@ assert_nonzero_rc() {
 capture_json() {
     label=$1
     output=$2
-    python3 - "$LAST_LOG" "$label" "$output" <<'PY'
+    if ! python3 - "$LAST_LOG" "$label" "$output" <<'PY'
 import json, pathlib, sys
 log, label, output = sys.argv[1:]
 lines = pathlib.Path(log).read_text(errors='replace').splitlines()
@@ -503,7 +517,9 @@ except json.JSONDecodeError as error:
     raise SystemExit(f"invalid JSON between {start} and {end_prefix}: {error}")
 pathlib.Path(output).write_text(json.dumps(value))
 PY
-    [ "$?" -eq 0 ] || fail "could not capture $label JSON"
+    then
+        fail "could not capture $label JSON"
+    fi
 }
 
 json_value() {
@@ -539,10 +555,11 @@ emit_plan() {
     assert_json_value "$PLAN_FILE" kind recovery_plan
     assert_json_value "$PLAN_FILE" payload.schema_version 4
     assert_json_value "$PLAN_FILE" payload.boot_consistency.status "$expected_boot"
+    assert_json_value "$PLAN_FILE" payload.plan_path "/.catos-recovery/transactions/$(json_value "$PLAN_FILE" payload.plan_id)/plan.json"
     PLAN_ID=$(json_value "$PLAN_FILE" payload.plan_id)
     APPLY_TOKEN=$(json_value "$PLAN_FILE" payload.confirmation_token)
     [ -n "$PLAN_ID" ] && [ -n "$APPLY_TOKEN" ] || fail "plan lacks id/token"
-    build_initramfs "$PLAN_FILE" "$INITRAMFS_RUN"
+    build_initramfs "" "$INITRAMFS_RUN"
 }
 
 emit_plan_with_root_subvol() {
@@ -554,11 +571,12 @@ emit_plan_with_root_subvol() {
     assert_json_value "$PLAN_FILE" kind recovery_plan
     assert_json_value "$PLAN_FILE" payload.schema_version 4
     assert_json_value "$PLAN_FILE" payload.boot_consistency.status "$expected_boot"
+    assert_json_value "$PLAN_FILE" payload.plan_path "/.catos-recovery/transactions/$(json_value "$PLAN_FILE" payload.plan_id)/plan.json"
     assert_json_value "$PLAN_FILE" payload.current_root.path "$root_subvol"
     PLAN_ID=$(json_value "$PLAN_FILE" payload.plan_id)
     APPLY_TOKEN=$(json_value "$PLAN_FILE" payload.confirmation_token)
     [ -n "$PLAN_ID" ] && [ -n "$APPLY_TOKEN" ] || fail "plan lacks id/token"
-    build_initramfs "$PLAN_FILE" "$INITRAMFS_RUN"
+    build_initramfs "" "$INITRAMFS_RUN"
 }
 
 assert_completed_and_verify() {
@@ -689,8 +707,9 @@ grep -q '===VERIFY_OK===' "$LAST_LOG" || fail "nested-layout refusal wrote to ta
 assert_esp_unchanged
 echo "pass: nested snapshot layout refused without target writes"
 
-# External ESP is understood but unsupported: plan reports it, apply refuses
-# before Engine::begin, and neither target nor ESP may change.
+# External ESP is understood but unsupported: plan is persisted at the
+# canonical target path, apply refuses before Engine::begin, and neither root
+# data nor ESP may change. The pending plan remains discoverable for review.
 create_fixture external
 emit_plan unsupported
 run_guest apply "" "$PLAN_ID" "$APPLY_TOKEN"
@@ -776,7 +795,7 @@ assert_json_value "$PLAN_FILE" payload.boot_consistency.status consistent
 PLAN_ID=$(json_value "$PLAN_FILE" payload.plan_id)
 APPLY_TOKEN=$(json_value "$PLAN_FILE" payload.confirmation_token)
 [ -n "$PLAN_ID" ] && [ -n "$APPLY_TOKEN" ] || fail "snapper plan lacks id/token"
-build_initramfs "$PLAN_FILE" "$INITRAMFS_RUN"
+build_initramfs "" "$INITRAMFS_RUN"
 
 # 3. apply, then verify the active root and the source snapshot.
 run_guest apply "" "$PLAN_ID" "$APPLY_TOKEN" "$INITRAMFS_RUN" "/@" "$SNAPPER_SNAPSHOT_SUBVOL"
