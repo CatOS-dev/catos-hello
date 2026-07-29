@@ -50,17 +50,18 @@ experienced users:
 | `catos-system doctor` / `catos-doctor` | Check an installed CatOS system and explain detected problems. |
 | `catos-system chroot` / `catos-chroot` | Discover an installed system, mount it safely, and open a maintenance shell. |
 | `catos-system repair` / `catos-repair` | Repair a filesystem, fstab/mount layout, or boot setup. |
-| `catos-system recovery` / `catos-recovery` | Inspect, apply, resume, or revert Btrfs snapshot recovery. |
+| `catos-system recovery` / `catos-recovery` | Plan, apply, resume, revert, and explicitly clean Btrfs snapshot recovery. |
 | `catos-system update` / `catos-update` | Check for and apply package updates on the running system. |
 | `catos-system advanced` | Low-level read-only inspection and target-mount tools. |
 
 `catos-repair` and `catos-recovery` also open interactive submenus when run
 without a command and attached to a terminal. Interactive repair and recovery
 can select a detected CatOS installation instead of requiring the operator to
-type a block-device path. Recovery lists detected snapshots and transactions,
-interactive Apply loads the plan ID and confirmation token from the validated
-plan file, and interactive Revert obtains its state-bound token from a fresh
-status check.
+type a block-device path. Recovery lists detected snapshots, target-side pending plans, and transactions.
+Interactive Apply selects the immutable plan stored below the target's
+`/.catos-recovery/transactions/` directory. Revert and permanent Purge obtain
+separate state-bound tokens from a fresh status check; unused plans use their
+original apply token for explicit discard.
 
 Target discovery reports facts rather than applying one global exclusion rule.
 A confirmed CatOS `/` remains visible as the current-running-root candidate,
@@ -72,7 +73,8 @@ current root; mount-layout and boot repair may select it only where their own
 safety contracts support in-place operation.
 
 Doctor, chroot, all Repair commands, and the write-capable Recovery commands
-(`apply`, `resume`, and `revert`) request administrator privileges through an
+(`plan`, `apply`, `resume`, `revert`, `discard-plan`, and `purge`) request
+administrator privileges through an
 absolute trusted `sudo`, `sudo-rs`, `doas`, or `run0` path before privileged
 probing begins. Redirecting stdout does not disable password prompting when
 stdin remains a terminal. In non-interactive use, an unprivileged invocation
@@ -129,6 +131,21 @@ target concurrently.
 - `apply`, `resume`, and `revert` do not execute package management commands.
 - Recovery never performs automatic boot repair.
 
+Recovery metadata has an explicit lifecycle:
+
+- `discard-plan --plan-id ID --confirm TOKEN` removes only a plan that never
+  acquired a transaction record.
+- `status` emits a distinct purge token only for `completed` or `reverted`
+  transactions.
+- `purge --transaction ID --confirm TOKEN` removes only identity-verified
+  recovery-owned staging/backup subvolumes and transaction metadata.
+- Purge progress is persisted before deletion and after each object, so a
+  crash or failed ioctl can be retried without treating intended removal as
+  unexplained terminal drift.
+- Root exchange and reverse exchange rebind the Btrfs default-subvolume ID
+  when it followed the old root into the staging path; unrelated defaults are
+  preserved.
+
 ## CLI
 
 ### Interactive entry
@@ -150,7 +167,7 @@ catos-system chroot
 catos-system repair fs [DEVICE]
 catos-system repair mount [--root-device /dev/...] [--root-subvolume /@]
 catos-system repair boot  [--root-device /dev/...] [--root-subvolume /@]
-catos-system recovery <list|inspect|plan|apply|status|resume|revert> [OPTIONS]
+catos-system recovery <list|inspect|plan|apply|status|resume|revert|discard-plan|purge> [OPTIONS]
 catos-system update [--check]
 ```
 
@@ -466,7 +483,7 @@ On this host (rustc 1.96.1, x86_64-unknown-linux-musl):
 
 ```
 $ stat -c %s <binary>
-1815296
+1893120
 $ file <binary>
 ... static-pie linked ... stripped
 $ readelf -l <binary> | grep INTERP     # (empty)
@@ -475,7 +492,7 @@ $ bash scripts/verify-static.sh <binary>
 ok: no PT_INTERP segment
 ok: no NEEDED entries
 ok: ELF magic bytes present
-info: binary size 1815296 bytes (1772 KiB)
+info: binary size 1893120 bytes (1848 KiB)
 RESULT: OK (binary is fully static)
 ```
 
@@ -691,7 +708,7 @@ semantics match and adds boot-specific variants where they do not:
 | UKI + EFI Stub recipe (FirmwareProvider) | Implemented; covered by contract tests |
 | Secure Boot finalisation (target-policy preserving) | Implemented; covered by contract tests |
 | Snapshot support per provider | Implemented at the mkinitcpio layer; per-provider snapshot tool invocation is wired through the provider trait |
-| Real QEMU acceptance (full matrix) | **Not yet accepted.** `scripts/boot-repair-qemu-smoke.sh` is in place but currently performs target-image construction and detection-layer verification only. A complete boot-and-reboot acceptance requires OVMF Secure Boot certificates and the full provider toolchain in CI; it is tracked as environment-missing rather than reported as passing. |
+| Real QEMU acceptance (full matrix) | The script contains provider repair, verification, reboot, userspace, rollback, and lock-contention scenarios. The current host run exited 77 because its private loop-mount setup requires root, so this matrix is not reported as accepted here. |
 
 ### Deliberate exclusions
 
@@ -831,11 +848,12 @@ Stable uppercase symbolic codes are emitted for every issue
 
 - AUR-helper, Flatpak, distribution-news, and desktop notification integration
   for `catos-update`.
-- Automatic deletion of recovery backups; they remain available for revert or
-  explicit operator removal.
-- Complete boot-and-reboot QEMU acceptance for every provider/firmware
-  combination. The full matrix needs OVMF Secure Boot certificates and the
-  provider toolchain in CI.
+- Automatic age- or space-based retention for recovery data. Unused plans can
+  be removed with `discard-plan`; completed or reverted transactions and their
+  rollback data require an explicit state-bound `purge`.
+- A routinely executed privileged boot-and-reboot QEMU gate for every
+  provider/firmware combination. The matrix exists, but the current host run
+  requires root for its private loop mounts and therefore skipped with 77.
 - A graphical frontend and long-running maintenance daemon. The shipped
   interface is the command line plus its line-oriented interactive menus.
 
