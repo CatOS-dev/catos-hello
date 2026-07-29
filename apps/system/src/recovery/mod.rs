@@ -5,13 +5,15 @@
 //! filesystem, mounting the btrfs top-level inside a private
 //! namespace, surfacing structured errors as JSON envelopes.
 //!
-//! All seven recovery subcommands route through here:
-//! `list`, `inspect`, `plan`, `apply`, `status`, `resume`, `revert`.
+//! All recovery subcommands route through here:
+//! `list`, `inspect`, `plan`, `apply`, `status`, `resume`, `revert`,
+//! `discard-plan`, and `purge`.
 //!
 //! `list` and `inspect` are read-only. `plan` performs read-only validation
 //! and then persists one immutable plan below the target recovery directory.
 //!
-//! `plan`, `apply`, `resume`, and `revert` mount the btrfs top-level READ-WRITE.
+//! `plan`, `apply`, `resume`, `revert`, `discard-plan`, and `purge` mount the
+//! btrfs top-level READ-WRITE.
 //! These application paths coordinate snapshot-specific persistent writes;
 //! lower-level effects remain confined to capability execute modules.
 
@@ -25,8 +27,8 @@ use std::path::PathBuf;
 use crate::cli::{RecoveryArgs, RecoverySubcommand};
 use crate::error::exit_code;
 use crate::recovery::model::{
-    RecoveryInspectReport, RecoveryListReport, RecoveryPlanReport, RecoveryRecommendation,
-    RecoveryStatusReport,
+    RecoveryCleanupReport, RecoveryInspectReport, RecoveryListReport, RecoveryPlanReport,
+    RecoveryRecommendation, RecoveryStatusReport,
 };
 use crate::snapshot::diagnose::identity::{validate_recovery_id, SubvolumePath};
 use crate::snapshot::model::{
@@ -60,6 +62,8 @@ pub enum RecoveryOutcome {
         final_state: TransactionState,
         cleanup: CleanupSummary,
     },
+    DiscardPlan(RecoveryCleanupReport),
+    Purge(RecoveryCleanupReport),
     ArgumentError(Box<SnapshotError>),
     Error(Box<SnapshotError>),
 }
@@ -111,6 +115,14 @@ pub fn run_recovery(args: RecoveryArgs) -> RecoveryOutcome {
             },
             Err(error) => RecoveryOutcome::Error(Box::new(error)),
         },
+        RecoverySubcommand::DiscardPlan => match write::run_discard_plan(&args) {
+            Ok(report) => RecoveryOutcome::DiscardPlan(report),
+            Err(error) => RecoveryOutcome::Error(Box::new(error)),
+        },
+        RecoverySubcommand::Purge => match write::run_purge(&args) {
+            Ok(report) => RecoveryOutcome::Purge(report),
+            Err(error) => RecoveryOutcome::Error(Box::new(error)),
+        },
     }
 }
 
@@ -125,6 +137,8 @@ pub(crate) fn write_cli_contract_is_valid(args: &RecoveryArgs) -> bool {
             | RecoverySubcommand::Apply
             | RecoverySubcommand::Resume
             | RecoverySubcommand::Revert
+            | RecoverySubcommand::DiscardPlan
+            | RecoverySubcommand::Purge
     ) && validate_cli_contract(args).is_ok()
 }
 
@@ -194,6 +208,13 @@ pub fn exit_code_for(outcome: &RecoveryOutcome) -> i32 {
             final_state,
             cleanup,
         } => exit_code_for_recovery(*final_state, cleanup, record, TransactionState::Reverted),
+        RecoveryOutcome::DiscardPlan(report) | RecoveryOutcome::Purge(report) => {
+            if report.mount_cleanup.all_clean {
+                exit_code::SUCCESS
+            } else {
+                exit_code::PROBE_FAILED
+            }
+        }
         _ => exit_code::SUCCESS,
     }
 }
@@ -251,6 +272,32 @@ fn validate_cli_contract(args: &RecoveryArgs) -> Result<(), SnapshotError> {
                 return Err(SnapshotError::new(
                     SnapshotErrorKind::ConfirmationTokenMismatch,
                     "revert requires --confirm <token>",
+                ));
+            }
+        }
+        RecoverySubcommand::DiscardPlan => {
+            args.require_target_selection()?;
+            let plan_id = args.plan_id.as_deref().ok_or_else(|| {
+                SnapshotError::new(
+                    SnapshotErrorKind::TransactionNotFound,
+                    "discard-plan requires --plan-id <id>",
+                )
+            })?;
+            validate_recovery_id(plan_id)?;
+            if args.confirm.is_none() {
+                return Err(SnapshotError::new(
+                    SnapshotErrorKind::ConfirmationTokenMismatch,
+                    "discard-plan requires --confirm <token>",
+                ));
+            }
+        }
+        RecoverySubcommand::Purge => {
+            args.require_target_selection()?;
+            require_transaction_id(args.transaction.as_deref(), "purge")?;
+            if args.confirm.is_none() {
+                return Err(SnapshotError::new(
+                    SnapshotErrorKind::ConfirmationTokenMismatch,
+                    "purge requires --confirm <token> from recovery status",
                 ));
             }
         }
@@ -315,6 +362,9 @@ fn require_root() -> Result<(), SnapshotError> {
 fn recommend(record: &TransactionRecord) -> RecoveryRecommendation {
     use crate::recovery::model::RecoveryRecommendation as R;
     use crate::snapshot::model::TransactionState as S;
+    if record.purge_progress.is_some() {
+        return R::FinishPurge;
+    }
     match record.state {
         S::Completed => R::None,
         S::Reverted => R::None,
@@ -334,6 +384,10 @@ fn recommend(record: &TransactionRecord) -> RecoveryRecommendation {
 
 fn revert_confirmation_is_safe(state: TransactionState) -> bool {
     state != TransactionState::FailedManualIntervention
+}
+
+fn purge_confirmation_is_safe(state: TransactionState) -> bool {
+    matches!(state, TransactionState::Completed | TransactionState::Reverted)
 }
 
 impl RecoveryArgs {
@@ -393,6 +447,19 @@ mod tests {
         });
         assert!(matches!(outcome, RecoveryOutcome::ArgumentError(_)));
         assert_eq!(exit_code_for(&outcome), exit_code::ARG_ERROR);
+    }
+
+    #[test]
+    fn purge_confirmation_is_offered_only_for_terminal_states() {
+        assert!(purge_confirmation_is_safe(TransactionState::Completed));
+        assert!(purge_confirmation_is_safe(TransactionState::Reverted));
+        assert!(!purge_confirmation_is_safe(TransactionState::Planned));
+        assert!(!purge_confirmation_is_safe(
+            TransactionState::FailedRecoverable
+        ));
+        assert!(!purge_confirmation_is_safe(
+            TransactionState::FailedManualIntervention
+        ));
     }
 
     #[test]

@@ -3,24 +3,169 @@
 //! These are the only commands that mount the btrfs top-level
 //! read-write and perform persistent writes to the target device.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::cli::RecoveryArgs;
 use crate::mount::session::BtrfsTopLevelRwSession;
 use crate::snapshot::diagnose::identity::{
-    ensure_supported_snapshot_layout, ensure_target_is_not_running_root,
+    canonical_block_identity, ensure_supported_snapshot_layout, ensure_target_is_not_running_root,
     validate_mounted_filesystem,
 };
 use crate::snapshot::execute::engine::{Engine, EngineOptions};
 use crate::snapshot::model::{
-    BtrfsFilesystemIdentity, CleanupSummary, SnapshotError, SnapshotErrorKind, TransactionRecord,
-    TransactionState,
+    BtrfsFilesystemIdentity, CleanupSummary, SnapshotError, SnapshotErrorKind, TransactionPaths,
+    TransactionRecord, TransactionState,
 };
-use crate::snapshot::verify::require_boot_consistency;
+use crate::snapshot::verify::{require_boot_consistency, verify_confirmation_token};
+use crate::snapshot::{store, transaction};
+use crate::target::execute::lock::{DeviceLock, DeviceLockErrorKind};
+use crate::recovery::model::{
+    RecoveryCleanupReport, RecoveryCleanupSubject,
+};
 
 use super::read::{load_persisted_plan_readonly, probe_existing_transaction_readonly};
 use super::{ensure_cli_root_matches_plan, require_root, require_transaction_id};
 use crate::snapshot::diagnose::enumerate::probe_target_readonly;
+
+// ---------------------------------------------------------------------------
+// lifecycle cleanup
+// ---------------------------------------------------------------------------
+
+pub(super) fn run_discard_plan(
+    args: &RecoveryArgs,
+) -> Result<RecoveryCleanupReport, SnapshotError> {
+    let selection = args.require_target_selection()?;
+    require_root()?;
+    let plan_id = args.plan_id.as_deref().ok_or_else(|| {
+        SnapshotError::new(
+            SnapshotErrorKind::TransactionNotFound,
+            "discard-plan requires --plan-id <id>",
+        )
+    })?;
+    let confirm = args.confirm.as_deref().ok_or_else(|| {
+        SnapshotError::new(
+            SnapshotErrorKind::ConfirmationTokenMismatch,
+            "discard-plan requires --confirm <token>",
+        )
+    })?;
+    let plan = load_persisted_plan_readonly(&selection.root_device, plan_id)?;
+    verify_confirmation_token(&plan, plan_id, confirm)?;
+    ensure_cli_root_matches_plan(selection.root_subvolume.as_deref(), &plan.current_root.path)?;
+
+    let (device, _) = canonical_block_identity(&selection.root_device)?;
+    let mut session = BtrfsTopLevelRwSession::mount(&device)?;
+    let top = session.top_level_mount().to_path_buf();
+    let operation = (|| {
+        let mounted = validate_mounted_filesystem(&top, &device)?;
+        if mounted.filesystem != plan.filesystem {
+            return Err(SnapshotError::new(
+                SnapshotErrorKind::StalePlan,
+                "target filesystem identity changed after the pending plan was loaded",
+            ));
+        }
+        let lock_path = transaction::lock_file_path(&top, &mounted.filesystem.fsid);
+        let _transaction_lock = transaction::TransactionLock::try_acquire(
+            &lock_path,
+            &mounted.filesystem.fsid,
+        )?;
+        let _device_lock = DeviceLock::try_acquire_if_block_device(&device)
+            .map_err(cleanup_device_lock_error)?;
+        let plan_path = top
+            .join(TransactionPaths::transactions_dir().trim_start_matches('/'))
+            .join(plan_id)
+            .join("plan.json");
+        let current = store::load_plan(&plan_path)?;
+        if current != plan {
+            return Err(SnapshotError::new(
+                SnapshotErrorKind::TargetChanged,
+                "pending recovery plan changed before discard",
+            ));
+        }
+        verify_confirmation_token(&current, plan_id, confirm)?;
+        store::remove_pending_plan(&plan_path)?;
+        Ok(vec![
+            PathBuf::from(TransactionPaths::transactions_dir())
+                .join(plan_id)
+                .display()
+                .to_string(),
+        ])
+    })();
+    let cleanup: CleanupSummary = session.cleanup().into();
+    match operation {
+        Ok(removed_paths) => Ok(RecoveryCleanupReport {
+            subject: RecoveryCleanupSubject::PendingPlan,
+            id: plan_id.to_string(),
+            removed_paths,
+            mount_cleanup: cleanup,
+        }),
+        Err(mut error) => {
+            engine_attach_cleanup_into_error(&mut error, cleanup);
+            Err(error)
+        }
+    }
+}
+
+pub(super) fn run_purge(args: &RecoveryArgs) -> Result<RecoveryCleanupReport, SnapshotError> {
+    let selection = args.require_target_selection()?;
+    require_root()?;
+    let transaction_id = require_transaction_id(args.transaction.as_deref(), "purge")?;
+    let confirm = args.confirm.as_deref().ok_or_else(|| {
+        SnapshotError::new(
+            SnapshotErrorKind::ConfirmationTokenMismatch,
+            "purge requires --confirm <token> from recovery status",
+        )
+    })?;
+    let probe = probe_existing_transaction_readonly(
+        &selection.root_device,
+        selection.root_subvolume.as_deref(),
+        transaction_id,
+        true,
+    )?;
+    let device = probe.canonical_device;
+    let mut session = BtrfsTopLevelRwSession::mount(&device)?;
+    let top = session.top_level_mount().to_path_buf();
+    let operation = (|| {
+        let target = validate_mounted_filesystem(&top, &device)?;
+        if target.filesystem != probe.filesystem {
+            return Err(SnapshotError::new(
+                SnapshotErrorKind::TargetChanged,
+                "target filesystem changed between purge preflight and write mount",
+            ));
+        }
+        let mut engine = Engine::load_for_purge(
+            EngineOptions {
+                top_level_mount: top.clone(),
+                device_path: device.clone(),
+                validated_filesystem: target.filesystem,
+            },
+            transaction_id,
+            confirm,
+        )?;
+        engine.purge_owned_artifacts()
+    })();
+    let cleanup: CleanupSummary = session.cleanup().into();
+    match operation {
+        Ok(removed_paths) => Ok(RecoveryCleanupReport {
+            subject: RecoveryCleanupSubject::Transaction,
+            id: transaction_id.to_string(),
+            removed_paths,
+            mount_cleanup: cleanup,
+        }),
+        Err(mut error) => {
+            engine_attach_cleanup_into_error(&mut error, cleanup);
+            Err(error)
+        }
+    }
+}
+
+fn cleanup_device_lock_error(error: crate::target::execute::lock::DeviceLockError) -> SnapshotError {
+    let kind = if error.kind == DeviceLockErrorKind::Busy {
+        SnapshotErrorKind::TransactionAlreadyActive
+    } else {
+        SnapshotErrorKind::SyscallFailed
+    };
+    SnapshotError::new(kind, error.message)
+}
 
 // ---------------------------------------------------------------------------
 // apply

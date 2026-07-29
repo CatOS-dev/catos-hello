@@ -96,8 +96,28 @@ pub struct RecoveryStatusReport {
     /// State-bound confirmation required by `recovery revert`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub revert_confirmation_token: Option<String>,
+    /// State-bound confirmation required by `recovery purge`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub purge_confirmation_token: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<Warning>,
+}
+
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RecoveryCleanupSubject {
+    PendingPlan,
+    Transaction,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RecoveryCleanupReport {
+    pub subject: RecoveryCleanupSubject,
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub removed_paths: Vec<String>,
+    pub mount_cleanup: CleanupSummary,
 }
 
 /// What the engine recommends the operator do next.
@@ -111,6 +131,8 @@ pub enum RecoveryRecommendation {
     Resume,
     /// Transaction failed but `resume` is safe.
     ResumeAfterFailure,
+    /// An explicitly-authorized purge was interrupted; rerun `purge`.
+    FinishPurge,
     /// Transaction failed and `revert` is the safer path.
     Revert,
     /// Manual intervention required; neither `resume` nor `revert` is

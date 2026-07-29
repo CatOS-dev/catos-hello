@@ -102,6 +102,8 @@ fn public_help_lines_fit_an_eighty_column_terminal() {
         &["help", "recovery", "status"],
         &["help", "recovery", "resume"],
         &["help", "recovery", "revert"],
+        &["help", "recovery", "discard-plan"],
+        &["help", "recovery", "purge"],
         &["help", "update"],
         &["advanced", "--help"],
     ];
@@ -123,8 +125,8 @@ fn public_help_lines_fit_an_eighty_column_terminal() {
 fn core_probe_results_are_identical_across_entry_points() {
     // Public routing change: `catos-recovery` no longer inherits the
     // `catos-system inspect` subcommand. The public recovery surface is
-    // `catos-recovery <SUB>` (list/inspect/plan/apply/status/resume/
-    // revert), and `catos-recovery inspect` is now the RECOVERY inspect
+    // `catos-recovery <SUB>` (list/inspect/plan/apply/status/resume/revert/
+    // discard-plan/purge), and `catos-recovery inspect` is the RECOVERY inspect
     // subcommand, not the low-level inspect. The original "identical
     // report" guarantee was a property of the old inherited-surface
     // design that the new contract intentionally removes (see the
@@ -877,6 +879,33 @@ fn recovery_subcommand_help_lists_real_required_options() {
         options.find("--plan-id").unwrap() < options.find("--root-device").unwrap(),
         "action-specific options should precede common target options: {stdout}"
     );
+}
+
+#[test]
+fn recovery_lifecycle_help_exposes_distinct_confirmation_sources() {
+    let directory = TempDir::new("recovery-lifecycle-help").unwrap();
+    let recovery = directory.path.join("catos-recovery");
+    symlink(bin_path(), &recovery).unwrap();
+
+    let discard = Command::new(&recovery)
+        .args(["discard-plan", "--help"])
+        .output()
+        .unwrap();
+    assert!(discard.status.success());
+    let discard = String::from_utf8(discard.stdout).unwrap();
+    assert!(discard.contains("Pending plan id"));
+    assert!(discard.contains("Apply token embedded in that plan"));
+    assert!(!discard.contains("Purge token"));
+
+    let purge = Command::new(&recovery)
+        .args(["purge", "--help"])
+        .output()
+        .unwrap();
+    assert!(purge.status.success());
+    let purge = String::from_utf8(purge.stdout).unwrap();
+    assert!(purge.contains("Completed or reverted transaction"));
+    assert!(purge.contains("Purge token from"));
+    assert!(purge.contains("permanently deletes"));
 }
 
 // ---------------------------------------------------------------------------

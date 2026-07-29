@@ -134,14 +134,14 @@ pub fn build_report(
 }
 
 /// The repair domains `catos-repair` recognises. Anything else is rejected
-/// before work starts. Filesystem and mount repair are implemented; boot
-/// remains a stable reserved domain until its provider stage.
+/// before work starts. Filesystem, mount-layout, and boot repair are implemented.
 const REPAIR_DOMAINS: &[&str] = &["fs", "mount", "boot"];
 const INTERACTIVE_MENU_MARKER: &str = "--continue-interactive-menu";
 const INTERACTIVE_MENU_ROOT_ACTION: &str = "menu";
 const REPAIR_MENU_ACTIONS: &[&str] = &["menu", "fs", "mount", "boot"];
 const RECOVERY_MENU_ACTIONS: &[&str] = &[
     "menu", "list", "inspect", "plan", "apply", "status", "resume", "revert",
+    "discard-plan", "purge",
 ];
 
 /// Run the program. Returns the exit code; `main.rs` forwards it to
@@ -1117,6 +1117,8 @@ fn choose_recovery_command(context: CommandContext) -> Result<Option<&'static st
             "Check a transaction",
             "Resume an interrupted transaction",
             "Revert a completed transaction",
+            "Discard an unused recovery plan",
+            "Purge a terminal transaction and its rollback data",
         ],
         top_level_cancel_label(context),
     )?;
@@ -1128,6 +1130,8 @@ fn choose_recovery_command(context: CommandContext) -> Result<Option<&'static st
         4 => "status",
         5 => "resume",
         6 => "revert",
+        7 => "discard-plan",
+        8 => "purge",
         _ => unreachable!("menu returned an out-of-range recovery action"),
     }))
 }
@@ -1173,6 +1177,46 @@ fn interactive_recovery_for_command(
                     plan.confirmation_token.clone(),
                 ]);
                 if !menu::confirm("Apply this recovery plan now?")? {
+                    continue;
+                }
+            }
+            "discard-plan" => {
+                let Some(plan) = choose_plan(&target)? else {
+                    continue;
+                };
+                print_recovery_plan_choice_summary(&plan)?;
+                args.extend([
+                    "--plan-id".into(),
+                    plan.plan_id.clone(),
+                    "--confirm".into(),
+                    plan.confirmation_token.clone(),
+                ]);
+                if !menu::confirm("Discard this unused recovery plan?")? {
+                    continue;
+                }
+            }
+            "purge" => {
+                let Some(transaction) = choose_transaction(&target)? else {
+                    continue;
+                };
+                let status = load_recovery_status(&target, &transaction)?;
+                write_interactive_text(&format!(
+                    "Transaction state: {}\nPurging permanently removes its rollback backup, staging root, and metadata.\n",
+                    status.reconciled_state.code()
+                ))?;
+                let Some(token) = status.purge_confirmation_token else {
+                    return Err(format!(
+                        "transaction {transaction:?} cannot be purged from state {}",
+                        status.reconciled_state.code()
+                    ));
+                };
+                args.extend([
+                    "--transaction".into(),
+                    transaction,
+                    "--confirm".into(),
+                    token,
+                ]);
+                if !menu::confirm("Permanently purge this recovery transaction?")? {
                     continue;
                 }
             }
@@ -1428,13 +1472,6 @@ fn run_repair(context: CommandContext, argv: &[String]) -> i32 {
         Some("fs") => run_repair_fs(context, &argv[1..]),
         Some("mount") => run_repair_mount(context, &argv[1..]),
         Some("boot") => run_repair_boot(context, &argv[1..]),
-        Some(domain) if REPAIR_DOMAINS.contains(&domain) => {
-            eprintln!(
-                "{}: {domain}: repair domain recognised but not implemented in this stage",
-                context.program
-            );
-            exit_code::ARG_ERROR
-        }
         Some(other) => {
             eprintln!(
                 "{}: unknown repair domain {other:?}; expected one of {domain_list}",
@@ -2047,9 +2084,15 @@ fn print_recovery_command_help(context: CommandContext, command: &str) -> i32 {
         "revert" => format!(
             "{program} {version} - restore the pre-recovery root\n\nUSAGE:\n    {program} revert\n        --root-device /dev/... --transaction ID\n        --confirm TOKEN [OPTIONS]\n\nOPTIONS:\n    --transaction ID           Recovery transaction id (required).\n    --confirm TOKEN            Token emitted by `recovery status` (required).\n{common_target}"
         ),
+        "discard-plan" => format!(
+            "{program} {version} - discard an unused persisted recovery plan\n\nUSAGE:\n    {program} discard-plan\n        --root-device /dev/... --plan-id ID --confirm TOKEN [OPTIONS]\n\nOPTIONS:\n    --plan-id ID               Pending plan id (required).\n    --confirm TOKEN            Apply token embedded in that plan (required).\n{common_target}"
+        ),
+        "purge" => format!(
+            "{program} {version} - permanently remove terminal recovery data\n\nUSAGE:\n    {program} purge\n        --root-device /dev/... --transaction ID --confirm TOKEN [OPTIONS]\n\nOPTIONS:\n    --transaction ID           Completed or reverted transaction id (required).\n    --confirm TOKEN            Purge token from `{program} status`.\n                               Required.\n{common_target}\nWARNING:\n    Purge permanently deletes the recovery-owned backup and staging roots.\n"
+        ),
         _ => {
             eprintln!(
-                "{}: unknown recovery command {command:?}; expected list|inspect|plan|apply|status|resume|revert",
+                "{}: unknown recovery command {command:?}; expected list|inspect|plan|apply|status|resume|revert|discard-plan|purge",
                 context.program
             );
             return exit_code::ARG_ERROR;
@@ -2122,12 +2165,16 @@ COMMANDS:
     status    Check and reconcile a transaction.
     resume    Resume an interrupted transaction.
     revert    Restore the previous root.
+    discard-plan  Remove a pending plan that was never applied.
+    purge     Delete a terminal transaction and its rollback data.
 
 WORKFLOW:
     1. Use `list` to find a read-only snapshot or pending plan.
     2. Use `inspect`, then `plan`, before applying changes.
     3. `plan` stores its artifact on the selected target.
-    4. State-changing commands are `apply`, `resume`, and `revert`.
+    4. `status` emits state-bound tokens for `revert` and terminal `purge`.
+    5. State-changing commands are `apply`, `resume`, `revert`,
+       `discard-plan`, and `purge`.
 
 Run without a command to choose an action interactively.
 Run `{program} <COMMAND> --help` for required arguments.

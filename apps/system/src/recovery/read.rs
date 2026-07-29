@@ -24,12 +24,16 @@ use crate::snapshot::model::{
     SnapshotError, SnapshotErrorKind, TransactionPaths, TransactionRecord,
 };
 use crate::snapshot::plan::{
-    build_plan as build_recovery_plan, build_revert_confirmation_token, PlanInputs,
+    build_plan as build_recovery_plan, build_purge_confirmation_token,
+    build_revert_confirmation_token, PlanInputs,
 };
 use crate::snapshot::store;
 use crate::target::model::Warning;
 
-use super::{recommend, require_root, require_transaction_id, revert_confirmation_is_safe};
+use super::{
+    purge_confirmation_is_safe, recommend, require_root, require_transaction_id,
+    revert_confirmation_is_safe,
+};
 
 type RecoveryListProbeResult = Result<
     (
@@ -325,6 +329,17 @@ pub(super) fn run_status(args: &RecoveryArgs) -> Result<RecoveryStatusReport, Sn
             &record.plan.nonce,
         ))
     };
+    let purge_confirmation_token = if purge_confirmation_is_safe(reconciled_state) {
+        Some(build_purge_confirmation_token(
+            &record.transaction_id,
+            &record.plan.plan_digest,
+            &disk_facts.filesystem_fsid,
+            reconciled_state.code(),
+            &record.plan.nonce,
+        ))
+    } else {
+        None
+    };
     Ok(RecoveryStatusReport {
         transaction_id: transaction_id.to_string(),
         reconciled_state,
@@ -333,6 +348,7 @@ pub(super) fn run_status(args: &RecoveryArgs) -> Result<RecoveryStatusReport, Sn
         recommendation,
         mount_cleanup: Some(probe.cleanup),
         revert_confirmation_token,
+        purge_confirmation_token,
         warnings: vec![],
     })
 }

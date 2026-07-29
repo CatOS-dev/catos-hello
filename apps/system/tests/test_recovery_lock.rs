@@ -145,6 +145,7 @@ fn sample_record_with_state(plan: RecoveryPlan, state: TransactionState) -> Tran
         last_error: None,
         last_disk_facts: None,
         last_cleanup: None,
+        purge_progress: None,
     }
 }
 

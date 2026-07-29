@@ -19,7 +19,9 @@ use std::os::fd::AsRawFd;
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 
-use crate::model::{fs_to_snapshot, SnapshotError, SnapshotErrorKind};
+use crate::model::{
+    fs_to_snapshot, SnapshotError, SnapshotErrorKind, SubvolumeFacts, TransactionPaths,
+};
 use catos_target::execute::confined::{
     cstring_pub, entry_type_pub, fsync_fd_pub, list_rooted_directory_names_pub,
     open_rooted_directory_pub, open_rooted_parent_pub, unsafe_path_pub, PubRootedEntry,
@@ -31,6 +33,7 @@ const BTRFS_PATH_NAME_MAX: usize = 4087;
 const BTRFS_IOC_SNAP_CREATE_V2: u64 = 0x5000_9417;
 const BTRFS_IOC_SUBVOL_CREATE_V2: u64 = 0x5000_9418;
 const BTRFS_IOC_SNAP_DESTROY: u64 = 0x5000_940f;
+const BTRFS_IOC_DEFAULT_SUBVOL: u64 = 0x4008_9413;
 const RENAME_EXCHANGE: libc::c_uint = 1 << 1;
 
 /// Layout of `struct btrfs_ioctl_vol_args_v2` from `linux/btrfs.h`.
@@ -212,6 +215,209 @@ pub fn create_btrfs_subvolume(top_level: &Path, rooted_path: &str) -> Result<(),
         "fsync subvolume destination parent",
     )
     .map_err(fs_to_snapshot)
+}
+
+fn default_rebind_target<'a>(
+    observed_default: Option<&str>,
+    active_root: &'a str,
+    staging_root: &str,
+) -> Option<&'a str> {
+    (observed_default == Some(staging_root)).then_some(active_root)
+}
+
+/// `renameat2(RENAME_EXCHANGE)` moves the subvolume object IDs with the
+/// exchanged directory entries. If the old active root was the configured
+/// Btrfs default, its object ID therefore follows it to the staging path.
+/// Rebind the default to the new active root. An unrelated default subvolume
+/// is preserved unchanged.
+pub fn repair_default_after_root_exchange(
+    top_level: &Path,
+    active_root: &str,
+    staging_root: &str,
+) -> Result<bool, SnapshotError> {
+    let observed = crate::diagnose::enumerate::default_subvolume_path(top_level)?;
+    let Some(target) = default_rebind_target(observed.as_deref(), active_root, staging_root) else {
+        return Ok(false);
+    };
+    set_default_subvolume(top_level, target)?;
+    let verified = crate::diagnose::enumerate::default_subvolume_path(top_level)?;
+    if verified.as_deref() != Some(target) {
+        return Err(SnapshotError::new(
+            SnapshotErrorKind::TargetChanged,
+            format!(
+                "Btrfs default subvolume did not rebind to active root {target}; observed {:?}",
+                verified
+            ),
+        ));
+    }
+    Ok(true)
+}
+
+pub fn set_default_subvolume(
+    top_level: &Path,
+    rooted_path: &str,
+) -> Result<(), SnapshotError> {
+    let mounted_path = top_level.join(rooted_path.trim_start_matches('/'));
+    let facts = crate::diagnose::enumerate::probe_subvolume_facts(&mounted_path)
+        .map_err(|error| *error)?;
+    if facts.path != rooted_path {
+        return Err(SnapshotError::new(
+            SnapshotErrorKind::TargetChanged,
+            format!(
+                "default-subvolume target path changed: expected {rooted_path}, observed {}",
+                facts.path
+            ),
+        ));
+    }
+    let subvolume_id = facts.subvolume_id.ok_or_else(|| {
+        SnapshotError::new(
+            SnapshotErrorKind::TargetChanged,
+            format!("cannot determine subvolume id for active root {rooted_path}"),
+        )
+    })?;
+    let directory =
+        open_rooted_directory_pub(top_level, rooted_path, false).map_err(fs_to_snapshot)?;
+    let result = unsafe {
+        libc::syscall(
+            libc::SYS_ioctl,
+            directory.as_raw_fd(),
+            BTRFS_IOC_DEFAULT_SUBVOL as libc::c_ulong,
+            &subvolume_id,
+        )
+    };
+    if result != 0 {
+        let error = std::io::Error::last_os_error();
+        let mut recovery_error = SnapshotError::new(
+            SnapshotErrorKind::SyscallFailed,
+            format!(
+                "BTRFS_IOC_DEFAULT_SUBVOL {} (id={subvolume_id}) failed: {error}",
+                mounted_path.display()
+            ),
+        );
+        recovery_error.errno = error.raw_os_error();
+        return Err(recovery_error);
+    }
+    fsync_fd_pub(
+        directory.as_raw_fd(),
+        &mounted_path,
+        "fsync active root after setting Btrfs default subvolume",
+    )
+    .map_err(fs_to_snapshot)
+}
+
+pub fn validate_recovery_owned_subvolume_identity(
+    rooted_path: &str,
+    expected: &SubvolumeFacts,
+    observed: &SubvolumeFacts,
+) -> Result<(), SnapshotError> {
+    let path = Path::new(rooted_path);
+    let components = path
+        .components()
+        .filter_map(|component| match component {
+            std::path::Component::Normal(value) => value.to_str(),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let protected_root = TransactionPaths::ROOT_DIR;
+    let valid_layout = rooted_path.starts_with(protected_root) && (matches!(
+        components.as_slice(),
+        [".catos-recovery", "backups", id, "root-before"]
+            if crate::diagnose::identity::validate_recovery_id(id).is_ok()
+    ) || matches!(
+        components.as_slice(),
+        [".catos-recovery", "staging", id, "new-root"]
+            if crate::diagnose::identity::validate_recovery_id(id).is_ok()
+    ));
+    if !rooted_path.starts_with('/') || !valid_layout {
+        return Err(SnapshotError::new(
+            SnapshotErrorKind::UnsafeRecoveryPath,
+            format!("refusing to purge non-recovery subvolume {rooted_path}"),
+        ));
+    }
+    if expected.path != rooted_path || observed.path != rooted_path {
+        return Err(SnapshotError::new(
+            SnapshotErrorKind::TargetChanged,
+            format!("recovery subvolume path identity changed for {rooted_path}"),
+        ));
+    }
+    let stable_identity_matches = expected.subvolume_id == observed.subvolume_id
+        && expected.uuid == observed.uuid
+        && expected.parent_uuid == observed.parent_uuid
+        && expected.read_only == observed.read_only;
+    if !stable_identity_matches
+        || expected.subvolume_id.is_none()
+        || expected.uuid.is_none()
+        || observed.subvolume_id.is_none()
+        || observed.uuid.is_none()
+    {
+        return Err(SnapshotError::new(
+            SnapshotErrorKind::TargetChanged,
+            format!("recovery subvolume identity changed for {rooted_path}"),
+        ));
+    }
+    Ok(())
+}
+
+pub fn delete_recovery_owned_subvolume(
+    top_level: &Path,
+    rooted_path: &str,
+    expected: &SubvolumeFacts,
+) -> Result<(), SnapshotError> {
+    let rooted = Path::new(rooted_path);
+    let mounted_path = top_level.join(rooted_path.trim_start_matches('/'));
+    let observed = crate::diagnose::enumerate::probe_subvolume_facts(&mounted_path)
+        .map_err(|error| *error)?;
+    validate_recovery_owned_subvolume_identity(rooted_path, expected, &observed)?;
+    let destination =
+        open_rooted_parent_pub(top_level, rooted_path, false).map_err(fs_to_snapshot)?;
+    require_directory_entry(&destination)?;
+    let name = destination.name.as_bytes();
+    if name.is_empty() || name.len() > BTRFS_PATH_NAME_MAX || name.contains(&0) {
+        return Err(unsafe_path_pub(
+            &destination.display,
+            "invalid recovery subvolume purge name",
+        )
+        .into());
+    }
+    let mut arguments = BtrfsIoctlVolArgs {
+        fd: 0,
+        name: [0; BTRFS_PATH_NAME_MAX + 1],
+    };
+    arguments.name[..name.len()].copy_from_slice(name);
+    let result = unsafe {
+        libc::syscall(
+            libc::SYS_ioctl,
+            destination.parent.as_raw_fd(),
+            BTRFS_IOC_SNAP_DESTROY as libc::c_ulong,
+            &mut arguments,
+        )
+    };
+    if result != 0 {
+        let error = std::io::Error::last_os_error();
+        let mut recovery_error = SnapshotError::new(
+            SnapshotErrorKind::SyscallFailed,
+            format!(
+                "BTRFS_IOC_SNAP_DESTROY {} failed: {error}",
+                destination.display.display()
+            ),
+        );
+        recovery_error.errno = error.raw_os_error();
+        return Err(recovery_error);
+    }
+    fsync_fd_pub(
+        destination.parent.as_raw_fd(),
+        &destination.display,
+        "fsync recovery subvolume parent after purge",
+    )
+    .map_err(fs_to_snapshot)?;
+    let parent = rooted.parent().and_then(Path::to_str).ok_or_else(|| {
+        SnapshotError::new(
+            SnapshotErrorKind::UnsafeRecoveryPath,
+            format!("recovery subvolume {rooted_path} has no parent"),
+        )
+    })?;
+    catos_target::execute::confined::remove_empty_rooted_directory(top_level, parent)
+        .map_err(fs_to_snapshot)
 }
 
 /// Delete a Btrfs subvolume only after proving its directory is empty.
@@ -442,6 +648,45 @@ mod tests {
         assert_eq!(error.kind, SnapshotErrorKind::RootSwitchConflict);
         assert_eq!(std::fs::read(top.join("candidate/data")).unwrap(), b"keep");
         let _ = std::fs::remove_dir_all(top);
+    }
+
+    #[test]
+    fn default_rebind_only_follows_the_old_root_into_staging() {
+        assert_eq!(
+            default_rebind_target(Some("/.catos-recovery/staging/tx/new-root"), "/@", "/.catos-recovery/staging/tx/new-root"),
+            Some("/@")
+        );
+        assert_eq!(default_rebind_target(Some("/@"), "/@", "/staging"), None);
+        assert_eq!(default_rebind_target(Some("/@other"), "/@", "/staging"), None);
+        assert_eq!(default_rebind_target(None, "/@", "/staging"), None);
+    }
+
+    #[test]
+    fn purge_identity_accepts_only_recovery_owned_matching_subvolume() {
+        let expected = crate::model::SubvolumeFacts {
+            path: format!("/.catos-recovery/backups/{TX_ID}/root-before"),
+            subvolume_id: Some(300),
+            generation: Some(10),
+            uuid: Some("uuid-a".into()),
+            parent_uuid: Some("parent-a".into()),
+            read_only: Some(true),
+        };
+        validate_recovery_owned_subvolume_identity(&expected.path, &expected, &expected).unwrap();
+
+        let mut changed = expected.clone();
+        changed.uuid = Some("uuid-b".into());
+        assert_eq!(
+            validate_recovery_owned_subvolume_identity(&expected.path, &expected, &changed)
+                .unwrap_err()
+                .kind,
+            SnapshotErrorKind::TargetChanged
+        );
+        assert_eq!(
+            validate_recovery_owned_subvolume_identity("/@", &expected, &expected)
+                .unwrap_err()
+                .kind,
+            SnapshotErrorKind::UnsafeRecoveryPath
+        );
     }
 
     #[test]

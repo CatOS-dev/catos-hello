@@ -131,6 +131,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         last_error: None,
         last_disk_facts: None,
         last_cleanup: None,
+        purge_progress: None,
     };
     let state_path = root
         .join(".catos-recovery/transactions")

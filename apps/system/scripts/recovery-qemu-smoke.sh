@@ -175,6 +175,7 @@ token=""
 post_fault=""
 pre_fault=""
 before_fault=""
+purge_fault=""
 root_subvol="/@"
 snapshot_subvol="/@snapshots/2"
 for arg in $(cat /proc/cmdline); do
@@ -185,6 +186,7 @@ for arg in $(cat /proc/cmdline); do
         RECOVERY_POST_FAULT_AT=*) post_fault=${arg#RECOVERY_POST_FAULT_AT=} ;;
         RECOVERY_PRE_FAULT_AT=*) pre_fault=${arg#RECOVERY_PRE_FAULT_AT=} ;;
         RECOVERY_BEFORE_FAULT_AT=*) before_fault=${arg#RECOVERY_BEFORE_FAULT_AT=} ;;
+        RECOVERY_PURGE_FAULT_AT=*) purge_fault=${arg#RECOVERY_PURGE_FAULT_AT=} ;;
         RECOVERY_ROOT_SUBVOL=*) root_subvol=${arg#RECOVERY_ROOT_SUBVOL=} ;;
         RECOVERY_SNAPSHOT_SUBVOL=*) snapshot_subvol=${arg#RECOVERY_SNAPSHOT_SUBVOL=} ;;
     esac
@@ -192,12 +194,13 @@ done
 [ -n "$post_fault" ] && export CATOS_RECOVERY_FAULT_AT="$post_fault"
 [ -n "$pre_fault" ] && export CATOS_RECOVERY_FAULT_PRE_AT="$pre_fault"
 [ -n "$before_fault" ] && export CATOS_RECOVERY_FAULT_BEFORE_AT="$before_fault"
+[ -n "$purge_fault" ] && export CATOS_RECOVERY_PURGE_FAULT_AT="$purge_fault"
 
 ROOT_ARGS="--root-device /dev/vda --root-subvolume $root_subvol"
 SNAPSHOT_ARGS="--snapshot-subvolume $snapshot_subvol"
 BIN=/bin/catos-system
 case "$scenario" in
-    apply_fault|resume_fault|revert_fault) BIN=/bin/catos-system-test ;;
+    apply_fault|resume_fault|revert_fault|purge_fault) BIN=/bin/catos-system-test ;;
 esac
 
 run_and_poweroff() {
@@ -255,7 +258,21 @@ case "$scenario" in
         run_and_poweroff REVERT "$BIN" recovery revert $ROOT_ARGS \
             --transaction "$plan_id" --confirm "$token" --json
         ;;
-    verify_applied|verify_reverted|verify_untouched)
+    discard_plan)
+        [ -n "$plan_id" ] && [ -n "$token" ] \
+            || { echo "===RECOVERY_FATAL=== discard-plan missing confirmation"; poweroff -f; }
+        # shellcheck disable=SC2086
+        run_and_poweroff DISCARD_PLAN /bin/catos-system recovery discard-plan $ROOT_ARGS \
+            --plan-id "$plan_id" --confirm "$token" --json
+        ;;
+    purge|purge_fault)
+        [ -n "$plan_id" ] && [ -n "$token" ] \
+            || { echo "===RECOVERY_FATAL=== purge missing confirmation"; poweroff -f; }
+        # shellcheck disable=SC2086
+        run_and_poweroff PURGE "$BIN" recovery purge $ROOT_ARGS \
+            --transaction "$plan_id" --confirm "$token" --json
+        ;;
+    verify_applied|verify_reverted|verify_untouched|verify_purged)
         mkdir -p /mnt
         if ! mount -t btrfs -o ro,subvolid=5 /dev/vda /mnt; then
             echo "===VERIFY_FAIL=== cannot mount btrfs image"
@@ -282,6 +299,16 @@ case "$scenario" in
         fi
         active_root_dir="/mnt$root_subvol"
         case "$scenario" in
+            verify_applied|verify_reverted|verify_purged)
+                expected_default=${root_subvol#/}
+                default_report=$(btrfs subvolume get-default /mnt 2>&1)
+                if ! echo "$default_report" | grep -Eq "path ${expected_default}$"; then
+                    echo "===VERIFY_FAIL=== default subvolume is not active root $root_subvol: $default_report"
+                    ok=0
+                fi
+                ;;
+        esac
+        case "$scenario" in
             verify_applied)
                 [ -f "$active_root_dir/var/lib/pacman/local/SNAPSHOT_2_MARKER" ] \
                     || { echo "===VERIFY_FAIL=== active root lacks snapshot marker"; ok=0; }
@@ -293,6 +320,14 @@ case "$scenario" in
                     || { echo "===VERIFY_FAIL=== active root was not restored"; ok=0; }
                 [ ! -f "$active_root_dir/var/lib/pacman/local/SNAPSHOT_2_MARKER" ] \
                     || { echo "===VERIFY_FAIL=== reverted root still has snapshot marker"; ok=0; }
+                ;;
+            verify_purged)
+                [ ! -e "/mnt/.catos-recovery/transactions/$plan_id" ] \
+                    || { echo "===VERIFY_FAIL=== purged transaction metadata remains"; ok=0; }
+                [ ! -e "/mnt/.catos-recovery/backups/$plan_id" ] \
+                    || { echo "===VERIFY_FAIL=== purged backup remains"; ok=0; }
+                [ ! -e "/mnt/.catos-recovery/staging/$plan_id" ] \
+                    || { echo "===VERIFY_FAIL=== purged staging root remains"; ok=0; }
                 ;;
             verify_untouched)
                 [ -f "$active_root_dir/var/lib/pacman/local/CURRENT_MARKER" ] \
@@ -450,6 +485,7 @@ run_guest() {
         post:*) append="$append RECOVERY_POST_FAULT_AT=${fault#post:}" ;;
         pre:*) append="$append RECOVERY_PRE_FAULT_AT=${fault#pre:}" ;;
         before:*) append="$append RECOVERY_BEFORE_FAULT_AT=${fault#before:}" ;;
+        purge:*) append="$append RECOVERY_PURGE_FAULT_AT=${fault#purge:}" ;;
         '') ;;
         *) fail "unknown fault selector: $fault" ;;
     esac
@@ -637,13 +673,73 @@ run_fault_matrix() {
     echo "pass: $phase crash matrix"
 }
 
+run_purge_fault_matrix() {
+    for point in purge-begin purge-staging-root purge-backup-root; do
+        create_fixture internal
+        emit_plan consistent
+        run_guest apply "" "$PLAN_ID" "$APPLY_TOKEN"
+        assert_rc APPLY 0
+        run_guest status "" "$PLAN_ID" ""
+        assert_rc STATUS 0
+        capture_json STATUS "$WORKDIR/status-before-purge-fault.json"
+        token=$(json_value "$WORKDIR/status-before-purge-fault.json" payload.purge_confirmation_token)
+        [ -n "$token" ] || fail "purge fault matrix lacks initial purge token"
+
+        echo "info: purge fault at $point"
+        run_guest purge_fault "purge:$point" "$PLAN_ID" "$token"
+        assert_rc PURGE 137
+        run_guest status "" "$PLAN_ID" ""
+        assert_rc STATUS 0
+        capture_json STATUS "$WORKDIR/status-after-$point.json"
+        assert_json_value "$WORKDIR/status-after-$point.json" payload.reconciled_state completed
+        assert_json_value "$WORKDIR/status-after-$point.json" payload.recommendation finish_purge
+        token=$(json_value "$WORKDIR/status-after-$point.json" payload.purge_confirmation_token)
+        [ -n "$token" ] || fail "status after $point did not emit retry purge token"
+        run_guest purge "" "$PLAN_ID" "$token"
+        assert_rc PURGE 0
+        run_guest verify_purged "" "$PLAN_ID" ""
+        grep -q '===VERIFY_OK===' "$LAST_LOG" || fail "purge retry after $point left artifacts"
+        assert_esp_unchanged
+    done
+    echo "pass: purge crash-resume matrix"
+}
+
+# Pending plans are target-side artifacts and must be explicitly discardable
+# without creating transaction state or touching root/snapshot data.
+create_fixture internal
+emit_plan consistent
+run_guest discard_plan "" "$PLAN_ID" "$APPLY_TOKEN"
+assert_rc DISCARD_PLAN 0
+capture_json DISCARD_PLAN "$WORKDIR/discard-plan.json"
+assert_json_value "$WORKDIR/discard-plan.json" kind recovery_discard_plan
+assert_json_value "$WORKDIR/discard-plan.json" payload.subject pending_plan
+run_guest verify_purged "" "$PLAN_ID" "" "$INITRAMFS_RUN"
+grep -q '===VERIFY_OK===' "$LAST_LOG" || fail "discarded plan left target artifacts"
+assert_esp_unchanged
+echo "pass: unused persisted recovery plan discarded safely"
+
 # Happy path is always exercised, even when crash matrices are skipped.
 create_fixture internal
 emit_plan consistent
 run_guest apply "" "$PLAN_ID" "$APPLY_TOKEN"
 assert_rc APPLY 0
 assert_completed_and_verify
-echo "pass: real Btrfs apply happy path"
+PURGE_TOKEN=$(json_value "$WORKDIR/status.json" payload.purge_confirmation_token)
+[ -n "$PURGE_TOKEN" ] || fail "completed status did not emit purge token"
+run_guest purge "" "$PLAN_ID" "$PURGE_TOKEN"
+assert_rc PURGE 0
+capture_json PURGE "$WORKDIR/purge-completed.json"
+assert_json_value "$WORKDIR/purge-completed.json" kind recovery_purge
+assert_json_value "$WORKDIR/purge-completed.json" payload.subject transaction
+run_guest verify_purged "" "$PLAN_ID" ""
+grep -q '===VERIFY_OK===' "$LAST_LOG" || fail "completed purge left recovery artifacts"
+run_guest status "" "$PLAN_ID" ""
+assert_nonzero_rc STATUS
+capture_json STATUS "$WORKDIR/status-after-purge.json"
+assert_json_value "$WORKDIR/status-after-purge.json" kind error
+assert_json_value "$WORKDIR/status-after-purge.json" payload.kind transaction_not_found
+assert_esp_unchanged
+echo "pass: real Btrfs apply happy path and terminal purge"
 
 if [ "$SKIP_CRASH" -eq 0 ]; then
     run_fault_matrix before-operation \
@@ -652,6 +748,7 @@ if [ "$SKIP_CRASH" -eq 0 ]; then
         pre:create_backup pre:create_replacement pre:swap_roots
     run_fault_matrix after-state-persist \
         post:backup_created post:replacement_created post:old_root_moved post:new_root_installed
+    run_purge_fault_matrix
 fi
 
 # Completed revert, including the reverse-swap pre-persist crash window.
@@ -693,7 +790,14 @@ reverted_id=$(json_value "$WORKDIR/inspect-reverted.json" payload.current_root.s
 run_guest verify_reverted "" "$PLAN_ID" ""
 grep -q '===VERIFY_OK===' "$LAST_LOG" || fail "guest reverted-state verification failed"
 assert_esp_unchanged
-echo "pass: completed revert and reverse-swap crash recovery"
+PURGE_TOKEN=$(json_value "$WORKDIR/status-reconciled-reverted.json" payload.purge_confirmation_token)
+[ -n "$PURGE_TOKEN" ] || fail "reverted status did not emit purge token"
+run_guest purge "" "$PLAN_ID" "$PURGE_TOKEN"
+assert_rc PURGE 0
+run_guest verify_purged "" "$PLAN_ID" ""
+grep -q '===VERIFY_OK===' "$LAST_LOG" || fail "reverted purge left recovery artifacts"
+assert_esp_unchanged
+echo "pass: completed revert, reverse-swap crash recovery, and reverted purge"
 
 # Nested Snapper-style source is explicitly unsupported and must not write.
 create_fixture nested

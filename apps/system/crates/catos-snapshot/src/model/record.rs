@@ -1,6 +1,6 @@
 //! Durable snapshot transaction records and structured errors.
 
-use super::metadata::{CleanupSummary, DiskFacts};
+use super::metadata::{CleanupSummary, DiskFacts, PurgeProgress};
 use super::plan::RecoveryPlan;
 use super::state::TransactionState;
 use serde::{Deserialize, Serialize};
@@ -92,6 +92,10 @@ pub struct TransactionRecord {
     /// Optional mount cleanup summary (residual mounts, if any).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_cleanup: Option<CleanupSummary>,
+
+    /// Durable progress for explicit terminal transaction purge.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub purge_progress: Option<PurgeProgress>,
 }
 
 // ---------------------------------------------------------------------------

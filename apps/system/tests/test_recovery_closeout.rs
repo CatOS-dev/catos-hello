@@ -311,6 +311,7 @@ fn sample_record_with_cleanup(summary: Option<CleanupSummary>) -> TransactionRec
         last_error: None,
         last_disk_facts: None,
         last_cleanup: summary,
+        purge_progress: None,
     }
 }
 

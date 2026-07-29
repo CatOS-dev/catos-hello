@@ -38,11 +38,12 @@ use crate::diagnose::identity::{ensure_target_is_not_running_root, is_protected_
 use crate::execute::btrfs as btrfs_ops;
 use crate::model::{
     BtrfsFilesystemIdentity, CompletedStep, DiskFacts, RecoveryPlan, SnapshotError,
-    SnapshotErrorKind, SubvolumeFacts, TransactionPaths, TransactionRecord, TransactionState,
+    PurgeProgress, SnapshotErrorKind, SubvolumeFacts, TransactionPaths, TransactionRecord,
+    TransactionState,
     TX_RECORD_SCHEMA_VERSION,
 };
 use crate::plan::reconcile::reconcile_with_disk_facts;
-use crate::plan::verify_revert_confirmation_token;
+use crate::plan::{verify_purge_confirmation_token, verify_revert_confirmation_token};
 use crate::store;
 use crate::transaction::{lock_file_path, TransactionLock};
 use crate::transaction::{resume_checkpoint, AdvanceAction, Intent};
@@ -121,6 +122,7 @@ impl Engine {
             lock: Some(lock),
             _device_lock: device_lock,
         };
+        engine.repair_default_after_exchange_if_needed()?;
         // Reconcile the persisted state with current disk facts BEFORE
         // any action runs. This is the load-bearing fix for the
         // pre-persist crash window: if the previous apply/revert
@@ -168,7 +170,49 @@ impl Engine {
                 false,
             ));
         }
+        engine.repair_default_after_exchange_if_needed()?;
         engine.reconcile_state_for_write("revert-reconcile")?;
+        Ok(engine)
+    }
+
+    pub fn load_for_purge(
+        opts: EngineOptions,
+        transaction_id: &str,
+        presented_confirmation: &str,
+    ) -> Result<Self, SnapshotError> {
+        let (record, lock, device_lock) = load_record_under_lock(&opts, transaction_id)?;
+        let mut engine = Self {
+            opts,
+            record,
+            lock: Some(lock),
+            _device_lock: device_lock,
+        };
+        let facts = engine.reconcile_status();
+        if !matches!(
+            engine.record.state,
+            TransactionState::Completed | TransactionState::Reverted
+        ) {
+            return Err(engine.failure(
+                SnapshotErrorKind::IllegalStateTransition,
+                format!(
+                    "transaction {} cannot be purged from state {}",
+                    engine.record.transaction_id,
+                    engine.record.state.code()
+                ),
+                false,
+                false,
+            ));
+        }
+        verify_purge_confirmation_token(
+            &engine.record.transaction_id,
+            &engine.record.plan.plan_digest,
+            &facts.filesystem_fsid,
+            engine.record.state.code(),
+            &engine.record.plan.nonce,
+            presented_confirmation,
+        )?;
+        engine.repair_default_after_exchange_if_needed()?;
+        engine.record.last_disk_facts = Some(engine.observe_disk_facts());
         Ok(engine)
     }
 
@@ -226,6 +270,7 @@ impl Engine {
             last_error: None,
             last_disk_facts: None,
             last_cleanup: None,
+            purge_progress: None,
         };
         let mut engine = Self {
             opts,
@@ -325,6 +370,172 @@ impl Engine {
             #[cfg(feature = "recovery_fault_injection")]
             self.maybe_inject_fault();
         }
+    }
+
+    pub fn purge_owned_artifacts(&mut self) -> Result<Vec<String>, SnapshotError> {
+        if !matches!(
+            self.record.state,
+            TransactionState::Completed | TransactionState::Reverted
+        ) {
+            return Err(self.failure(
+                SnapshotErrorKind::IllegalStateTransition,
+                format!(
+                    "transaction {} cannot be purged from state {}",
+                    self.record.transaction_id,
+                    self.record.state.code()
+                ),
+                false,
+                false,
+            ));
+        }
+        self.begin_purge_if_needed()?;
+
+        let mut removed = Vec::new();
+        if !self
+            .record
+            .purge_progress
+            .as_ref()
+            .expect("purge progress persisted before deletion")
+            .staging_removed
+        {
+            let facts = self.observe_disk_facts();
+            if facts.staging_root_exists {
+                let expected = self
+                    .record
+                    .purge_progress
+                    .as_ref()
+                    .and_then(|progress| progress.staging_identity.as_ref())
+                    .ok_or_else(|| {
+                        self.failure(
+                            SnapshotErrorKind::TargetChanged,
+                            "staging recovery subvolume exists but its purge identity is unavailable",
+                            false,
+                            false,
+                        )
+                    })?;
+                btrfs_ops::delete_recovery_owned_subvolume(
+                    &self.opts.top_level_mount,
+                    &self.record.plan.staging_root_path,
+                    expected,
+                )?;
+            }
+            self.record
+                .purge_progress
+                .as_mut()
+                .expect("purge progress persisted before deletion")
+                .staging_removed = true;
+            self.persist_purge_checkpoint("purge-staging-root")?;
+            removed.push(self.record.plan.staging_root_path.clone());
+        }
+
+        if !self
+            .record
+            .purge_progress
+            .as_ref()
+            .expect("purge progress persisted before deletion")
+            .backup_removed
+        {
+            let facts = self.observe_disk_facts();
+            if facts.backup_root_exists {
+                let expected = self
+                    .record
+                    .purge_progress
+                    .as_ref()
+                    .and_then(|progress| progress.backup_identity.as_ref())
+                    .ok_or_else(|| {
+                        self.failure(
+                            SnapshotErrorKind::TargetChanged,
+                            "backup recovery subvolume exists but its purge identity is unavailable",
+                            false,
+                            false,
+                        )
+                    })?;
+                btrfs_ops::delete_recovery_owned_subvolume(
+                    &self.opts.top_level_mount,
+                    &self.record.plan.backup_root_path,
+                    expected,
+                )?;
+            }
+            self.record
+                .purge_progress
+                .as_mut()
+                .expect("purge progress persisted before deletion")
+                .backup_removed = true;
+            self.persist_purge_checkpoint("purge-backup-root")?;
+            removed.push(self.record.plan.backup_root_path.clone());
+        }
+
+        let state_path =
+            top_level_state_path(&self.opts.top_level_mount, &self.record.transaction_id);
+        store::remove_transaction_metadata(&state_path)?;
+        removed.push(
+            PathBuf::from(TransactionPaths::transactions_dir())
+                .join(&self.record.transaction_id)
+                .display()
+                .to_string(),
+        );
+        Ok(removed)
+    }
+
+    fn begin_purge_if_needed(&mut self) -> Result<(), SnapshotError> {
+        if self.record.purge_progress.is_some() {
+            return Ok(());
+        }
+        let facts = self
+            .record
+            .last_disk_facts
+            .clone()
+            .ok_or_else(|| {
+                self.failure(
+                    SnapshotErrorKind::TargetChanged,
+                    "terminal transaction has no freshly reconciled disk facts",
+                    false,
+                    false,
+                )
+            })?;
+        let observed = self.observe_disk_facts();
+        if observed != facts {
+            return Err(self.failure(
+                SnapshotErrorKind::TargetChanged,
+                "recovery artifacts changed after purge confirmation was verified",
+                false,
+                false,
+            ));
+        }
+        if facts.staging_root_exists != facts.staging_root.is_some()
+            || facts.backup_root_exists != facts.backup.is_some()
+        {
+            return Err(self.failure(
+                SnapshotErrorKind::TargetChanged,
+                "recovery artifact existence and identity facts disagree",
+                false,
+                false,
+            ));
+        }
+        self.record.purge_progress = Some(PurgeProgress {
+            started_at_unix: now_unix(),
+            authorized_state: self.record.state,
+            staging_identity: facts.staging_root,
+            backup_identity: facts.backup,
+            staging_removed: !facts.staging_root_exists,
+            backup_removed: !facts.backup_root_exists,
+        });
+        self.persist_purge_checkpoint("purge-begin")
+    }
+
+    fn persist_purge_checkpoint(&mut self, description: &str) -> Result<(), SnapshotError> {
+        let now = now_unix();
+        self.record.last_updated_unix = now;
+        self.record.last_disk_facts = Some(self.observe_disk_facts());
+        self.record.completed_steps.push(CompletedStep {
+            state: self.record.state,
+            completed_at_unix: now,
+            description: description.to_string(),
+        });
+        self.persist_record(description)?;
+        #[cfg(feature = "recovery_fault_injection")]
+        self.maybe_inject_purge_fault(description);
+        Ok(())
     }
 
     /// Run the revert path. Idempotent: re-running on an already-
@@ -435,6 +646,7 @@ impl Engine {
             crate::plan::reconcile::reverse_swap_appears_done(&self.record.plan, &facts);
         let swap_done = crate::plan::reconcile::swap_appears_done(&self.record.plan, &facts);
         if reverse_done {
+            self.repair_default_after_exchange_if_needed()?;
             self.persist_reverted("revert-resume-after-reverse-swap")?;
             return Ok(TransactionState::Reverted);
         }
@@ -515,9 +727,8 @@ impl Engine {
         let Some(expected) = self.record.last_disk_facts.as_ref() else {
             return true;
         };
+        let purge_in_progress = self.record.purge_progress.is_some();
         expected.active_root_exists != facts.active_root_exists
-            || expected.staging_root_exists != facts.staging_root_exists
-            || expected.backup_root_exists != facts.backup_root_exists
             || expected.source_snapshot_exists != facts.source_snapshot_exists
             || !stable_subvolume_identity_matches(
                 expected.active_root.as_ref(),
@@ -525,20 +736,23 @@ impl Engine {
                 false,
             )
             || !stable_subvolume_identity_matches(
-                expected.staging_root.as_ref(),
-                facts.staging_root.as_ref(),
-                false,
-            )
-            || !stable_subvolume_identity_matches(
-                expected.backup.as_ref(),
-                facts.backup.as_ref(),
-                true,
-            )
-            || !stable_subvolume_identity_matches(
                 expected.source_snapshot.as_ref(),
                 facts.source_snapshot.as_ref(),
                 true,
             )
+            || (!purge_in_progress
+                && (expected.staging_root_exists != facts.staging_root_exists
+                    || expected.backup_root_exists != facts.backup_root_exists
+                    || !stable_subvolume_identity_matches(
+                        expected.staging_root.as_ref(),
+                        facts.staging_root.as_ref(),
+                        false,
+                    )
+                    || !stable_subvolume_identity_matches(
+                        expected.backup.as_ref(),
+                        facts.backup.as_ref(),
+                        true,
+                    )))
     }
 
     fn terminal_drift_error(&self, facts: &DiskFacts) -> SnapshotError {
@@ -743,6 +957,12 @@ impl Engine {
             error.failed_step = Some("swap-roots".into());
             error
         })?;
+        self.repair_default_after_exchange_if_needed()
+            .map_err(|error| {
+                let mut error = self.failure_from(error, true, true);
+                error.failed_step = Some("rebind-default-root".into());
+                error
+            })?;
 
         self.record.last_disk_facts = Some(self.observe_disk_facts());
         #[cfg(feature = "recovery_fault_injection")]
@@ -814,8 +1034,23 @@ impl Engine {
             error.failed_step = Some("swap-roots-back".into());
             error
         })?;
+        self.repair_default_after_exchange_if_needed()
+            .map_err(|error| {
+                let mut error = self.failure_from(error, false, false);
+                error.failed_step = Some("rebind-default-root-after-revert".into());
+                error
+            })?;
         #[cfg(feature = "recovery_fault_injection")]
         self.maybe_inject_pre_fault("swap_roots_back");
+        Ok(())
+    }
+
+    fn repair_default_after_exchange_if_needed(&self) -> Result<(), SnapshotError> {
+        btrfs_ops::repair_default_after_root_exchange(
+            &self.opts.top_level_mount,
+            &self.record.plan.current_root.path,
+            &self.record.plan.staging_root_path,
+        )?;
         Ok(())
     }
 
@@ -993,6 +1228,17 @@ impl Engine {
         };
         let just_reached = self.record.state.code();
         if just_reached == target {
+            kill_for_fault_injection();
+        }
+    }
+
+    #[cfg(feature = "recovery_fault_injection")]
+    fn maybe_inject_purge_fault(&self, checkpoint: &str) {
+        let target = match std::env::var_os("CATOS_RECOVERY_PURGE_FAULT_AT") {
+            Some(value) => value.to_string_lossy().into_owned(),
+            None => return,
+        };
+        if target == checkpoint {
             kill_for_fault_injection();
         }
     }

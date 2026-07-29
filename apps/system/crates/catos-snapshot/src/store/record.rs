@@ -246,6 +246,68 @@ pub fn list_pending_plans(
     (ok, errs)
 }
 
+pub fn remove_pending_plan(plan_path: &Path) -> Result<(), SnapshotError> {
+    let directory = plan_path.parent().ok_or_else(|| {
+        SnapshotError::new(
+            SnapshotErrorKind::UnsafeRecoveryPath,
+            format!("plan path {} has no transaction directory", plan_path.display()),
+        )
+    })?;
+    let transaction_id = directory
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| {
+            SnapshotError::new(
+                SnapshotErrorKind::UnsafeRecoveryPath,
+                format!(
+                    "transaction directory {} has no valid recovery id",
+                    directory.display()
+                ),
+            )
+        })?;
+    validate_recovery_id(transaction_id)?;
+    let expected = Path::new(TransactionPaths::transactions_dir().trim_start_matches('/'))
+        .join(transaction_id)
+        .join("plan.json");
+    if !plan_path.ends_with(&expected) {
+        return Err(SnapshotError::new(
+            SnapshotErrorKind::UnsafeRecoveryPath,
+            format!(
+                "plan path {} is outside the canonical transaction layout",
+                plan_path.display()
+            ),
+        ));
+    }
+    let state_path = directory.join("state.json");
+    match load_record(&state_path) {
+        Ok(_) => {
+            return Err(SnapshotError::new(
+                SnapshotErrorKind::IllegalStateTransition,
+                format!(
+                    "plan {transaction_id} already has a transaction record and cannot be discarded"
+                ),
+            ));
+        }
+        Err(error) if error.kind == SnapshotErrorKind::TransactionNotFound => {}
+        Err(error) => return Err(error),
+    }
+    let names = confined::list_directory_names(directory).map_err(fs_to_snapshot)?;
+    if names.len() != 1 || names[0] != std::ffi::OsStr::new("plan.json") {
+        return Err(SnapshotError::new(
+            SnapshotErrorKind::UnsafeRecoveryPath,
+            format!(
+                "refusing to discard plan directory {} containing unexpected objects",
+                directory.display()
+            ),
+        ));
+    }
+    remove_file_if_present(plan_path)?;
+    match confined::remove_empty_directory(directory) {
+        Ok(()) | Err(catos_target::FsError::NotFound) => Ok(()),
+        Err(error) => Err(fs_to_snapshot(error)),
+    }
+}
+
 pub fn remove_transaction_metadata(state_path: &Path) -> Result<(), SnapshotError> {
     let directory = state_path.parent().ok_or_else(|| {
         SnapshotError::new(
@@ -531,6 +593,7 @@ mod tests {
                 source_snapshot: None,
             }),
             last_cleanup: None,
+            purge_progress: None,
         }
     }
 
@@ -780,6 +843,37 @@ mod tests {
             SnapshotErrorKind::StateRecordCorrupt
         );
         let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn remove_pending_plan_removes_only_unstarted_plan() {
+        let root = scratch_root("remove-pending-plan");
+        fs::create_dir_all(&root).unwrap();
+        let path = plan_path(&root, ID1);
+        persist_plan(&path, &sample_plan_for(ID1)).unwrap();
+
+        remove_pending_plan(&path).unwrap();
+
+        assert!(!path.exists());
+        assert!(!path.parent().unwrap().exists());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn remove_pending_plan_refuses_started_transaction() {
+        let root = scratch_root("remove-started-plan");
+        fs::create_dir_all(&root).unwrap();
+        let plan = plan_path(&root, ID1);
+        let state = state_path(&root, ID1);
+        persist_plan(&plan, &sample_plan_for(ID1)).unwrap();
+        persist_record(&state, &record_for(ID1)).unwrap();
+
+        let error = remove_pending_plan(&plan).unwrap_err();
+
+        assert_eq!(error.kind, SnapshotErrorKind::IllegalStateTransition);
+        assert!(plan.exists());
+        assert!(state.exists());
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]

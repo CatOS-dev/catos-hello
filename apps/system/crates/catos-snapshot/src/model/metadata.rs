@@ -97,4 +97,18 @@ pub struct SubvolumeFacts {
     pub read_only: Option<bool>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PurgeProgress {
+    pub started_at_unix: u64,
+    pub authorized_state: crate::model::TransactionState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub staging_identity: Option<SubvolumeFacts>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backup_identity: Option<SubvolumeFacts>,
+    #[serde(default)]
+    pub staging_removed: bool,
+    #[serde(default)]
+    pub backup_removed: bool,
+}
+
 pub use catos_mount::model::CleanupSummary;

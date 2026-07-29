@@ -39,6 +39,8 @@ pub enum RecoverySubcommand {
     Status,
     Resume,
     Revert,
+    DiscardPlan,
+    Purge,
 }
 
 impl RecoverySubcommand {
@@ -51,6 +53,8 @@ impl RecoverySubcommand {
             "status" => Some(RecoverySubcommand::Status),
             "resume" => Some(RecoverySubcommand::Resume),
             "revert" => Some(RecoverySubcommand::Revert),
+            "discard-plan" => Some(RecoverySubcommand::DiscardPlan),
+            "purge" => Some(RecoverySubcommand::Purge),
             _ => None,
         }
     }

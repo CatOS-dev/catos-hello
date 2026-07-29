@@ -48,13 +48,13 @@ fn parse_command(first: &str, argv: &[String], idx: &mut usize) -> Result<Comman
         }
         "recovery" => {
             let sub = argv.get(*idx + 1).ok_or_else(|| Error::InvalidArgument {
-                message: "recovery requires a subcommand (list|inspect|plan|apply|status|resume|revert)"
+                message: "recovery requires a subcommand (list|inspect|plan|apply|status|resume|revert|discard-plan|purge)"
                     .to_string(),
             })?;
             let recovery_sub = RecoverySubcommand::parse_name(sub.as_str()).ok_or_else(|| {
                 Error::InvalidArgument {
                     message: format!(
-                        "unknown recovery subcommand {sub:?}; expected list|inspect|plan|apply|status|resume|revert"
+                        "unknown recovery subcommand {sub:?}; expected list|inspect|plan|apply|status|resume|revert|discard-plan|purge"
                     ),
                 }
             })?;

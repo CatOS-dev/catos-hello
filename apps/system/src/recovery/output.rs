@@ -7,7 +7,8 @@ use std::io::Write;
 
 use crate::error::Error;
 use crate::recovery::model::{
-    RecoveryInspectReport, RecoveryListReport, RecoveryPlanReport, RecoveryStatusReport,
+    RecoveryCleanupReport, RecoveryInspectReport, RecoveryListReport, RecoveryPlanReport,
+    RecoveryStatusReport,
 };
 use crate::recovery::RecoveryOutcome;
 use crate::selection_ui::terminal_text;
@@ -63,6 +64,18 @@ pub fn render_recovery_json(
                 serde_json::Value::Object(payload),
             )
         }
+        RecoveryOutcome::DiscardPlan(report) => json_envelope(
+            invocation,
+            target_root,
+            "recovery_discard_plan",
+            serde_json::to_value(report).map_err(|e| Error::SerializeFailed(e.to_string()))?,
+        ),
+        RecoveryOutcome::Purge(report) => json_envelope(
+            invocation,
+            target_root,
+            "recovery_purge",
+            serde_json::to_value(report).map_err(|e| Error::SerializeFailed(e.to_string()))?,
+        ),
         RecoveryOutcome::Status(report) => json_envelope(
             invocation,
             target_root,
@@ -169,6 +182,8 @@ pub fn render_recovery_human<W: Write>(
             }
             Ok(())
         }
+        RecoveryOutcome::DiscardPlan(report) => render_cleanup(out, "Discarded pending plan", report),
+        RecoveryOutcome::Purge(report) => render_cleanup(out, "Purged recovery transaction", report),
         RecoveryOutcome::Status(report) => render_status(out, report),
         RecoveryOutcome::ArgumentError(error) | RecoveryOutcome::Error(error) => {
             render_error(out, error)
@@ -376,6 +391,29 @@ fn render_record<W: Write>(out: &mut W, record: &TransactionRecord) -> std::io::
     Ok(())
 }
 
+fn render_cleanup<W: Write>(
+    out: &mut W,
+    heading: &str,
+    report: &RecoveryCleanupReport,
+) -> std::io::Result<()> {
+    writeln!(out, "{heading}")?;
+    writeln!(out, "  subject          : {:?}", report.subject)?;
+    writeln!(out, "  id               : {}", terminal_text(&report.id))?;
+    writeln!(out, "  removed paths    : {}", report.removed_paths.len())?;
+    for path in &report.removed_paths {
+        writeln!(out, "    - {}", terminal_text(path))?;
+    }
+    writeln!(
+        out,
+        "  mount cleanup    : clean={}",
+        report.mount_cleanup.all_clean
+    )?;
+    for residual in &report.mount_cleanup.residual {
+        writeln!(out, "    residual: {}", terminal_text(residual))?;
+    }
+    Ok(())
+}
+
 fn render_status<W: Write>(out: &mut W, report: &RecoveryStatusReport) -> std::io::Result<()> {
     writeln!(out, "Recovery status")?;
     writeln!(
@@ -393,6 +431,9 @@ fn render_status<W: Write>(out: &mut W, report: &RecoveryStatusReport) -> std::i
     }
     if let Some(token) = &report.revert_confirmation_token {
         writeln!(out, "  revert confirm   : {}", terminal_text(token))?;
+    }
+    if let Some(token) = &report.purge_confirmation_token {
+        writeln!(out, "  purge confirm    : {}", terminal_text(token))?;
     }
     writeln!(
         out,
@@ -704,6 +745,7 @@ mod tests {
                 source_snapshot: None,
             }),
             last_cleanup: None,
+            purge_progress: None,
         };
         let report = RecoveryStatusReport {
             transaction_id: "tx-1".into(),
@@ -734,6 +776,7 @@ mod tests {
                 all_clean: true,
             }),
             revert_confirmation_token: Some("revert-v1:tx-1:abc".into()),
+            purge_confirmation_token: Some("purge-v1:tx-1:def".into()),
             warnings: vec![],
         };
         let outcome = RecoveryOutcome::Status(Box::new(report));
@@ -744,6 +787,10 @@ mod tests {
         assert_eq!(
             v["payload"]["revert_confirmation_token"],
             "revert-v1:tx-1:abc"
+        );
+        assert_eq!(
+            v["payload"]["purge_confirmation_token"],
+            "purge-v1:tx-1:def"
         );
         let _ = PathBuf::new();
     }

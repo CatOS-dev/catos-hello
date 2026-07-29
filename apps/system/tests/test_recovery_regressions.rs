@@ -145,6 +145,7 @@ fn record(state: TransactionState) -> TransactionRecord {
         ),
         last_disk_facts: None,
         last_cleanup: None,
+        purge_progress: None,
     }
 }
 

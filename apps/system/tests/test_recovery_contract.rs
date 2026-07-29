@@ -108,6 +108,7 @@ fn sample_record() -> TransactionRecord {
         last_error: None,
         last_disk_facts: None,
         last_cleanup: None,
+        purge_progress: None,
     }
 }
 
