@@ -504,8 +504,11 @@ where
     C: FnOnce() -> Result<(), String>,
 {
     let report = discover();
+    let mut warnings = Vec::new();
     if let Err(error) = validate_discovery_cleanup(&report) {
-        return close_after_luks_failure(close, &error);
+        warnings.push(format!(
+            "{error}; continuing because the private mount namespace is discarded on exit"
+        ));
     }
     let candidate = match select(&report) {
         crate::selection_ui::Selection::Selected(candidate) => *candidate,
@@ -514,24 +517,35 @@ where
             return Ok(None);
         }
         crate::selection_ui::Selection::Unavailable(reason) => {
-            return close_after_luks_failure(
-                close,
-                &format!("unlocked mapper did not yield a CatOS candidate: {reason}"),
-            )
+            let reason = combine_luks_resolution_failure(
+                format!("unlocked mapper did not yield a usable maintenance target: {reason}"),
+                &warnings,
+            );
+            return close_after_luks_failure(close, &reason);
         }
     };
-    let (fresh, warnings) = target_inventory_for_chroot(&report.inventory);
+    let (fresh, inventory_warnings) = target_inventory_for_chroot(&report.inventory);
+    warnings.extend(inventory_warnings);
     if find_selected_device(&fresh, &candidate.root_device).is_none() {
-        return close_after_luks_failure(
-            close,
-            "selected mapper is absent from fresh shared inventory",
+        let reason = combine_luks_resolution_failure(
+            "selected mapper is absent from fresh shared inventory".into(),
+            &warnings,
         );
+        return close_after_luks_failure(close, &reason);
     }
     Ok(Some(ResolvedLuksTarget {
         candidate,
         inventory: fresh,
         warnings,
     }))
+}
+
+fn combine_luks_resolution_failure(reason: String, warnings: &[String]) -> String {
+    if warnings.is_empty() {
+        reason
+    } else {
+        format!("{reason}; warnings: {}", warnings.join("; "))
+    }
 }
 
 fn close_after_luks_failure<T, C>(close: C, reason: &str) -> Result<T, String>
@@ -1031,6 +1045,69 @@ mod tests {
         .unwrap_err();
         assert!(error.contains("no mapper candidate"));
         assert!(error.contains("LUKS cleanup failed: close failed"));
+    }
+
+    #[test]
+    fn dirty_post_luks_discovery_cleanup_warns_but_keeps_selected_mapper_open() {
+        let candidate = mapper_candidate();
+        let result = resolve_after_luks(
+            || crate::target::discovery::DiscoveryReport {
+                inventory: vec![{
+                    let mut device =
+                        inventory_device("dm-0", Some("/dev/mapper/luks-id"), Some("ext4"));
+                    device.uuid = Some("root".into());
+                    device
+                }],
+                candidates: vec![candidate],
+                cleanup: vec![crate::target::discovery::ProbeCleanup {
+                    mountpoint: "/tmp/probe".into(),
+                    unmounted: false,
+                    removed: false,
+                    error: Some("busy".into()),
+                }],
+                ..Default::default()
+            },
+            |report| {
+                crate::selection_ui::Selection::Selected(Box::new(report.candidates[0].clone()))
+            },
+            || panic!("successful rescue selection must keep the mapper open"),
+        )
+        .unwrap()
+        .expect("selected mapper should remain usable");
+
+        assert!(result.warnings.iter().any(|warning| {
+            warning.contains("cleanup incomplete")
+                && warning.contains("/tmp/probe: busy")
+                && warning.contains("private mount namespace")
+        }));
+    }
+
+    #[test]
+    fn dirty_post_luks_discovery_failure_closes_mapper_and_reports_both_causes() {
+        let closed = std::cell::Cell::new(false);
+        let error = resolve_after_luks(
+            || crate::target::discovery::DiscoveryReport {
+                cleanup: vec![crate::target::discovery::ProbeCleanup {
+                    mountpoint: "/tmp/probe".into(),
+                    unmounted: false,
+                    removed: false,
+                    error: Some("busy".into()),
+                }],
+                ..Default::default()
+            },
+            |_| crate::selection_ui::Selection::Unavailable("no usable root".into()),
+            || {
+                closed.set(true);
+                Ok(())
+            },
+        )
+        .unwrap_err();
+
+        assert!(closed.get(), "failed rediscovery must close the mapper");
+        assert!(error.contains("usable maintenance target"));
+        assert!(error.contains("no usable root"));
+        assert!(error.contains("cleanup incomplete"));
+        assert!(error.contains("/tmp/probe: busy"));
     }
 
     #[test]
