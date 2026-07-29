@@ -722,6 +722,7 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+    const TEST_MACHINE_ID: &str = "0123456789abcdef0123456789abcdef";
 
     struct TempTargetRoot {
         path: PathBuf,
@@ -1327,20 +1328,36 @@ mod tests {
             &kernels,
         ));
         fs::create_dir_all(target_root.path.join("etc")).unwrap();
-        fs::write(target_root.path.join("etc/machine-id"), "machine-id\n").unwrap();
-        fs::create_dir_all(target_root.path.join("boot/efi/machine-id/linux-catos")).unwrap();
         fs::write(
-            target_root
-                .path
-                .join("boot/efi/machine-id/linux-catos/vmlinuz"),
+            target_root.path.join("etc/machine-id"),
+            format!("{TEST_MACHINE_ID}\n"),
+        )
+        .unwrap();
+        let kernel_directory = format!("boot/efi/{TEST_MACHINE_ID}/linux-catos");
+        fs::create_dir_all(target_root.path.join(&kernel_directory)).unwrap();
+        fs::write(
+            target_root.path.join(format!("{kernel_directory}/vmlinuz")),
             b"\xff\x00kernel",
         )
         .unwrap();
         fs::write(
             target_root
                 .path
-                .join("boot/efi/machine-id/linux-catos/initramfs"),
+                .join(format!("{kernel_directory}/initramfs")),
             b"initramfs",
+        )
+        .unwrap();
+        assert!(!target_provider_assets_present(
+            ProviderId::Limine,
+            &target_root.path,
+            Some("/boot/efi"),
+            &kernels,
+        ));
+        fs::write(
+            target_root.path.join("boot/efi/limine.conf"),
+            format!(
+                "timeout: 5\n/+CatOS\n  //linux-catos\n  protocol: linux\n  module_path: boot():/{TEST_MACHINE_ID}/linux-catos/initramfs\n  path: boot():/{TEST_MACHINE_ID}/linux-catos/vmlinuz\n"
+            ),
         )
         .unwrap();
         assert!(target_provider_assets_present(
@@ -1369,7 +1386,11 @@ mod tests {
         }];
         fs::create_dir_all(target_root.path.join("boot/efi/loader/entries")).unwrap();
         fs::create_dir_all(target_root.path.join("etc")).unwrap();
-        fs::write(target_root.path.join("etc/machine-id"), "machine-id\n").unwrap();
+        fs::write(
+            target_root.path.join("etc/machine-id"),
+            format!("{TEST_MACHINE_ID}\n"),
+        )
+        .unwrap();
         fs::write(
             target_root.path.join("boot/efi/loader/loader.conf"),
             "default CatOS\n",
@@ -1382,25 +1403,28 @@ mod tests {
             Some("/boot/efi"),
             &kernels,
         ));
-        fs::create_dir_all(target_root.path.join("boot/efi/machine-id/6.18.0-catos")).unwrap();
+        let kernel_directory = format!("boot/efi/{TEST_MACHINE_ID}/6.18.0-catos");
+        fs::create_dir_all(target_root.path.join(&kernel_directory)).unwrap();
         fs::write(
             target_root
                 .path
-                .join("boot/efi/machine-id/6.18.0-catos/linux"),
+                .join(format!("{kernel_directory}/linux")),
             b"\xff\x00kernel",
         )
         .unwrap();
         fs::write(
             target_root
                 .path
-                .join("boot/efi/machine-id/6.18.0-catos/initrd"),
+                .join(format!("{kernel_directory}/initrd")),
             b"initramfs",
         )
         .unwrap();
         fs::write(
             target_root
                 .path
-                .join("boot/efi/loader/entries/machine-id-6.18.0-catos.conf"),
+                .join(format!(
+                    "boot/efi/loader/entries/{TEST_MACHINE_ID}-6.18.0-catos.conf"
+                )),
             "title CatOS\n",
         )
         .unwrap();
@@ -1413,8 +1437,12 @@ mod tests {
         fs::write(
             target_root
                 .path
-                .join("boot/efi/loader/entries/machine-id-6.18.0-catos.conf"),
-            "title CatOS\nlinux /machine-id/6.18.0-catos/linux\ninitrd /machine-id/6.18.0-catos/initrd\n",
+                .join(format!(
+                    "boot/efi/loader/entries/{TEST_MACHINE_ID}-6.18.0-catos.conf"
+                )),
+            format!(
+                "title CatOS\nlinux /{TEST_MACHINE_ID}/6.18.0-catos/linux\ninitrd /{TEST_MACHINE_ID}/6.18.0-catos/initrd\n"
+            ),
         )
         .unwrap();
         assert!(target_provider_assets_present(
@@ -1428,21 +1456,30 @@ mod tests {
     #[test]
     fn limine_assets_require_every_discovered_kernel() {
         let target_root = TempTargetRoot::new();
-        fs::create_dir_all(target_root.path.join("boot/efi/machine-id/linux")).unwrap();
+        let kernel_directory = format!("boot/efi/{TEST_MACHINE_ID}/linux");
+        fs::create_dir_all(target_root.path.join(&kernel_directory)).unwrap();
         fs::create_dir_all(target_root.path.join("etc")).unwrap();
-        fs::write(target_root.path.join("etc/machine-id"), "machine-id\n").unwrap();
         fs::write(
-            target_root.path.join("boot/efi/limine.conf"),
-            "timeout: 5\n",
+            target_root.path.join("etc/machine-id"),
+            format!("{TEST_MACHINE_ID}\n"),
         )
         .unwrap();
         fs::write(
-            target_root.path.join("boot/efi/machine-id/linux/vmlinuz"),
+            target_root.path.join("boot/efi/limine.conf"),
+            format!(
+                "/+CatOS\n  //linux\n  protocol: linux\n  module_path: boot():/{TEST_MACHINE_ID}/linux/initramfs\n  path: boot():/{TEST_MACHINE_ID}/linux/vmlinuz\n"
+            ),
+        )
+        .unwrap();
+        fs::write(
+            target_root.path.join(format!("{kernel_directory}/vmlinuz")),
             b"kernel",
         )
         .unwrap();
         fs::write(
-            target_root.path.join("boot/efi/machine-id/linux/initramfs"),
+            target_root
+                .path
+                .join(format!("{kernel_directory}/initramfs")),
             b"initramfs",
         )
         .unwrap();

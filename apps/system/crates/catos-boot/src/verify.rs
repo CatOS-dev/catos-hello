@@ -80,16 +80,29 @@ pub fn target_provider_assets_present(
     let esp = esp_mount_point.trim_start_matches('/');
     match provider {
         ProviderId::Limine => {
-            read_target_file(target_root, &format!("{esp}/limine.conf"))
-                .is_some_and(|contents| !contents.trim().is_empty())
-                && target_deployed_kernel_assets(
-                    target_root,
-                    esp,
-                    kernels,
-                    |kernel| format!("{esp}/{{machine_id}}/{}", kernel.package),
-                    "vmlinuz",
-                    "initramfs",
-                )
+            let Some(machine_id) = target_machine_id(target_root) else {
+                return false;
+            };
+            read_target_file(target_root, &format!("{esp}/limine.conf")).is_some_and(|contents| {
+                !contents.trim().is_empty()
+                    && kernels.iter().all(|kernel| {
+                        limine_config_has_kernel_entry(
+                            &contents,
+                            &machine_id,
+                            &kernel.package,
+                            |reference| {
+                                target_limine_boot_asset_present(target_root, esp, reference)
+                            },
+                        )
+                    })
+            }) && target_deployed_kernel_assets(
+                target_root,
+                esp,
+                kernels,
+                |kernel| format!("{esp}/{{machine_id}}/{}", kernel.package),
+                "vmlinuz",
+                "initramfs",
+            )
         }
         ProviderId::SystemdBoot => {
             read_target_file(target_root, &format!("{esp}/loader/loader.conf"))
@@ -129,6 +142,21 @@ fn target_efistub_assets_present(target_root: &Path, esp: &str, kernels: &[Kerne
         })
 }
 
+fn target_machine_id(target_root: &Path) -> Option<String> {
+    read_target_file(target_root, "etc/machine-id")
+        .map(|machine_id| machine_id.trim().to_string())
+        .filter(|machine_id| is_valid_machine_id(machine_id))
+}
+
+fn is_valid_machine_id(machine_id: &str) -> bool {
+    let bytes = machine_id.as_bytes();
+    bytes.len() == 32
+        && bytes.iter().any(|byte| *byte != b'0')
+        && bytes
+            .iter()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+}
+
 fn target_deployed_kernel_assets(
     target_root: &Path,
     esp: &str,
@@ -137,10 +165,7 @@ fn target_deployed_kernel_assets(
     kernel_asset: &str,
     initramfs_asset: &str,
 ) -> bool {
-    let Some(machine_id) = read_target_file(target_root, "etc/machine-id")
-        .map(|machine_id| machine_id.trim().to_string())
-        .filter(|machine_id| !machine_id.is_empty())
-    else {
+    let Some(machine_id) = target_machine_id(target_root) else {
         return false;
     };
     !kernels.is_empty()
@@ -155,11 +180,142 @@ fn target_deployed_kernel_assets(
         })
 }
 
+#[derive(Default)]
+struct LimineEntryAssets {
+    active: bool,
+    protocol_seen: bool,
+    protocol_linux: bool,
+    kernel_path_seen: bool,
+    kernel_path_matches: bool,
+    initramfs_path_matches: bool,
+    invalid: bool,
+}
+
+impl LimineEntryAssets {
+    fn complete(&self) -> bool {
+        self.active
+            && !self.invalid
+            && self.protocol_linux
+            && self.kernel_path_matches
+            && self.initramfs_path_matches
+    }
+}
+
+fn limine_config_has_kernel_entry(
+    contents: &str,
+    machine_id: &str,
+    package: &str,
+    mut asset_present: impl FnMut(&str) -> bool,
+) -> bool {
+    let expected_kernel = format!("boot():/{machine_id}/{package}/vmlinuz");
+    let expected_initramfs = format!("boot():/{machine_id}/{package}/initramfs");
+    let mut entry = LimineEntryAssets::default();
+
+    for line in contents.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('/') {
+            if entry.complete() {
+                return true;
+            }
+            entry = LimineEntryAssets {
+                active: true,
+                ..LimineEntryAssets::default()
+            };
+            continue;
+        }
+        if !entry.active || trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        let Some((directive, raw_value)) = trimmed.split_once(':') else {
+            continue;
+        };
+        let value = raw_value.trim();
+        let value_is_single_token = !value.is_empty() && value.split_whitespace().count() == 1;
+        match directive.trim() {
+            "protocol" => {
+                if entry.protocol_seen || !value_is_single_token {
+                    entry.invalid = true;
+                } else {
+                    entry.protocol_seen = true;
+                    entry.protocol_linux = value == "linux";
+                }
+            }
+            "path" | "kernel_path" => {
+                if entry.kernel_path_seen
+                    || !value_is_single_token
+                    || !target_limine_reference_is_safe(value)
+                    || !asset_present(value)
+                {
+                    entry.invalid = true;
+                } else {
+                    entry.kernel_path_seen = true;
+                    entry.kernel_path_matches =
+                        limine_asset_reference_matches(value, &expected_kernel);
+                }
+            }
+            "module_path" => {
+                if !value_is_single_token
+                    || !target_limine_reference_is_safe(value)
+                    || !asset_present(value)
+                {
+                    entry.invalid = true;
+                } else if limine_asset_reference_matches(value, &expected_initramfs) {
+                    entry.initramfs_path_matches = true;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    entry.complete()
+}
+
+fn limine_asset_reference_matches(value: &str, expected: &str) -> bool {
+    limine_reference_without_hash(value).is_some_and(|reference| reference == expected)
+}
+
+fn limine_reference_without_hash(value: &str) -> Option<&str> {
+    match value.split_once('#') {
+        None if !value.is_empty() => Some(value),
+        Some((reference, hash))
+            if !reference.is_empty()
+                && hash.len() == 128
+                && hash.bytes().all(|byte| byte.is_ascii_hexdigit()) =>
+        {
+            Some(reference)
+        }
+        _ => None,
+    }
+}
+
+fn target_limine_reference_is_safe(value: &str) -> bool {
+    let Some(reference) = limine_reference_without_hash(value) else {
+        return false;
+    };
+    let Some(relative) = reference.strip_prefix("boot():/") else {
+        return false;
+    };
+    !relative.is_empty()
+        && relative
+            .split('/')
+            .all(|component| !component.is_empty() && component != "." && component != "..")
+}
+
+fn target_limine_boot_asset_present(target_root: &Path, esp: &str, value: &str) -> bool {
+    if !target_limine_reference_is_safe(value) {
+        return false;
+    }
+    let Some(reference) = limine_reference_without_hash(value) else {
+        return false;
+    };
+    let Some(relative) = reference.strip_prefix("boot():/") else {
+        return false;
+    };
+    target_regular_file_present(target_root, &format!("{esp}/{relative}"))
+}
+
 fn target_systemd_boot_entry_present(target_root: &Path, esp: &str, kernels: &[Kernel]) -> bool {
-    let Some(machine_id) = read_target_file(target_root, "etc/machine-id")
-        .map(|machine_id| machine_id.trim().to_string())
-        .filter(|machine_id| !machine_id.is_empty())
-    else {
+    let Some(machine_id) = target_machine_id(target_root) else {
         return false;
     };
     let esp_rooted = format!("/{}", esp.trim_matches('/'));
@@ -236,7 +392,87 @@ fn systemd_boot_entry_references_assets(contents: &str, machine_id: &str, versio
 
 #[cfg(test)]
 mod tests {
-    use super::{grub_config_has_bootable_linux_entry, systemd_boot_entry_references_assets};
+    use super::{
+        grub_config_has_bootable_linux_entry, is_valid_machine_id, limine_config_has_kernel_entry,
+        systemd_boot_entry_references_assets,
+    };
+
+    const MACHINE_ID: &str = "0123456789abcdef0123456789abcdef";
+
+    #[test]
+    fn machine_id_requires_nonzero_lowercase_32_digit_hex() {
+        assert!(is_valid_machine_id(MACHINE_ID));
+        assert!(!is_valid_machine_id("machine-id"));
+        assert!(!is_valid_machine_id("00000000000000000000000000000000"));
+        assert!(!is_valid_machine_id("0123456789ABCDEF0123456789ABCDEF"));
+        assert!(!is_valid_machine_id("0123456789abcdef0123456789abcdeg"));
+    }
+
+    #[test]
+    fn limine_kernel_and_initramfs_must_share_one_linux_entry() {
+        let split = format!(
+            "/+CatOS\n  //kernel-only\n  protocol: linux\n  path: boot():/{MACHINE_ID}/linux/vmlinuz\n  //initrd-only\n  protocol: linux\n  module_path: boot():/{MACHINE_ID}/linux/initramfs\n"
+        );
+
+        assert!(!limine_config_has_kernel_entry(
+            &split,
+            MACHINE_ID,
+            "linux",
+            |_| true
+        ));
+    }
+
+    #[test]
+    fn limine_kernel_entry_accepts_hashes_and_extra_microcode() {
+        let hash = "a".repeat(128);
+        let config = format!(
+            "/+CatOS\n  //linux\n  protocol: linux\n  module_path: boot():/amd-ucode.img\n  module_path: boot():/{MACHINE_ID}/linux/initramfs#{hash}\n  path: boot():/{MACHINE_ID}/linux/vmlinuz#{hash}\n"
+        );
+
+        assert!(limine_config_has_kernel_entry(
+            &config,
+            MACHINE_ID,
+            "linux",
+            |_| true
+        ));
+    }
+
+    #[test]
+    fn limine_kernel_entry_rejects_a_missing_extra_module_asset() {
+        let config = format!(
+            "/+CatOS\n  //linux\n  protocol: linux\n  module_path: boot():/amd-ucode.img\n  module_path: boot():/{MACHINE_ID}/linux/initramfs\n  path: boot():/{MACHINE_ID}/linux/vmlinuz\n"
+        );
+
+        assert!(!limine_config_has_kernel_entry(
+            &config,
+            MACHINE_ID,
+            "linux",
+            |reference| !reference.contains("amd-ucode.img")
+        ));
+    }
+
+    #[test]
+    fn limine_kernel_entry_rejects_invalid_hash_or_duplicate_kernel_path() {
+        let invalid_hash = format!(
+            "/+CatOS\n  //linux\n  protocol: linux\n  module_path: boot():/{MACHINE_ID}/linux/initramfs#bad\n  path: boot():/{MACHINE_ID}/linux/vmlinuz#bad\n"
+        );
+        let duplicate = format!(
+            "/+CatOS\n  //linux\n  protocol: linux\n  module_path: boot():/{MACHINE_ID}/linux/initramfs\n  path: boot():/{MACHINE_ID}/linux/vmlinuz\n  kernel_path: boot():/{MACHINE_ID}/linux/vmlinuz\n"
+        );
+
+        assert!(!limine_config_has_kernel_entry(
+            &invalid_hash,
+            MACHINE_ID,
+            "linux",
+            |_| true
+        ));
+        assert!(!limine_config_has_kernel_entry(
+            &duplicate,
+            MACHINE_ID,
+            "linux",
+            |_| true
+        ));
+    }
 
     #[test]
     fn systemd_boot_entry_rejects_trailing_linux_tokens() {
