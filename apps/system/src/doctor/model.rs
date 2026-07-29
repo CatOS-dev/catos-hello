@@ -304,13 +304,24 @@ impl DoctorLimitation {
     }
 }
 
-/// A recommended next step. The aggregator never executes these; the
-/// human renderer surfaces them so the operator knows what to do.
+/// A recommended next step. Standalone Doctor only renders recommendations.
+/// The aggregate interactive maintenance workflow may execute [`DoctorAction`]
+/// values after target validation and explicit confirmation; it never parses
+/// or executes the human-facing `command` string.
 ///
-/// `command` is a stable, parseable token (e.g.
-/// `catos-repair mount`) — never an arbitrary shell pipeline. When
-/// the situation is too ambiguous for a single command,
-/// `recommend_live_environment` is emitted instead.
+/// `command` is a stable display value (for example `catos-repair mount`), not
+/// an execution authority. When the situation is too ambiguous for a typed
+/// action, only manual guidance is emitted.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum DoctorAction {
+    RepairFilesystem,
+    RepairMountLayout,
+    RepairBootSetup,
+    ResumeRecovery { transaction_id: String },
+    RevertRecovery { transaction_id: String },
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DoctorRecommendation {
     /// Stable snake_case code (e.g. `RUN_CATOS_REPAIR_MOUNT`,
@@ -323,6 +334,9 @@ pub struct DoctorRecommendation {
     /// judgement (ambiguous target, conflicting providers, ...).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub command: Option<String>,
+    /// Typed executable action for the interactive maintenance workflow.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub action: Option<DoctorAction>,
     /// Issue codes this recommendation addresses. Empty when the
     /// recommendation is generic (e.g. `BOOT_LIVE_ENVIRONMENT`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -335,12 +349,18 @@ impl DoctorRecommendation {
             code: code.into(),
             message: message.into(),
             command: None,
+            action: None,
             addresses: Vec::new(),
         }
     }
 
     pub fn with_command(mut self, command: impl Into<String>) -> Self {
         self.command = Some(command.into());
+        self
+    }
+
+    pub fn with_action(mut self, action: DoctorAction) -> Self {
+        self.action = Some(action);
         self
     }
 
@@ -618,6 +638,17 @@ pub mod recommendation_code {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn doctor_action_serializes_as_a_typed_tagged_value() {
+        let recommendation = DoctorRecommendation::new("RUN", "resume")
+            .with_action(DoctorAction::ResumeRecovery {
+                transaction_id: "tx-1".into(),
+            });
+        let value = serde_json::to_value(&recommendation).unwrap();
+        assert_eq!(value["action"]["kind"], "resume_recovery");
+        assert_eq!(value["action"]["transaction_id"], "tx-1");
+    }
 
     #[test]
     fn overall_status_combine_critical_dominates() {

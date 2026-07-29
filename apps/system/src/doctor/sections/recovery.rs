@@ -2,7 +2,8 @@
 //! snapshot recovery transactions on the target.
 
 use crate::doctor::model::{
-    issue_code, recommendation_code, DoctorIssue, DoctorLimitation, DoctorRecommendation,
+    issue_code, recommendation_code, DoctorAction, DoctorIssue, DoctorLimitation,
+    DoctorRecommendation,
     DoctorReport, DoctorSection, DoctorSectionId, DoctorSectionStatus, DoctorSeverity,
 };
 use crate::snapshot::model::TransactionRecord;
@@ -317,7 +318,11 @@ fn inspect_single_record(
                 }
                 command.push_str(" --transaction ");
                 command.push_str(&shell_quote_command_arg(&record.transaction_id));
-                recommendation.with_command(command)
+                recommendation
+                    .with_action(DoctorAction::ResumeRecovery {
+                        transaction_id: record.transaction_id.clone(),
+                    })
+                    .with_command(command)
             }
             None => recommendation,
         };
@@ -439,6 +444,12 @@ mod tests {
             Some(
                 "catos-recovery resume --root-device /dev/vda --root-subvolume /@root --transaction tx-00000000000000000000000000000004"
             )
+        );
+        assert_eq!(
+            report.recommendations[0].action,
+            Some(DoctorAction::ResumeRecovery {
+                transaction_id: "tx-00000000000000000000000000000004".into(),
+            })
         );
     }
 

@@ -8,7 +8,8 @@ mod recovery;
 use std::path::{Path, PathBuf};
 
 use crate::doctor::model::{
-    recommendation_code, DoctorIssue, DoctorRecommendation, DoctorSection, DoctorSectionId,
+    recommendation_code, DoctorAction, DoctorIssue, DoctorRecommendation, DoctorSection,
+    DoctorSectionId,
     DoctorSectionStatus,
 };
 use crate::target::Evidence;
@@ -114,6 +115,7 @@ pub(in crate::doctor) fn target_repair_recommendation(
     target: &crate::target::model::TargetIdentity,
     esp_device: Option<&Path>,
     supported_code: &str,
+    action: DoctorAction,
     supported_message: impl Into<String>,
     unsupported_message: impl Into<String>,
 ) -> DoctorRecommendation {
@@ -125,7 +127,7 @@ pub(in crate::doctor) fn target_repair_recommendation(
     }
     let recommendation = DoctorRecommendation::new(supported_code, supported_message);
     match target_bound_repair_command(program, target, esp_device) {
-        Some(command) => recommendation.with_command(command),
+        Some(command) => recommendation.with_action(action).with_command(command),
         None => recommendation,
     }
 }
@@ -180,7 +182,7 @@ mod tests {
         device_mount_state, read_target_file, shell_quote_command_arg,
         target_bound_repair_command, target_repair_recommendation, target_root_path, MountState,
     };
-    use crate::doctor::model::recommendation_code;
+    use crate::doctor::model::{recommendation_code, DoctorAction};
     use crate::target::model::TargetIdentity;
     use std::path::PathBuf;
 
@@ -225,6 +227,16 @@ mod tests {
                 "catos-repair mount --root-device /dev/dm-0 --root-subvolume /@ --esp-device /dev/nvme0n1p1"
             )
         );
+        let recommendation = target_repair_recommendation(
+            "catos-repair mount",
+            &target,
+            Some(std::path::Path::new("/dev/nvme0n1p1")),
+            recommendation_code::RUN_CATOS_REPAIR_MOUNT,
+            DoctorAction::RepairMountLayout,
+            "repair",
+            "manual",
+        );
+        assert_eq!(recommendation.action, Some(DoctorAction::RepairMountLayout));
     }
 
     #[test]
@@ -241,12 +253,14 @@ mod tests {
             &target,
             None,
             recommendation_code::RUN_CATOS_REPAIR_MOUNT,
+            DoctorAction::RepairMountLayout,
             "repair automatically",
             "review manually",
         );
         assert_eq!(recommendation.code, recommendation_code::MANUAL_REVIEW);
         assert_eq!(recommendation.message, "review manually");
         assert!(recommendation.command.is_none());
+        assert!(recommendation.action.is_none());
     }
 
     #[test]

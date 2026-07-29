@@ -435,6 +435,25 @@ fn role_menus_without_a_tty_fail_instead_of_reporting_success() {
 }
 
 #[test]
+fn doctor_internal_workflow_requires_a_terminal() {
+    let output = Command::new(bin_path())
+        .args([
+            "doctor",
+            "--continue-interactive-menu",
+            "workflow",
+        ])
+        .output()
+        .expect("run Doctor workflow without a terminal");
+    assert_eq!(output.status.code(), Some(2));
+    assert!(output.stdout.is_empty());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("interactive Doctor workflow requires a terminal"),
+        "stderr={stderr}"
+    );
+}
+
+#[test]
 fn aggregate_help_and_errors_preserve_the_aggregate_command_name() {
     let bin = bin_path();
     for (args, expected, forbidden) in [

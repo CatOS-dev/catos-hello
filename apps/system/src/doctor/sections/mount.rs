@@ -4,7 +4,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use crate::doctor::model::{
-    issue_code, recommendation_code, DoctorIssue, DoctorReport,
+    issue_code, recommendation_code, DoctorAction, DoctorIssue, DoctorReport,
     DoctorSection, DoctorSectionId, DoctorSectionStatus, DoctorSeverity,
 };
 use crate::mount::diagnose::subvolume::{CatosConfirmation, SubvolFacts, SubvolObservation};
@@ -81,6 +81,7 @@ pub(in crate::doctor) fn run_mount_section(
             &context.target,
             esp_device,
             recommendation_code::RUN_CATOS_REPAIR_MOUNT,
+            DoctorAction::RepairMountLayout,
             "mount layout is missing standard entries or subvolumes; catos-repair mount can recreate them when authorised",
             "mount layout needs repair, but automatic mount repair supports only the CatOS standard Btrfs root /@; review this nonstandard root manually",
         ));
@@ -94,6 +95,7 @@ pub(in crate::doctor) fn run_mount_section(
             &context.target,
             esp_device,
             recommendation_code::RUN_CATOS_REPAIR_MOUNT,
+            DoctorAction::RepairMountLayout,
             "root UUID in fstab does not match the discovered device",
             "root UUID in fstab needs repair, but automatic mount repair supports only the CatOS standard Btrfs root /@; review this nonstandard root manually",
         ));

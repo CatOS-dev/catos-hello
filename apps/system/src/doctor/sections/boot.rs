@@ -4,8 +4,8 @@ use std::path::Path;
 
 use crate::boot::diagnose::provider::{detect, DetectionInputs, DetectionVerdict};
 use crate::doctor::model::{
-    issue_code, recommendation_code, DoctorEnvironment, DoctorIssue, DoctorLimitation,
-    DoctorRecommendation, DoctorReport, DoctorSection, DoctorSectionId, DoctorSectionStatus,
+    issue_code, recommendation_code, DoctorAction, DoctorEnvironment, DoctorIssue,
+    DoctorLimitation, DoctorRecommendation, DoctorReport, DoctorSection, DoctorSectionId, DoctorSectionStatus,
     DoctorSeverity,
 };
 use crate::target::Evidence;
@@ -150,6 +150,7 @@ pub(in crate::doctor) fn run_boot_section(
                     &context.target,
                     esp_device,
                     recommendation_code::RUN_CATOS_REPAIR_BOOT,
+                    DoctorAction::RepairBootSetup,
                     format!(
                         "provider {} is missing required assets; re-apply the selected target's boot recipe",
                         provider.as_str()
@@ -849,6 +850,7 @@ pub(in crate::doctor) fn run_secure_boot_section(
             &context.target,
             esp_device,
             recommendation_code::RUN_CATOS_REPAIR_BOOT,
+            DoctorAction::RepairBootSetup,
             "Secure Boot policy is inconsistent; catos-repair boot can re-apply the target's existing policy",
             "Secure Boot policy is inconsistent, but automatic boot repair supports only the CatOS standard Btrfs root /@; review this nonstandard root manually",
         ));

@@ -3,14 +3,16 @@
 use std::path::Path;
 
 use crate::doctor::model::{
-    issue_code, recommendation_code, DoctorEnvironment, DoctorIssue, DoctorLimitation,
-    DoctorReport, DoctorSection, DoctorSectionId, DoctorSectionStatus, DoctorSeverity,
+    issue_code, recommendation_code, DoctorAction, DoctorEnvironment, DoctorIssue,
+    DoctorLimitation, DoctorRecommendation, DoctorReport, DoctorSection, DoctorSectionId, DoctorSectionStatus, DoctorSeverity,
 };
 use crate::fs::command::FsCommandRunner;
 use crate::fs::diagnose::{btrfs, check_only_for, ReadonlyOutcome, ReadonlyResult};
 use crate::target::Evidence;
 
-use super::{is_device_mounted_rw, push_evidence, set_section, MountState};
+use super::{
+    is_device_mounted_rw, push_evidence, set_section, shell_quote_command_arg, MountState,
+};
 use crate::doctor::DoctorTargetContext;
 
 pub(in crate::doctor) fn capture_environment() -> DoctorEnvironment {
@@ -362,6 +364,19 @@ pub(in crate::doctor) fn run_filesystem_section<R: FsCommandRunner + ?Sized>(
                     ),
                 )
                 .with_recommendation(recommendation_code::RUN_CATOS_REPAIR_FS),
+            );
+            report.recommendations.push(
+                DoctorRecommendation::new(
+                    recommendation_code::RUN_CATOS_REPAIR_FS,
+                    format!(
+                        "filesystem corruption was detected on {device}; run the filesystem repair workflow"
+                    ),
+                )
+                .with_action(DoctorAction::RepairFilesystem)
+                .with_command(format!(
+                    "catos-repair fs {}",
+                    shell_quote_command_arg(&device)
+                )),
             );
         }
         ReadonlyOutcome::ToolMissing => {

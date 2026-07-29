@@ -171,8 +171,9 @@ CFG
 }
 
 build_root_image() {
-    local image=$1 root_uuid=$2 provider=$3 fstab_uuid=$4 interrupted=$5 metadata_dup=$6 runtime_tree=${7:-}
-    local tree=$WORKDIR/tree-$(basename "$image" .img)
+    local image=$1 root_uuid=$2 provider=$3 fstab_uuid=$4 metadata_dup=$5 runtime_tree=${6:-}
+    local tree
+    tree=$WORKDIR/tree-$(basename "$image" .img)
     rm -rf "$tree"
     mkdir -p \
         "$tree/@/etc" \
@@ -225,6 +226,7 @@ DESC
     printf 'quiet rw\n' > "$tree/@/etc/kernel/cmdline"
     write_provider_root "$tree" "$provider" "$root_uuid"
 
+    rm -f "$image"
     truncate -s 384M "$image"
     local args=(-q -f -U "$root_uuid" -L "catos-$provider")
     if [[ $metadata_dup == yes ]]; then
@@ -246,7 +248,8 @@ DESC
 
 build_ext4_root_image() {
     local image=$1 root_uuid=$2
-    local tree=$WORKDIR/tree-$(basename "$image" .img)
+    local tree
+    tree=$WORKDIR/tree-$(basename "$image" .img)
     rm -rf "$tree"
     mkdir -p \
         "$tree/etc/default/grub.d" \
@@ -285,6 +288,7 @@ DESC
     printf '%s\n' linux-catos > "$tree/usr/lib/modules/6.12.0-catos/pkgbase"
     printf 'fixture kernel\n' > "$tree/usr/lib/modules/6.12.0-catos/vmlinuz"
     printf 'quiet rw\n' > "$tree/etc/kernel/cmdline"
+    rm -f "$image"
     truncate -s 256M "$image"
     mke2fs -q -F -t ext4 -U "$root_uuid" -L catos-ambig \
         -d "$tree" "$image"
@@ -327,6 +331,7 @@ CFG
             ;;
         *) echo "unsupported provider $provider" >&2; return 1 ;;
     esac
+    rm -f "$image"
     truncate -s 64M "$image"
     mkfs.fat -F 32 -i "$ESP_VOLUME_ID" -n CATOS_ESP "$image" >/dev/null
     MTOOLS_SKIP_CHECK=1 mcopy -s -i "$image" "$tree"/* ::/
@@ -374,15 +379,15 @@ build_esp_image "$ESP_GRUB" grub
 build_esp_image "$ESP_LIMINE" limine
 build_esp_image "$ESP_SYSTEMD" systemd_boot
 build_esp_image "$ESP_UKI" uki
-build_root_image "$ROOT_GRUB" "$UUID_GRUB" grub "$UUID_GRUB" no no
-build_root_image "$ROOT_LIMINE" "$UUID_LIMINE" limine "$UUID_LIMINE" no no
-build_root_image "$ROOT_SYSTEMD" "$UUID_SYSTEMD" systemd_boot "$UUID_SYSTEMD" no no
-build_root_image "$ROOT_UKI" "$UUID_UKI" uki "$UUID_UKI" no no
-build_root_image "$ROOT_BROKEN" "$UUID_BROKEN" grub deadbeef-dead-4bad-8bad-deadbeefdead no no
-build_root_image "$ROOT_CORRUPT" "$UUID_CORRUPT" grub "$UUID_CORRUPT" no yes
+build_root_image "$ROOT_GRUB" "$UUID_GRUB" grub "$UUID_GRUB" no
+build_root_image "$ROOT_LIMINE" "$UUID_LIMINE" limine "$UUID_LIMINE" no
+build_root_image "$ROOT_SYSTEMD" "$UUID_SYSTEMD" systemd_boot "$UUID_SYSTEMD" no
+build_root_image "$ROOT_UKI" "$UUID_UKI" uki "$UUID_UKI" no
+build_root_image "$ROOT_BROKEN" "$UUID_BROKEN" grub deadbeef-dead-4bad-8bad-deadbeefdead no
+build_root_image "$ROOT_CORRUPT" "$UUID_CORRUPT" grub "$UUID_CORRUPT" yes
 corrupt_btrfs_metadata_mirror "$ROOT_CORRUPT"
-build_root_image "$ROOT_INTERRUPTED" "$UUID_INTERRUPTED" grub "$UUID_INTERRUPTED" yes no
-build_root_image "$ROOT_AMBIG_A" "$UUID_AMBIG_A" grub "$UUID_AMBIG_A" no no
+build_root_image "$ROOT_INTERRUPTED" "$UUID_INTERRUPTED" grub "$UUID_INTERRUPTED" no
+build_root_image "$ROOT_AMBIG_A" "$UUID_AMBIG_A" grub "$UUID_AMBIG_A" no
 build_ext4_root_image "$ROOT_AMBIG_B" "$UUID_AMBIG_B"
 
 KVER=$(basename "$(dirname "$KERNEL")")
@@ -467,6 +472,13 @@ echo $? > /tmp/doctor.rc
 CHILD
 chmod +x "$INITRAMFS/bin/doctor-child"
 
+cat > "$INITRAMFS/bin/doctor-workflow-child" <<'CHILD'
+#!/bin/sh
+/bin/catos-system
+echo $? > /tmp/doctor.rc
+CHILD
+chmod +x "$INITRAMFS/bin/doctor-workflow-child"
+
 cat > "$INITRAMFS/bin/running-root-init" <<'RUNNING_INIT'
 #!/bin/sh
 PATH=/bin:/sbin:/usr/bin:/usr/sbin
@@ -512,6 +524,7 @@ mount -t devtmpfs devtmpfs /dev
 mkdir -p /dev/pts /run /tmp
 mount -t devpts devpts /dev/pts
 mount -t tmpfs tmpfs /run
+chmod 0755 /run
 chmod 1777 /tmp
 while read -r module; do
     [ -n "$module" ] && insmod "$module" 2>/dev/null || true
@@ -590,8 +603,9 @@ fi
 
 run_tty() {
     input=$1
+    command=${2:-/bin/doctor-child}
     rm -f /tmp/doctor.rc /tmp/doctor.out /tmp/doctor.err /tmp/typescript
-    printf '%b' "$input" | timeout -s KILL 30 script -q -c /bin/doctor-child /tmp/typescript \
+    printf '%b' "$input" | timeout -s KILL 60 script -q -c "$command" /tmp/typescript \
         > /tmp/doctor.out 2> /tmp/doctor.err
     rc=$(cat /tmp/doctor.rc 2>/dev/null || echo 255)
     echo "__DOCTOR_BEGIN__"
@@ -602,7 +616,29 @@ run_tty() {
     echo "__DOCTOR_END__"
 }
 
-if [ "$SCENARIO" = ambiguous ]; then
+if [ "$SCENARIO" = workflow_broken_fstab ]; then
+    run_tty '1\ny\n1\ny\n\n\ny\n0\n' /bin/doctor-workflow-child
+    mkdir -p /tmp/workflow-verify
+    root_uuid=$(btrfs filesystem show /dev/vda | awk '/uuid:/ { print $NF; exit }')
+    if mount -t btrfs -o ro,norecovery,subvol=@ /dev/vda /tmp/workflow-verify; then
+        root_source=$(awk '$2 == "/" { print $1; exit }' /tmp/workflow-verify/etc/fstab)
+        echo "__DOCTOR_WORKFLOW_ROOT_IDENTITY__=$root_source:$root_uuid"
+        if [ "$root_source" = "UUID=$root_uuid" ]; then
+            echo "__DOCTOR_WORKFLOW_FSTAB_REPAIRED__"
+        else
+            echo "__DOCTOR_WORKFLOW_FSTAB_NOT_REPAIRED__"
+            cat /tmp/workflow-verify/etc/fstab
+        fi
+        if [ -f /tmp/workflow-verify/etc/fstab.catos-repair.backup ]; then
+            echo "__DOCTOR_WORKFLOW_BACKUP_PRESENT__"
+        else
+            echo "__DOCTOR_WORKFLOW_BACKUP_MISSING__"
+        fi
+        umount /tmp/workflow-verify
+    else
+        echo "__DOCTOR_WORKFLOW_VERIFY_MOUNT_FAILED__"
+    fi
+elif [ "$SCENARIO" = ambiguous ]; then
     timeout -s KILL 30 /bin/catos-doctor \
         </dev/null > /tmp/non-tty.out 2> /tmp/non-tty.err
     non_tty_rc=$?
@@ -634,7 +670,7 @@ sync
 poweroff -f
 GUEST
 chmod +x "$INITRAMFS/init"
-build_root_image "$ROOT_RUNNING" "$UUID_RUNNING" grub "$UUID_RUNNING" no no "$INITRAMFS"
+build_root_image "$ROOT_RUNNING" "$UUID_RUNNING" grub "$UUID_RUNNING" no "$INITRAMFS"
 (
     cd "$INITRAMFS"
     find . -print0 | cpio --null -o -H newc 2>/dev/null | gzip -q -1 > "$INITRAMFS_IMG"
@@ -685,6 +721,36 @@ run_qemu() {
     if [[ -n $extra_root ]]; then
         [[ $(hash_image "$extra_root") == "$extra_before" ]] || fail "$scenario: second root image changed"
     fi
+}
+
+run_qemu_workflow() {
+    local scenario=$1 root_image=$2 esp_image=$3
+    local log=$WORKDIR/$scenario.serial.log
+    local root_before esp_before
+    root_before=$(hash_image "$root_image")
+    esp_before=$(hash_image "$esp_image")
+    local args=(
+        -nodefaults -no-reboot -nographic -m 512M
+        -kernel "$KERNEL" -initrd "$INITRAMFS_IMG"
+        -append "console=ttyS0 quiet panic=-1 catos_doctor_scenario=$scenario"
+        -drive "file=$root_image,format=raw,if=virtio"
+        -drive "file=$esp_image,format=raw,if=virtio"
+        -serial "file:$log"
+    )
+    if [[ -w /dev/kvm ]]; then args+=(-enable-kvm -cpu host); fi
+    set +e
+    timeout 120 "$QEMU_BIN" "${args[@]}" >/dev/null 2>&1
+    local rc=$?
+    set -e
+    [[ $rc -ne 124 ]] || fail "$scenario: QEMU timed out"
+    [[ -f $log ]] || fail "$scenario: no serial log"
+    tr -d '\r' < "$log" > "$log.normalized"
+    LAST_LOG=$(cat "$log.normalized")
+    assert_contains "$LAST_LOG" "__DOCTOR_END__" "$scenario"
+    [[ $(hash_image "$root_image") != "$root_before" ]] \
+        || fail "$scenario: repair did not change root image"
+    [[ $(hash_image "$esp_image") == "$esp_before" ]] \
+        || fail "$scenario: ESP image changed"
 }
 
 prepare_interrupted_fixture() {
@@ -781,6 +847,23 @@ assert_doctor_success "$LAST_LOG" broken_fstab
 assert_contains "$LAST_LOG" "FSTAB_ROOT_SOURCE_MISMATCH" broken_fstab
 assert_contains "$LAST_LOG" "Mount layout  | unhealthy" broken_fstab
 
+echo "=== scenario: Doctor-recommended mount repair and automatic recheck ==="
+build_root_image "$ROOT_BROKEN" "$UUID_BROKEN" grub deadbeef-dead-4bad-8bad-deadbeefdead no
+run_qemu_workflow workflow_broken_fstab "$ROOT_BROKEN" "$ESP_GRUB"
+assert_contains "$LAST_LOG" "Doctor Recommended Actions" workflow_broken_fstab
+assert_contains "$LAST_LOG" "Repair mount layout on /dev/vda" workflow_broken_fstab
+assert_contains "$LAST_LOG" "Re-running Doctor to verify the selected target" workflow_broken_fstab
+assert_contains "$LAST_LOG" "__DOCTOR_WORKFLOW_FSTAB_REPAIRED__" workflow_broken_fstab
+assert_contains "$LAST_LOG" "__DOCTOR_WORKFLOW_BACKUP_PRESENT__" workflow_broken_fstab
+assert_not_contains "$LAST_LOG" "__DOCTOR_WORKFLOW_FSTAB_NOT_REPAIRED__" workflow_broken_fstab
+assert_not_contains "$LAST_LOG" "__DOCTOR_WORKFLOW_VERIFY_MOUNT_FAILED__" workflow_broken_fstab
+post_recheck=${LAST_LOG#*Re-running Doctor to verify the selected target...}
+assert_contains "$post_recheck" "Mount layout  | healthy" workflow_broken_fstab
+assert_contains "$post_recheck" "No directly executable Doctor recommendations remain." workflow_broken_fstab
+assert_contains "$LAST_LOG" "__DOCTOR_RC__=0" workflow_broken_fstab
+assert_contains "$LAST_LOG" "__DOCTOR_NO_RESIDUAL_MOUNTS__" workflow_broken_fstab
+assert_contains "$LAST_LOG" "__DOCTOR_NO_RESIDUAL_SESSION_DIRS__" workflow_broken_fstab
+
 echo "=== scenario: filesystem-corruption ==="
 run_qemu filesystem_corruption "$ROOT_CORRUPT" "$ESP_GRUB"
 assert_doctor_success "$LAST_LOG" filesystem_corruption
@@ -809,4 +892,4 @@ assert_contains "$LAST_LOG" "RECOVERY_TRANSACTION_INTERRUPTED" interrupted_trans
 assert_contains "$LAST_LOG" "catos-recovery resume" interrupted_transaction
 assert_contains "$LAST_LOG" "tx-00000000000000000000000000000004" interrupted_transaction
 
-echo "pass: Doctor QEMU acceptance exercised offline and running-root target selection, provider matrix, corruption, fstab failure, ambiguity, recovery, cleanup and no-write hashes"
+echo "pass: Doctor QEMU acceptance exercised read-only diagnosis, typed recommendation execution, automatic recheck, provider matrix, corruption, ambiguity, recovery, cleanup and no-write hashes"

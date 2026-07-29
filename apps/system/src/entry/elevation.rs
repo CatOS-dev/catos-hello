@@ -112,6 +112,23 @@ mod tests {
     }
 
     #[test]
+    fn doctor_workflow_reexec_preserves_internal_continuation() {
+        assert_eq!(
+            reexec_arguments(
+                Path::new("/usr/lib/catos/catos-system"),
+                "doctor",
+                &["--continue-interactive-menu".into(), "workflow".into()],
+            ),
+            [
+                "/usr/lib/catos/catos-system",
+                "doctor",
+                "--continue-interactive-menu",
+                "workflow",
+            ]
+        );
+    }
+
+    #[test]
     fn doctor_reexec_uses_the_aggregate_command_shape() {
         assert_eq!(
             reexec_arguments(Path::new("/usr/lib/catos/catos-system"), "doctor", &[]),

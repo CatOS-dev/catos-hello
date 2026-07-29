@@ -8,6 +8,7 @@ use crate::error::{exit_code, Error};
 
 mod chroot;
 mod elevation;
+mod doctor_workflow;
 mod menu;
 mod pager;
 
@@ -157,6 +158,29 @@ pub fn run(invocation: Invocation, argv: &[String]) -> i32 {
 fn run_context(context: CommandContext, argv: &[String]) -> i32 {
     let invocation = context.role;
 
+    if invocation == Invocation::CatosDoctor {
+        match interactive_menu_action(argv, doctor_workflow::MENU_ACTIONS) {
+            Ok(Some(action)) => {
+                if !menu::is_interactive() {
+                    return usage_error(
+                        context.program,
+                        "the interactive Doctor workflow requires a terminal",
+                        "Run Doctor normally instead of using internal menu arguments.",
+                    );
+                }
+                debug_assert_eq!(action, doctor_workflow::ACTION);
+                return doctor_workflow::run(context);
+            }
+            Ok(None) => {}
+            Err(error) => {
+                return usage_error(
+                    context.program,
+                    &error,
+                    "Run Doctor normally instead of using internal menu arguments.",
+                );
+            }
+        }
+    }
     if invocation == Invocation::CatosRepair {
         match interactive_menu_action(argv, REPAIR_MENU_ACTIONS) {
             Ok(Some(action)) => {
@@ -476,7 +500,7 @@ fn run_system_menu() -> i32 {
         };
         let exit = match selected {
             None => return exit_code::SUCCESS,
-            Some(0) => run_context(CommandContext::aggregate(Invocation::CatosDoctor), &[]),
+            Some(0) => doctor_workflow::run(CommandContext::aggregate(Invocation::CatosDoctor)),
             Some(1) => run_context(CommandContext::aggregate(Invocation::CatosChroot), &[]),
             Some(2) => run_repair_menu(CommandContext::aggregate(Invocation::CatosRepair)),
             Some(3) => run_recovery_menu(CommandContext::aggregate(Invocation::CatosRecovery)),
@@ -1354,7 +1378,7 @@ fn usage_error(program: &str, message: &str, hint: &str) -> i32 {
 /// `catos-system` parser.
 fn invocation_dispatch(context: CommandContext, argv: &[String]) -> i32 {
     match context.role {
-        Invocation::CatosDoctor => run_doctor(context),
+        Invocation::CatosDoctor => doctor_workflow::run_standalone(context),
         Invocation::CatosRepair => run_repair(context, argv),
         Invocation::CatosUpdate => run_update(context, argv),
         Invocation::CatosChroot => run_chroot(context, argv),
@@ -1379,42 +1403,6 @@ fn invocation_dispatch(context: CommandContext, argv: &[String]) -> i32 {
 /// Run the aggregated Doctor diagnosis and render its compact terminal report.
 /// Target health is carried by the report; process failure is reserved for a
 /// diagnosis that could not start or could not clean up its own resources.
-fn run_doctor(context: CommandContext) -> i32 {
-    let report = match crate::doctor::run_doctor() {
-        crate::doctor::DoctorRunOutcome::Completed(report) => report,
-        crate::doctor::DoctorRunOutcome::Declined => return exit_code::SUCCESS,
-    };
-    let exit = crate::output::doctor_exit_code_for(&report);
-    let mut rendered = Vec::new();
-    if let Err(error) = crate::output::render_doctor_human_with_columns(
-        &report,
-        &mut rendered,
-        pager::output_columns(),
-    ) {
-        eprintln!("{}: {error}", context.program);
-        return error.exit_code();
-    }
-    let rendered = match String::from_utf8(rendered) {
-        Ok(rendered) => rendered,
-        Err(error) => {
-            eprintln!("{}: rendered report is not UTF-8: {error}", context.program);
-            return crate::error::exit_code::SERIALIZE_FAILED;
-        }
-    };
-    if let Err(error) = pager::present(&rendered) {
-        eprintln!("{}: stdout write failed: {error}", context.program);
-        return crate::error::exit_code::PROBE_FAILED;
-    }
-    if matches!(
-        report.target.kind,
-        crate::doctor::model::DoctorTargetKind::None
-    ) {
-        crate::error::exit_code::PROBE_FAILED
-    } else {
-        exit
-    }
-}
-
 /// Drive the low-level inspection, storage, and recovery parser.
 /// Used by every invocation that intentionally reuses the full command
 /// surface (`catos-system`, `catos-recovery`, and the argumentless
@@ -2466,6 +2454,14 @@ mod tests {
             )
             .unwrap(),
             Some("menu".to_string())
+        );
+        assert_eq!(
+            interactive_menu_action(
+                &["--continue-interactive-menu".into(), "workflow".into()],
+                doctor_workflow::MENU_ACTIONS,
+            )
+            .unwrap(),
+            Some("workflow".to_string())
         );
         assert!(interactive_menu_action(
             &["--continue-interactive-menu".into(), "invalid".into()],
