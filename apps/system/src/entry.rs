@@ -280,7 +280,10 @@ fn run_context(context: CommandContext, argv: &[String]) -> i32 {
 
     if invocation == Invocation::CatosRecovery
         && argv.first().is_some_and(|command| {
-            matches!(command.as_str(), "plan" | "apply" | "resume" | "revert")
+            matches!(
+                command.as_str(),
+                "plan" | "apply" | "resume" | "revert" | "discard-plan" | "purge"
+            )
         })
         && recovery_write_contract_allows_elevation(argv)
     {

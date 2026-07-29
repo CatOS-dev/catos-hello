@@ -523,6 +523,32 @@ fn direct_write_commands_fail_at_the_privilege_boundary_before_probing() {
     assert_eq!(recovery_code, 4, "stderr={recovery_stderr}");
     assert!(recovery_stdout.is_empty());
     assert!(recovery_stderr.contains("administrator privileges are required"));
+
+    for args in [
+        vec![
+            "discard-plan",
+            "--root-device",
+            "/dev/does-not-exist",
+            "--plan-id",
+            "tx-00000000000000000000000000000004",
+            "--confirm",
+            "v2:unused",
+        ],
+        vec![
+            "purge",
+            "--root-device",
+            "/dev/does-not-exist",
+            "--transaction",
+            "tx-00000000000000000000000000000004",
+            "--confirm",
+            "purge-v1:unused",
+        ],
+    ] {
+        let (_, code, stdout, stderr) = run_via(&recovery, &args);
+        assert_eq!(code, 4, "args={args:?} stderr={stderr}");
+        assert!(stdout.is_empty());
+        assert!(stderr.contains("administrator privileges are required"));
+    }
 }
 
 #[test]
