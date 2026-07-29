@@ -34,19 +34,36 @@ pub fn verify_grub_target(target_root: &Path, kernels: &[Kernel]) -> ProviderVer
 }
 
 fn grub_config_has_bootable_linux_entry(config: &str) -> bool {
-    let mut has_menuentry = false;
+    let mut in_menuentry = false;
     let mut has_linux = false;
     let mut has_initrd = false;
     for line in config.lines() {
-        let mut fields = line.split_whitespace();
-        match fields.next() {
-            Some("menuentry") => has_menuentry = true,
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        if !in_menuentry {
+            if trimmed.split_whitespace().next() == Some("menuentry") && trimmed.ends_with('{') {
+                in_menuentry = true;
+                has_linux = false;
+                has_initrd = false;
+            }
+            continue;
+        }
+        if trimmed == "}" {
+            if has_linux && has_initrd {
+                return true;
+            }
+            in_menuentry = false;
+            continue;
+        }
+        match trimmed.split_whitespace().next() {
             Some("linux" | "linuxefi") => has_linux = true,
             Some("initrd" | "initrdefi") => has_initrd = true,
             _ => {}
         }
     }
-    has_menuentry && has_linux && has_initrd
+    false
 }
 
 pub fn target_provider_assets_present(
@@ -159,4 +176,30 @@ fn target_systemd_boot_entry_present(target_root: &Path, esp: &str, kernels: &[K
                     .is_some_and(|entry| entry.starts_with(&prefix) && entry.ends_with(".conf"))
             })
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::grub_config_has_bootable_linux_entry;
+
+    #[test]
+    fn grub_verification_rejects_commands_split_across_menuentries() {
+        let config = "menuentry 'kernel only' {\n linux /vmlinuz-linux root=UUID=root\n}\nmenuentry 'initrd only' {\n initrd /initramfs-linux.img\n}\n";
+
+        assert!(!grub_config_has_bootable_linux_entry(config));
+    }
+
+    #[test]
+    fn grub_verification_rejects_commands_outside_the_menuentry() {
+        let config = "menuentry 'empty' {\n}\nlinux /vmlinuz-linux root=UUID=root\ninitrd /initramfs-linux.img\n";
+
+        assert!(!grub_config_has_bootable_linux_entry(config));
+    }
+
+    #[test]
+    fn grub_verification_accepts_one_complete_menuentry() {
+        let config = "menuentry 'CatOS' {\n linuxefi /vmlinuz-linux root=UUID=root\n initrdefi /initramfs-linux.img\n}\n";
+
+        assert!(grub_config_has_bootable_linux_entry(config));
+    }
 }
