@@ -1390,6 +1390,19 @@ mod tests {
             "title CatOS\n",
         )
         .unwrap();
+        assert!(!target_provider_assets_present(
+            ProviderId::SystemdBoot,
+            &target_root.path,
+            Some("/boot/efi"),
+            &kernels,
+        ));
+        fs::write(
+            target_root
+                .path
+                .join("boot/efi/loader/entries/machine-id-6.18.0-catos.conf"),
+            "title CatOS\nlinux /machine-id/6.18.0-catos/linux\ninitrd /machine-id/6.18.0-catos/initrd\n",
+        )
+        .unwrap();
         assert!(target_provider_assets_present(
             ProviderId::SystemdBoot,
             &target_root.path,

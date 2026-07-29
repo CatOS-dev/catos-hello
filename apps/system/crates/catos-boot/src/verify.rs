@@ -4,7 +4,7 @@ use std::path::Path;
 
 use crate::diagnose::target::target_regular_file_present;
 use crate::execute::providers::base::ProviderVerificationResult;
-use crate::io::read_target_file;
+use crate::io::{read_target_file, read_target_file_checked};
 use crate::plan::initramfs::Kernel;
 pub fn verify_grub_target(target_root: &Path, kernels: &[Kernel]) -> ProviderVerificationResult {
     use crate::model::BootVerification;
@@ -171,11 +171,44 @@ fn target_systemd_boot_entry_present(target_root: &Path, esp: &str, kernels: &[K
         && kernels.iter().all(|kernel| {
             let prefix = format!("{machine_id}-{}", kernel.version);
             entries.iter().any(|entry| {
-                entry
-                    .to_str()
-                    .is_some_and(|entry| entry.starts_with(&prefix) && entry.ends_with(".conf"))
+                let Some(entry) = entry.to_str() else {
+                    return false;
+                };
+                if !entry.starts_with(&prefix) || !entry.ends_with(".conf") {
+                    return false;
+                }
+                read_target_file_checked(target_root, &format!("{esp}/loader/entries/{entry}"))
+                    .ok()
+                    .flatten()
+                    .is_some_and(|contents| {
+                        systemd_boot_entry_references_assets(
+                            &contents,
+                            &machine_id,
+                            &kernel.version,
+                        )
+                    })
             })
         })
+}
+
+fn systemd_boot_entry_references_assets(contents: &str, machine_id: &str, version: &str) -> bool {
+    let expected_linux = format!("/{machine_id}/{version}/linux");
+    let expected_initrd = format!("/{machine_id}/{version}/initrd");
+    let mut has_linux = false;
+    let mut has_initrd = false;
+    for line in contents.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        let mut fields = trimmed.split_whitespace();
+        match (fields.next(), fields.next()) {
+            (Some("linux"), Some(path)) if path == expected_linux => has_linux = true,
+            (Some("initrd"), Some(path)) if path == expected_initrd => has_initrd = true,
+            _ => {}
+        }
+    }
+    has_linux && has_initrd
 }
 
 #[cfg(test)]
