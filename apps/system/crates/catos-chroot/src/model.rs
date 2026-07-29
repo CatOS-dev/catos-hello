@@ -147,6 +147,7 @@ pub struct ChrootExecutionReport {
     pub outcome: ChrootExecutionOutcome,
     pub cleanup_complete: bool,
     pub failure: Option<String>,
+    pub warnings: Vec<String>,
     pub mounted_paths: Vec<PathBuf>,
     pub residual_paths: Vec<PathBuf>,
 }

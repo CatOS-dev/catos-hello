@@ -123,6 +123,16 @@ dirfd operations, verifies the resulting mount layout, and restores the
 original fstab plus newly-created empty objects when verification fails. It
 never unmounts the running root or a pre-existing mount.
 
+`catos-chroot` is recovery-oriented rather than fail-closed on advisory
+preflight findings. Target-local symbolic links such as
+`/etc/os-release -> ../usr/lib/os-release` and absolute links rooted inside the
+target are resolved inside the selected installation. Invalid secondary fstab
+mount points are skipped with warnings. If final target verification still
+fails, an interactive operator may continue after reviewing the reasons;
+non-interactive rescue workflows can use `--force-unsafe`. Failures that make a
+chroot impossible, such as inability to mount the selected root or runtime
+filesystems, remain errors.
+
 Snapshot recovery mounts the Btrfs top level read-write inside a private mount
 namespace, validates the immutable plan and target identity, performs the root
 exchange, and persists every transaction state. Filesystem repair, mount

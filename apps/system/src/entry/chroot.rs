@@ -4,7 +4,8 @@ use std::io::{self, BufRead, IsTerminal, Write};
 
 use crate::chroot::diagnose::fstab::read_from_device;
 use crate::chroot::execute::{
-    authorize, execute_plan, open_luks, ChrootPrivilegeEvidence, OpenedLuks, SystemChrootEffects,
+    authorize, execute_plan_with_policy, open_luks, ChrootExecutionPolicy, ChrootPrivilegeEvidence,
+    OpenedLuks, SystemChrootEffects,
 };
 use crate::chroot::model::{BlockDevice, ChrootExecutionOutcome, Subvolume};
 use crate::chroot::plan::{build_plan, ChrootPlanInputs, ExtraMountSelection};
@@ -16,6 +17,7 @@ struct ChrootOptions {
     no_auto_mount: bool,
     no_systemd_chroot: bool,
     show_btrfs_dot_snapshots: bool,
+    allow_unsafe: bool,
 }
 
 pub fn run(argv: &[String], program: &str) -> i32 {
@@ -233,10 +235,21 @@ pub fn run(argv: &[String], program: &str) -> i32 {
         }
     };
     let mut effects = SystemChrootEffects;
-    let report = execute_plan(&plan, authorization, session.path(), &mut effects);
+    let report = execute_plan_with_policy(
+        &plan,
+        authorization,
+        session.path(),
+        &mut effects,
+        ChrootExecutionPolicy {
+            allow_unverified: options.allow_unsafe,
+        },
+    );
     let session_cleanup = session.cleanup();
     let luks_cleanup = opened_luks.take().map(OpenedLuks::close).transpose();
 
+    for warning in &report.warnings {
+        eprintln!("{program}: warning: {warning}");
+    }
     if let Some(failure) = &report.failure {
         eprintln!("{program}: {failure}");
     }
@@ -423,6 +436,7 @@ OPTIONS:
     --no-auto-mount            Mount only the selected root filesystem.
     --no-systemd-chroot        Use the offline arch-chroot mode.
     --show-btrfs-dot-snapshots Include historical .snapshots entries.
+    --force-unsafe             Continue after target verification warnings.
     -h, --help                 Show this help message.
     -V, --version              Print the program version.
 
@@ -439,9 +453,10 @@ fn parse_argv(argv: &[String]) -> Result<ChrootOptions, String> {
             "--no-auto-mount" => options.no_auto_mount = true,
             "--no-systemd-chroot" => options.no_systemd_chroot = true,
             "--show-btrfs-dot-snapshots" => options.show_btrfs_dot_snapshots = true,
+            "--force-unsafe" => options.allow_unsafe = true,
             other => {
                 return Err(format!(
-                    "unknown option {other:?}; expected --no-auto-mount, --no-systemd-chroot, --show-btrfs-dot-snapshots"
+                    "unknown option {other:?}; expected --no-auto-mount, --no-systemd-chroot, --show-btrfs-dot-snapshots, --force-unsafe"
                 ))
             }
         }
@@ -482,14 +497,7 @@ fn prompt_select_device(
     let stdout = io::stdout();
     let mut input = stdin.lock();
     let mut output = stdout.lock();
-    prompt_select_device_with(
-        &mut input,
-        &mut output,
-        program,
-        role,
-        devices,
-        allow_skip,
-    )
+    prompt_select_device_with(&mut input, &mut output, program, role, devices, allow_skip)
 }
 
 fn prompt_select_device_with<R: BufRead, W: Write>(
@@ -501,8 +509,11 @@ fn prompt_select_device_with<R: BufRead, W: Write>(
     allow_skip: bool,
 ) -> Result<Option<BlockDevice>, String> {
     if devices.is_empty() {
-        writeln!(output, "{program}: no devices available to pick {role} from")
-            .map_err(prompt_output_error)?;
+        writeln!(
+            output,
+            "{program}: no devices available to pick {role} from"
+        )
+        .map_err(prompt_output_error)?;
         return Ok(None);
     }
     writeln!(output, "\nAvailable devices for {role}:").map_err(prompt_output_error)?;
@@ -635,11 +646,13 @@ mod tests {
             "--no-auto-mount".into(),
             "--no-systemd-chroot".into(),
             "--show-btrfs-dot-snapshots".into(),
+            "--force-unsafe".into(),
         ])
         .unwrap();
         assert!(options.no_auto_mount);
         assert!(options.no_systemd_chroot);
         assert!(options.show_btrfs_dot_snapshots);
+        assert!(options.allow_unsafe);
     }
 
     #[test]
@@ -773,7 +786,10 @@ mod tests {
         )
         .expect("operator cancellation is not a failure");
         assert!(result.is_none());
-        assert!(closed.get(), "unlocked mapper must be closed on cancellation");
+        assert!(
+            closed.get(),
+            "unlocked mapper must be closed on cancellation"
+        );
     }
 
     #[test]
@@ -941,18 +957,14 @@ mod tests {
 
         let mut confirm_input = io::Cursor::new(b"maybe\nyes\n".to_vec());
         let mut output = Vec::new();
-        assert!(
-            prompt_yes_no_with(
-                &mut confirm_input,
-                &mut output,
-                "catos-chroot",
-                "Mount an additional partition?",
-                false,
-            )
-            .unwrap()
-        );
-        assert!(String::from_utf8(output)
-            .unwrap()
-            .contains("enter y or n"));
+        assert!(prompt_yes_no_with(
+            &mut confirm_input,
+            &mut output,
+            "catos-chroot",
+            "Mount an additional partition?",
+            false,
+        )
+        .unwrap());
+        assert!(String::from_utf8(output).unwrap().contains("enter y or n"));
     }
 }

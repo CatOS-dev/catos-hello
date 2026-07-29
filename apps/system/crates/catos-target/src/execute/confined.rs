@@ -30,7 +30,9 @@ use crate::error::FsError;
 const RESOLVE_NO_MAGICLINKS: u64 = 0x02;
 const RESOLVE_NO_SYMLINKS: u64 = 0x04;
 const RESOLVE_BENEATH: u64 = 0x08;
+const RESOLVE_IN_ROOT: u64 = 0x10;
 const CONFINED_RESOLVE: u64 = RESOLVE_BENEATH | RESOLVE_NO_MAGICLINKS | RESOLVE_NO_SYMLINKS;
+const TARGET_SYMLINK_RESOLVE: u64 = RESOLVE_IN_ROOT | RESOLVE_NO_MAGICLINKS;
 const MAX_RECOVERY_FILE_BYTES: u64 = 16 * 1024 * 1024;
 
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -617,6 +619,34 @@ pub fn read_rooted_file(top_level: &Path, rooted_path: &str) -> Result<Vec<u8>, 
     read_rooted_file_with_mode(top_level, rooted_path).map(|(bytes, _)| bytes)
 }
 
+/// Read a regular target file while following ordinary symbolic links inside
+/// the pinned target root. Absolute link targets are interpreted relative to
+/// `top_level`, and `..` cannot escape it. Procfs-style magic links remain
+/// forbidden. This is intended for read-only operating-system identity files
+/// such as `/etc/os-release`; mutation paths must use the strict reader above.
+pub fn read_rooted_file_following_target_symlinks(
+    top_level: &Path,
+    rooted_path: &str,
+) -> Result<Vec<u8>, FsError> {
+    let components = rooted_components(rooted_path)?;
+    let mut relative = PathBuf::new();
+    for component in components {
+        relative.push(component);
+    }
+    let root = open_top_level_directory(top_level)?;
+    let c_path = cstring(relative.as_os_str(), Path::new(rooted_path))?;
+    let how = OpenHow {
+        flags: (libc::O_RDONLY | libc::O_CLOEXEC) as u64,
+        mode: 0,
+        resolve: TARGET_SYMLINK_RESOLVE,
+    };
+    let display = top_level.join(&relative);
+    let fd = openat2_raw(root.as_raw_fd(), &c_path, &how)
+        .map_err(|error| map_path_error(&display, "open rooted target file", error))?;
+    regular_file_mode(fd.as_raw_fd(), &display)?;
+    read_owned_fd(fd, &display)
+}
+
 /// Read a regular file and capture its permission bits from the same opened
 /// file descriptor. This prevents callers from observing contents and mode
 /// from different pathname objects if the leaf is replaced concurrently.
@@ -1069,7 +1099,7 @@ fn io_error(path: &Path, operation: &str, error: std::io::Error) -> FsError {
 }
 
 fn unsafe_path(path: &Path, reason: &str) -> FsError {
-    FsError::OutsideRoot(format!("unsafe recovery path {}: {reason}", path.display()))
+    FsError::OutsideRoot(format!("unsafe target path {}: {reason}", path.display()))
 }
 
 #[cfg(target_env = "gnu")]
@@ -1090,4 +1120,62 @@ fn errno_clear() {
 #[cfg(target_env = "musl")]
 fn errno_get() -> i32 {
     unsafe { *libc::__errno_location() }
+}
+
+#[cfg(test)]
+mod target_symlink_read_tests {
+    use super::*;
+    use std::fs;
+    use std::os::unix::fs::symlink;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+    fn temp_path(label: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "catos-target-symlink-{label}-{}-{}",
+            std::process::id(),
+            SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        ))
+    }
+
+    #[test]
+    fn target_symlink_reader_accepts_relative_and_absolute_os_release_links() {
+        let root = temp_path("root");
+        fs::create_dir_all(root.join("etc")).unwrap();
+        fs::create_dir_all(root.join("usr/lib")).unwrap();
+        fs::write(root.join("usr/lib/os-release"), b"ID=catos\n").unwrap();
+
+        symlink("../usr/lib/os-release", root.join("etc/os-release")).unwrap();
+        assert_eq!(
+            read_rooted_file_following_target_symlinks(&root, "/etc/os-release").unwrap(),
+            b"ID=catos\n"
+        );
+        fs::remove_file(root.join("etc/os-release")).unwrap();
+        symlink("/usr/lib/os-release", root.join("etc/os-release")).unwrap();
+        assert_eq!(
+            read_rooted_file_following_target_symlinks(&root, "/etc/os-release").unwrap(),
+            b"ID=catos\n"
+        );
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn target_symlink_reader_rebases_absolute_links_instead_of_reading_host() {
+        let root = temp_path("escape-root");
+        let host_file = temp_path("host-secret");
+        fs::create_dir_all(root.join("etc")).unwrap();
+        fs::write(&host_file, b"host-secret").unwrap();
+        symlink(&host_file, root.join("etc/os-release")).unwrap();
+
+        assert!(matches!(
+            read_rooted_file_following_target_symlinks(&root, "/etc/os-release"),
+            Err(FsError::NotFound)
+        ));
+        assert_eq!(fs::read(&host_file).unwrap(), b"host-secret");
+
+        fs::remove_dir_all(root).unwrap();
+        fs::remove_file(host_file).unwrap();
+    }
 }

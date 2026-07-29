@@ -4,8 +4,8 @@ use std::path::{Path, PathBuf};
 
 use crate::model::{ChrootMount, ChrootPlan, ChrootVerification};
 use catos_target::execute::confined::{
-    read_rooted_file, rooted_path_kind, rooted_regular_file_mode, rooted_regular_file_size,
-    RootedPathKind,
+    read_rooted_file_following_target_symlinks, rooted_path_kind, rooted_regular_file_mode,
+    rooted_regular_file_size, RootedPathKind,
 };
 use catos_target::model::OsRelease;
 use catos_target::mountinfo::{self, MountInfo};
@@ -15,10 +15,10 @@ pub fn verify_target_root(root: &Path) -> ChrootVerification {
     let mut checks = Vec::new();
     let mut reasons = Vec::new();
 
-    let identity = ["/usr/lib/os-release", "/etc/os-release"]
+    let identity = ["/etc/os-release", "/usr/lib/os-release"]
         .into_iter()
-        .find_map(|path| match rooted_regular_file_size(root, path) {
-            Ok(Some(_)) => match read_rooted_file(root, path) {
+        .find_map(
+            |path| match read_rooted_file_following_target_symlinks(root, path) {
                 Ok(bytes) if !bytes.is_empty() => match std::str::from_utf8(&bytes) {
                     Ok(content) => {
                         let release = OsRelease::parse(content);
@@ -35,17 +35,13 @@ pub fn verify_target_root(root: &Path) -> ChrootVerification {
                     }
                 },
                 Ok(_) => None,
+                Err(FsError::NotFound) => None,
                 Err(error) => {
                     reasons.push(format!("cannot read target {path}: {error}"));
                     None
                 }
             },
-            Ok(None) | Err(FsError::NotFound) => None,
-            Err(error) => {
-                reasons.push(format!("cannot inspect target {path}: {error}"));
-                None
-            }
-        });
+        );
     if let Some(path) = identity {
         checks.push(format!("target CatOS identity: {path}"));
     } else if !reasons.iter().any(|reason| reason.contains("os-release")) {
@@ -392,6 +388,46 @@ mod tests {
         fn drop(&mut self) {
             fs::remove_dir_all(&self.0).unwrap();
         }
+    }
+
+    fn make_valid_shell(root: &TempRoot) {
+        symlink("usr/bin", root.0.join("bin")).unwrap();
+        fs::write(root.0.join("usr/bin/bash"), b"ELF").unwrap();
+        fs::set_permissions(
+            root.0.join("usr/bin/bash"),
+            fs::Permissions::from_mode(0o755),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn relative_etc_os_release_symlink_is_resolved_inside_target_root() {
+        let root = TempRoot::new();
+        make_valid_shell(&root);
+        fs::create_dir_all(root.0.join("etc")).unwrap();
+        symlink("../usr/lib/os-release", root.0.join("etc/os-release")).unwrap();
+
+        let verification = verify_target_root(&root.0);
+        assert!(verification.ready, "reasons={:?}", verification.reasons);
+        assert!(verification
+            .checks
+            .iter()
+            .any(|check| check.contains("/etc/os-release")));
+    }
+
+    #[test]
+    fn absolute_etc_os_release_symlink_is_resolved_inside_target_root() {
+        let root = TempRoot::new();
+        make_valid_shell(&root);
+        fs::create_dir_all(root.0.join("etc")).unwrap();
+        symlink("/usr/lib/os-release", root.0.join("etc/os-release")).unwrap();
+
+        let verification = verify_target_root(&root.0);
+        assert!(verification.ready, "reasons={:?}", verification.reasons);
+        assert!(verification
+            .checks
+            .iter()
+            .any(|check| check.contains("/etc/os-release")));
     }
 
     #[test]

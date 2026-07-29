@@ -1,11 +1,13 @@
 //! Authorised Chroot effects.
 
+use std::io::{BufRead, IsTerminal, Write};
 use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::model::{
     BlockDevice, ChrootExecutionOutcome, ChrootExecutionReport, ChrootPlan, ChrootRuntimeMount,
+    ChrootVerification,
 };
 use crate::verify::verify_assembled_target;
 use catos_mount::execute::syscall::{self, ms_flags};
@@ -54,6 +56,14 @@ pub trait ChrootEffects {
     fn read_mountinfo(&mut self) -> Result<String, String>;
     fn enter(&mut self, root: &Path, use_systemd_chroot: bool) -> Result<(), String>;
     fn unmount(&mut self, target: &Path) -> Result<(), String>;
+    fn confirm_unverified(&mut self, _verification: &ChrootVerification) -> Result<bool, String> {
+        Ok(false)
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ChrootExecutionPolicy {
+    pub allow_unverified: bool,
 }
 
 pub struct SystemChrootEffects;
@@ -99,9 +109,7 @@ fn prepare_mountpoint<'a>(
             let failure = format!("cannot prepare target mount point {mount_point}: {error}");
             return match rollback_created_directories(session_root, &created_directories) {
                 Ok(()) => Err(failure),
-                Err(cleanup) => Err(format!(
-                    "{failure}; mount-point rollback failed: {cleanup}"
-                )),
+                Err(cleanup) => Err(format!("{failure}; mount-point rollback failed: {cleanup}")),
             };
         }
     };
@@ -152,10 +160,14 @@ fn missing_rooted_directories(
                 return Err(format!("mount point component {current} is a symlink"));
             }
             Ok(Some(RootedPathKind::RegularFile | RootedPathKind::Other)) => {
-                return Err(format!("mount point component {current} is not a directory"));
+                return Err(format!(
+                    "mount point component {current} is not a directory"
+                ));
             }
             Err(error) => {
-                return Err(format!("cannot inspect mount point component {current}: {error}"));
+                return Err(format!(
+                    "cannot inspect mount point component {current}: {error}"
+                ));
             }
         }
     }
@@ -241,9 +253,9 @@ impl ChrootEffects for SystemChrootEffects {
         };
         match result {
             Ok(()) => Ok(()),
-            Err(error) => Err(prepared.fail(format!(
-                "runtime mount {mount_point} failed: {error}"
-            ))),
+            Err(error) => {
+                Err(prepared.fail(format!("runtime mount {mount_point} failed: {error}")))
+            }
         }
     }
 
@@ -287,15 +299,65 @@ impl ChrootEffects for SystemChrootEffects {
             ))
         }
     }
+
+    fn confirm_unverified(&mut self, verification: &ChrootVerification) -> Result<bool, String> {
+        eprintln!("catos-chroot: warning: target verification did not pass:");
+        for reason in &verification.reasons {
+            eprintln!("  - {reason}");
+        }
+        if !std::io::stdin().is_terminal() {
+            return Ok(false);
+        }
+        let stdin = std::io::stdin();
+        let stdout = std::io::stdout();
+        let mut input = stdin.lock();
+        let mut output = stdout.lock();
+        loop {
+            write!(output, "Enter the chroot anyway? [y/N] ")
+                .map_err(|error| format!("cannot write continuation prompt: {error}"))?;
+            output
+                .flush()
+                .map_err(|error| format!("cannot flush continuation prompt: {error}"))?;
+            let mut line = String::new();
+            let read = input
+                .read_line(&mut line)
+                .map_err(|error| format!("cannot read continuation response: {error}"))?;
+            if read == 0 {
+                return Ok(false);
+            }
+            match line.trim().to_ascii_lowercase().as_str() {
+                "y" | "yes" => return Ok(true),
+                "" | "n" | "no" => return Ok(false),
+                _ => eprintln!("catos-chroot: enter y or n"),
+            }
+        }
+    }
 }
 
 pub fn execute_plan<E: ChrootEffects>(
     plan: &ChrootPlan,
-    _authorization: ChrootAuthorization,
+    authorization: ChrootAuthorization,
     session_root: &Path,
     effects: &mut E,
 ) -> ChrootExecutionReport {
+    execute_plan_with_policy(
+        plan,
+        authorization,
+        session_root,
+        effects,
+        ChrootExecutionPolicy::default(),
+    )
+}
+
+pub fn execute_plan_with_policy<E: ChrootEffects>(
+    plan: &ChrootPlan,
+    _authorization: ChrootAuthorization,
+    session_root: &Path,
+    effects: &mut E,
+    policy: ChrootExecutionPolicy,
+) -> ChrootExecutionReport {
     let mut mounted_paths = Vec::new();
+    let mut warnings = Vec::new();
 
     if let Err(error) = effects.mount(
         &plan.root.device,
@@ -307,6 +369,7 @@ pub fn execute_plan<E: ChrootEffects>(
             outcome: ChrootExecutionOutcome::MountFailed,
             cleanup_complete: true,
             failure: Some(error),
+            warnings,
             mounted_paths,
             residual_paths: Vec::new(),
         };
@@ -325,6 +388,7 @@ pub fn execute_plan<E: ChrootEffects>(
                 ChrootExecutionOutcome::MountFailed,
                 Some(error),
                 mounted_paths,
+                warnings,
                 effects,
             );
         }
@@ -338,6 +402,7 @@ pub fn execute_plan<E: ChrootEffects>(
                 ChrootExecutionOutcome::MountFailed,
                 Some(error),
                 mounted_paths,
+                warnings,
                 effects,
             );
         }
@@ -351,18 +416,42 @@ pub fn execute_plan<E: ChrootEffects>(
                 ChrootExecutionOutcome::VerificationFailed,
                 Some(error),
                 mounted_paths,
+                warnings,
                 effects,
             );
         }
     };
     let verification = verify_assembled_target(session_root, plan, &mountinfo);
     if !verification.ready {
-        return finish_with_cleanup(
-            ChrootExecutionOutcome::VerificationFailed,
-            Some(verification.reasons.join("; ")),
-            mounted_paths,
-            effects,
-        );
+        let continue_anyway = if policy.allow_unverified {
+            true
+        } else {
+            match effects.confirm_unverified(&verification) {
+                Ok(confirmed) => confirmed,
+                Err(error) => {
+                    return finish_with_cleanup(
+                        ChrootExecutionOutcome::VerificationFailed,
+                        Some(error),
+                        mounted_paths,
+                        warnings,
+                        effects,
+                    );
+                }
+            }
+        };
+        if !continue_anyway {
+            return finish_with_cleanup(
+                ChrootExecutionOutcome::VerificationFailed,
+                Some(verification.reasons.join("; ")),
+                mounted_paths,
+                warnings,
+                effects,
+            );
+        }
+        warnings.push(format!(
+            "entered chroot despite failed verification: {}",
+            verification.reasons.join("; ")
+        ));
     }
 
     match effects.enter(session_root, plan.use_systemd_chroot) {
@@ -370,12 +459,14 @@ pub fn execute_plan<E: ChrootEffects>(
             ChrootExecutionOutcome::Entered,
             None,
             mounted_paths,
+            warnings,
             effects,
         ),
         Err(error) => finish_with_cleanup(
             ChrootExecutionOutcome::ShellFailed,
             Some(error),
             mounted_paths,
+            warnings,
             effects,
         ),
     }
@@ -385,6 +476,7 @@ fn finish_with_cleanup<E: ChrootEffects>(
     outcome: ChrootExecutionOutcome,
     failure: Option<String>,
     mounted_paths: Vec<PathBuf>,
+    warnings: Vec<String>,
     effects: &mut E,
 ) -> ChrootExecutionReport {
     let mut residual_paths = Vec::new();
@@ -402,6 +494,7 @@ fn finish_with_cleanup<E: ChrootEffects>(
             outcome,
             cleanup_complete: true,
             failure,
+            warnings,
             mounted_paths,
             residual_paths,
         }
@@ -422,6 +515,7 @@ fn finish_with_cleanup<E: ChrootEffects>(
                 Some(failure) => format!("{failure}; {cleanup_failure}"),
                 None => cleanup_failure,
             }),
+            warnings,
             mounted_paths,
             residual_paths,
         }
@@ -481,7 +575,6 @@ pub fn open_luks(
     })
 }
 
-
 #[cfg(test)]
 mod mountpoint_tests {
     use super::*;
@@ -506,11 +599,8 @@ mod mountpoint_tests {
         std::fs::create_dir(root.join("boot")).unwrap();
         let created = missing_rooted_directories(&root, "/boot/efi/vendor").unwrap();
         assert_eq!(created, vec!["/boot/efi", "/boot/efi/vendor"]);
-        catos_target::execute::confined::create_rooted_directory(
-            &root,
-            "/boot/efi/vendor",
-        )
-        .unwrap();
+        catos_target::execute::confined::create_rooted_directory(&root, "/boot/efi/vendor")
+            .unwrap();
 
         rollback_created_directories(&root, &created).unwrap();
 
@@ -525,11 +615,8 @@ mod mountpoint_tests {
         catos_target::execute::confined::create_rooted_directory(&root, "/boot/efi").unwrap();
         std::fs::write(root.join("boot/efi/keep"), b"data").unwrap();
 
-        let error = rollback_created_directories(
-            &root,
-            &["/boot".into(), "/boot/efi".into()],
-        )
-        .unwrap_err();
+        let error =
+            rollback_created_directories(&root, &["/boot".into(), "/boot/efi".into()]).unwrap_err();
         assert!(error.contains("refusing to remove non-empty"));
         assert!(root.join("boot/efi/keep").is_file());
         std::fs::remove_dir_all(root).unwrap();

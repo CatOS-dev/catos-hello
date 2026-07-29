@@ -13,7 +13,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use catos_system::chroot::diagnose::block::parse_lsblk_json;
 use catos_system::chroot::execute::{
-    authorize, execute_plan, ChrootEffects, ChrootPrivilegeEvidence,
+    authorize, execute_plan, execute_plan_with_policy, ChrootEffects, ChrootExecutionPolicy,
+    ChrootPrivilegeEvidence,
 };
 use catos_system::chroot::model::{
     BlockDevice, ChrootExecutionOutcome, ChrootMountKind, ChrootPlan, ChrootRuntimeMount,
@@ -215,6 +216,34 @@ fn chroot_plan_is_pure_and_filters_non_mountable_fstab_entries() {
     assert_eq!(plan.mounts[0].device.name, boot.name);
     assert_eq!(plan.mounts[0].mount_point, "/boot");
     assert!(plan.warnings.is_empty());
+}
+
+#[test]
+fn chroot_plan_skips_unsafe_fstab_mountpoint_and_keeps_rescue_plan_usable() {
+    let root = device("/dev/vda2", "ext4", "root");
+    let data = device("/dev/vda3", "ext4", "data");
+    let fstab = [FsTabEntry {
+        fs_spec: "UUID=data".into(),
+        mountpoint: "/var/../../host".into(),
+        vfs_type: "ext4".into(),
+        mount_options: vec!["defaults".into()],
+    }];
+
+    let devices = [root.clone(), data];
+    let plan = build_plan(ChrootPlanInputs {
+        root_device: &root,
+        root_subvolume: None,
+        fstab: &fstab,
+        devices: &devices,
+        extra_mounts: &[],
+        use_systemd_chroot: true,
+    })
+    .unwrap();
+
+    assert!(plan.mounts.is_empty());
+    assert!(plan.warnings.iter().any(|warning| {
+        warning.contains("was skipped") && warning.contains("unsafe mount point")
+    }));
 }
 
 #[test]
@@ -928,6 +957,7 @@ struct RecordedEffects {
     fail_enter: bool,
     fail_unmount_paths: Vec<PathBuf>,
     mountinfo: Option<String>,
+    confirm_unverified: Option<bool>,
 }
 
 impl RecordedEffects {
@@ -1003,6 +1033,19 @@ impl ChrootEffects for RecordedEffects {
             Err(format!("synthetic cleanup failure at {}", target.display()))
         } else {
             Ok(())
+        }
+    }
+
+    fn confirm_unverified(
+        &mut self,
+        _verification: &catos_system::chroot::model::ChrootVerification,
+    ) -> Result<bool, String> {
+        match self.confirm_unverified {
+            Some(confirmed) => {
+                self.record("confirm-unverified".into());
+                Ok(confirmed)
+            }
+            None => Ok(false),
         }
     }
 }
@@ -1265,6 +1308,91 @@ fn every_runtime_mount_failure_cleans_only_completed_resources_in_reverse_order(
         effects.assert_consumed();
         let _ = fs::remove_dir_all(session_root);
     }
+}
+
+#[test]
+fn operator_can_continue_after_failed_final_verification() {
+    let root_device = device("/dev/vda2", "ext4", "root");
+    let plan = build_plan(ChrootPlanInputs {
+        root_device: &root_device,
+        root_subvolume: None,
+        fstab: &[],
+        devices: std::slice::from_ref(&root_device),
+        extra_mounts: &[],
+        use_systemd_chroot: true,
+    })
+    .unwrap();
+    let authorization = authorize(ChrootPrivilegeEvidence::EffectiveUid(0)).unwrap();
+    let session_root = scratch("continue-unverified");
+    write_valid_arch_chroot_shell(&session_root);
+    let mountinfo = mountinfo_for_plan(&session_root, &plan);
+    let mut expected_calls = successful_execution_calls(&plan, &session_root);
+    let mountinfo_index = expected_calls
+        .iter()
+        .position(|call| call == "mountinfo")
+        .unwrap();
+    expected_calls.insert(mountinfo_index + 1, "confirm-unverified".into());
+    let mut effects = RecordedEffects {
+        expected_calls,
+        mountinfo: Some(mountinfo),
+        confirm_unverified: Some(true),
+        ..RecordedEffects::default()
+    };
+
+    let report = execute_plan(&plan, authorization, &session_root, &mut effects);
+
+    assert_eq!(report.outcome, ChrootExecutionOutcome::Entered);
+    assert!(report
+        .warnings
+        .iter()
+        .any(|warning| warning.contains("despite failed verification")));
+    effects.assert_consumed();
+    let _ = fs::remove_dir_all(session_root);
+}
+
+#[test]
+fn force_unsafe_continues_without_confirmation_callback() {
+    let root_device = device("/dev/vda2", "ext4", "root");
+    let plan = build_plan(ChrootPlanInputs {
+        root_device: &root_device,
+        root_subvolume: None,
+        fstab: &[],
+        devices: std::slice::from_ref(&root_device),
+        extra_mounts: &[],
+        use_systemd_chroot: true,
+    })
+    .unwrap();
+    let authorization = authorize(ChrootPrivilegeEvidence::EffectiveUid(0)).unwrap();
+    let session_root = scratch("force-unverified");
+    write_valid_arch_chroot_shell(&session_root);
+    let mountinfo = mountinfo_for_plan(&session_root, &plan);
+    let mut effects = RecordedEffects {
+        expected_calls: successful_execution_calls(&plan, &session_root),
+        mountinfo: Some(mountinfo),
+        ..RecordedEffects::default()
+    };
+
+    let report = execute_plan_with_policy(
+        &plan,
+        authorization,
+        &session_root,
+        &mut effects,
+        ChrootExecutionPolicy {
+            allow_unverified: true,
+        },
+    );
+
+    assert_eq!(report.outcome, ChrootExecutionOutcome::Entered);
+    assert!(report
+        .warnings
+        .iter()
+        .any(|warning| warning.contains("despite failed verification")));
+    assert!(!effects
+        .calls
+        .iter()
+        .any(|call| call == "confirm-unverified"));
+    effects.assert_consumed();
+    let _ = fs::remove_dir_all(session_root);
 }
 
 #[test]

@@ -117,18 +117,19 @@ assert_not_contains() {
 ROOT_UUID=aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee
 TREE=$WORKDIR/tree
 mkdir -p \
-    "$TREE/@/etc" "$TREE/@/usr/bin" "$TREE/@/home" "$TREE/@/root" \
+    "$TREE/@/etc" "$TREE/@/usr/bin" "$TREE/@/usr/lib" "$TREE/@/home" "$TREE/@/root" \
     "$TREE/@/srv" "$TREE/@/var/cache" "$TREE/@/var/tmp" \
     "$TREE/@/var/log" "$TREE/@/.snapshots" "$TREE/@/proc" \
     "$TREE/@/sys" "$TREE/@/dev/pts" "$TREE/@/dev/shm" "$TREE/@/run" "$TREE/@/tmp" \
     "$TREE/@home" "$TREE/@root" "$TREE/@srv" "$TREE/@cache" \
     "$TREE/@tmp" "$TREE/@log" "$TREE/@snapshots" \
-    "$TREE/@snapshots/1/snapshot/etc"
-cat > "$TREE/@/etc/os-release" <<'OS_RELEASE'
+    "$TREE/@snapshots/1/snapshot/etc" "$TREE/@snapshots/1/snapshot/usr/lib"
+cat > "$TREE/@/usr/lib/os-release" <<'OS_RELEASE'
 NAME="CatOS"
 ID=catos
 PRETTY_NAME="CatOS Chroot QEMU Fixture"
 OS_RELEASE
+ln -s ../usr/lib/os-release "$TREE/@/etc/os-release"
 cat > "$TREE/@/etc/fstab" <<FSTAB
 UUID=$ROOT_UUID / btrfs defaults,subvol=/@ 0 0
 UUID=$ROOT_UUID /home btrfs defaults,subvol=/@home 0 0
@@ -146,11 +147,12 @@ printf 'cache-subvolume\n' > "$TREE/@cache/.catos-cache-marker"
 printf 'tmp-subvolume\n' > "$TREE/@tmp/.catos-tmp-marker"
 printf 'log-subvolume\n' > "$TREE/@log/.catos-log-marker"
 printf 'snapshots-subvolume\n' > "$TREE/@snapshots/.catos-snapshots-marker"
-cat > "$TREE/@snapshots/1/snapshot/etc/os-release" <<'OS_RELEASE'
+cat > "$TREE/@snapshots/1/snapshot/usr/lib/os-release" <<'OS_RELEASE'
 NAME="CatOS"
 ID=catos
 PRETTY_NAME="CatOS Historical Snapshot"
 OS_RELEASE
+ln -s ../usr/lib/os-release "$TREE/@snapshots/1/snapshot/etc/os-release"
 cat > "$TREE/@snapshots/1/snapshot/etc/fstab" <<FSTAB
 UUID=$ROOT_UUID / btrfs defaults,subvol=/@snapshots/1/snapshot 0 0
 FSTAB

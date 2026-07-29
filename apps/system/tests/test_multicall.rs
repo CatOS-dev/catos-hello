@@ -437,11 +437,7 @@ fn role_menus_without_a_tty_fail_instead_of_reporting_success() {
 #[test]
 fn doctor_internal_workflow_requires_a_terminal() {
     let output = Command::new(bin_path())
-        .args([
-            "doctor",
-            "--continue-interactive-menu",
-            "workflow",
-        ])
+        .args(["doctor", "--continue-interactive-menu", "workflow"])
         .output()
         .expect("run Doctor workflow without a terminal");
     assert_eq!(output.status.code(), Some(2));
@@ -1038,6 +1034,7 @@ fn chroot_help_lists_documented_flags() {
         "--no-auto-mount",
         "--no-systemd-chroot",
         "--show-btrfs-dot-snapshots",
+        "--force-unsafe",
     ] {
         assert!(
             stdout.contains(flag),

@@ -142,7 +142,13 @@ pub fn build_plan(inputs: ChrootPlanInputs<'_>) -> Result<ChrootPlan, ChrootPlan
             continue;
         }
 
-        validate_mount_point(&entry.mountpoint)?;
+        if let Err(error) = validate_mount_point(&entry.mountpoint) {
+            warnings.push(format!(
+                "fstab entry {} at {} was skipped: {error}",
+                entry.fs_spec, entry.mountpoint
+            ));
+            continue;
+        }
         let device = match resolve_device(&entry.fs_spec, inputs.devices) {
             Ok(device) => device,
             Err(error) if entry.mount_options.iter().any(|option| option == "nofail") => {
