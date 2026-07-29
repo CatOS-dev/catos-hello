@@ -8,6 +8,7 @@ use std::io::Write;
 use crate::error::Error;
 use crate::recovery::model::{RecoveryInspectReport, RecoveryListReport, RecoveryStatusReport};
 use crate::recovery::RecoveryOutcome;
+use crate::selection_ui::terminal_text;
 use crate::snapshot::model::{RecoveryPlan, SnapshotError, TransactionRecord};
 
 pub fn render_recovery_json(
@@ -159,10 +160,10 @@ pub fn render_recovery_human<W: Write>(
             writeln!(out, "  final state      : {:?}", final_state)?;
             writeln!(out, "  cleanup          : clean={}", cleanup.all_clean)?;
             for entry in &cleanup.unmounted {
-                writeln!(out, "    unmounted: {entry}")?;
+                writeln!(out, "    unmounted: {}", terminal_text(entry))?;
             }
             for entry in &cleanup.residual {
-                writeln!(out, "    residual: {entry}")?;
+                writeln!(out, "    residual: {}", terminal_text(entry))?;
             }
             Ok(())
         }
@@ -176,15 +177,15 @@ pub fn render_recovery_human<W: Write>(
 fn render_list<W: Write>(out: &mut W, report: &RecoveryListReport) -> std::io::Result<()> {
     writeln!(out, "Recovery list")?;
     if let Some(device) = &report.source_device {
-        writeln!(out, "  source device    : {device}")?;
+        writeln!(out, "  source device    : {}", terminal_text(device))?;
     }
     if let Some(fsid) = &report.source_filesystem_fsid {
-        writeln!(out, "  source FSID      : {fsid}")?;
+        writeln!(out, "  source FSID      : {}", terminal_text(fsid))?;
     }
     if let Some(cleanup) = &report.mount_cleanup {
         writeln!(out, "  mount cleanup    : clean={}", cleanup.all_clean)?;
         for residual in &cleanup.residual {
-            writeln!(out, "    residual: {residual}")?;
+            writeln!(out, "    residual: {}", terminal_text(residual))?;
         }
     }
     writeln!(out, "  filesystems      : {}", report.filesystems.len())?;
@@ -197,7 +198,10 @@ fn render_list<W: Write>(out: &mut W, report: &RecoveryListReport) -> std::io::R
         writeln!(
             out,
             "    {} id={} gen={} ro={}",
-            snapshot.path, snapshot.subvolume_id, snapshot.generation, snapshot.read_only
+            terminal_text(&snapshot.path),
+            snapshot.subvolume_id,
+            snapshot.generation,
+            snapshot.read_only
         )?;
     }
     writeln!(out, "  transactions     : {}", report.transactions.len())?;
@@ -205,7 +209,9 @@ fn render_list<W: Write>(out: &mut W, report: &RecoveryListReport) -> std::io::R
         writeln!(
             out,
             "    {} state={:?} plan={}",
-            transaction.transaction_id, transaction.state, transaction.plan_id
+            terminal_text(&transaction.transaction_id),
+            transaction.state,
+            terminal_text(&transaction.plan_id)
         )?;
     }
     render_warnings(out, &report.warnings)
@@ -217,12 +223,14 @@ fn render_inspect<W: Write>(out: &mut W, report: &RecoveryInspectReport) -> std:
     writeln!(
         out,
         "  current root     : {} id={} gen={}",
-        report.current_root.path, report.current_root.subvolume_id, report.current_root.generation
+        terminal_text(&report.current_root.path),
+        report.current_root.subvolume_id,
+        report.current_root.generation
     )?;
     writeln!(
         out,
         "  source snapshot  : {} id={} gen={} ro={}",
-        report.source_snapshot.path,
+        terminal_text(&report.source_snapshot.path),
         report.source_snapshot.subvolume_id,
         report.source_snapshot.generation,
         report.source_snapshot.read_only
@@ -238,38 +246,56 @@ fn render_inspect<W: Write>(out: &mut W, report: &RecoveryInspectReport) -> std:
 
 fn render_plan<W: Write>(out: &mut W, plan: &RecoveryPlan) -> std::io::Result<()> {
     writeln!(out, "Recovery plan")?;
-    writeln!(out, "  plan id          : {}", plan.plan_id)?;
+    writeln!(out, "  plan id          : {}", terminal_text(&plan.plan_id))?;
     writeln!(out, "  generated        : unix {}", plan.generated_at_unix)?;
-    writeln!(out, "  filesystem       : fsid={}", plan.filesystem.fsid)?;
+    writeln!(
+        out,
+        "  filesystem       : fsid={}",
+        terminal_text(&plan.filesystem.fsid)
+    )?;
     writeln!(
         out,
         "  current root     : {} id={} gen={}",
-        plan.current_root.path, plan.current_root.subvolume_id, plan.current_root.generation
+        terminal_text(&plan.current_root.path),
+        plan.current_root.subvolume_id,
+        plan.current_root.generation
     )?;
     writeln!(
         out,
         "  source snapshot  : {} id={} gen={} ro={}",
-        plan.source_snapshot.path,
+        terminal_text(&plan.source_snapshot.path),
         plan.source_snapshot.subvolume_id,
         plan.source_snapshot.generation,
         plan.source_snapshot.read_only
     )?;
-    writeln!(out, "  backup path      : {}", plan.backup_root_path)?;
-    writeln!(out, "  staging path     : {}", plan.staging_root_path)?;
+    writeln!(
+        out,
+        "  backup path      : {}",
+        terminal_text(&plan.backup_root_path)
+    )?;
+    writeln!(
+        out,
+        "  staging path     : {}",
+        terminal_text(&plan.staging_root_path)
+    )?;
     render_boot_consistency(out, &plan.boot_consistency)?;
     writeln!(out, "  predicted steps  :")?;
     for step in &plan.predicted_steps {
-        writeln!(out, "    - {step}")?;
+        writeln!(out, "    - {}", terminal_text(step))?;
     }
     writeln!(out, "  refusal conditions:")?;
     for condition in &plan.refusal_conditions {
-        writeln!(out, "    * {condition}")?;
+        writeln!(out, "    * {}", terminal_text(condition))?;
     }
     writeln!(out, "  risks / warnings :")?;
     for risk in &plan.risks_and_warnings {
-        writeln!(out, "    ! {risk}")?;
+        writeln!(out, "    ! {}", terminal_text(risk))?;
     }
-    writeln!(out, "  confirmation     : {}", plan.confirmation_token)?;
+    writeln!(
+        out,
+        "  confirmation     : {}",
+        terminal_text(&plan.confirmation_token)
+    )?;
     Ok(())
 }
 
@@ -287,14 +313,18 @@ fn render_boot_consistency<W: Write>(
         report.external_esp
     )?;
     for reason in &report.reasons {
-        writeln!(out, "    - {reason}")?;
+        writeln!(out, "    - {}", terminal_text(reason))?;
     }
     Ok(())
 }
 
 fn render_record<W: Write>(out: &mut W, record: &TransactionRecord) -> std::io::Result<()> {
     writeln!(out, "Transaction")?;
-    writeln!(out, "  transaction id   : {}", record.transaction_id)?;
+    writeln!(
+        out,
+        "  transaction id   : {}",
+        terminal_text(&record.transaction_id)
+    )?;
     writeln!(out, "  state            : {:?}", record.state)?;
     writeln!(out, "  created          : unix {}", record.created_at_unix)?;
     writeln!(
@@ -307,30 +337,36 @@ fn render_record<W: Write>(out: &mut W, record: &TransactionRecord) -> std::io::
         writeln!(
             out,
             "    [{:?}] unix {} {}",
-            step.state, step.completed_at_unix, step.description
+            step.state,
+            step.completed_at_unix,
+            terminal_text(&step.description)
         )?;
     }
     if let Some(error) = &record.last_error {
         writeln!(out, "  last error       :")?;
         writeln!(out, "    kind   : {}", error.kind.code())?;
-        writeln!(out, "    message: {}", error.message)?;
+        writeln!(out, "    message: {}", terminal_text(&error.message))?;
     }
     Ok(())
 }
 
 fn render_status<W: Write>(out: &mut W, report: &RecoveryStatusReport) -> std::io::Result<()> {
     writeln!(out, "Recovery status")?;
-    writeln!(out, "  transaction id   : {}", report.transaction_id)?;
+    writeln!(
+        out,
+        "  transaction id   : {}",
+        terminal_text(&report.transaction_id)
+    )?;
     writeln!(out, "  reconciled state : {:?}", report.reconciled_state)?;
     writeln!(out, "  recommendation   : {:?}", report.recommendation)?;
     if let Some(cleanup) = &report.mount_cleanup {
         writeln!(out, "  mount cleanup    : clean={}", cleanup.all_clean)?;
         for residual in &cleanup.residual {
-            writeln!(out, "    residual: {residual}")?;
+            writeln!(out, "    residual: {}", terminal_text(residual))?;
         }
     }
     if let Some(token) = &report.revert_confirmation_token {
-        writeln!(out, "  revert confirm   : {token}")?;
+        writeln!(out, "  revert confirm   : {}", terminal_text(token))?;
     }
     writeln!(
         out,
@@ -357,9 +393,17 @@ fn render_status<W: Write>(out: &mut W, report: &RecoveryStatusReport) -> std::i
 fn render_error<W: Write>(out: &mut W, error: &SnapshotError) -> std::io::Result<()> {
     writeln!(out, "Recovery error")?;
     writeln!(out, "  kind             : {}", error.kind.code())?;
-    writeln!(out, "  message          : {}", error.message)?;
+    writeln!(
+        out,
+        "  message          : {}",
+        terminal_text(&error.message)
+    )?;
     if let Some(transaction_id) = &error.transaction_id {
-        writeln!(out, "  transaction id   : {transaction_id}")?;
+        writeln!(
+            out,
+            "  transaction id   : {}",
+            terminal_text(transaction_id)
+        )?;
     }
     if let Some(state) = error.current_state {
         writeln!(out, "  current state    : {:?}", state)?;
@@ -383,7 +427,12 @@ fn render_warnings<W: Write>(
     }
     writeln!(out, "Warnings")?;
     for w in warnings {
-        writeln!(out, "  [{}] {}", w.code, w.message)?;
+        writeln!(
+            out,
+            "  [{}] {}",
+            terminal_text(&w.code),
+            terminal_text(&w.message)
+        )?;
     }
     Ok(())
 }
@@ -505,6 +554,60 @@ mod tests {
         assert!(s.contains("tx-1"));
         assert!(s.contains("boot consistency"));
         assert!(s.contains("Unknown"));
+    }
+
+    #[test]
+    fn human_renderers_escape_untrusted_terminal_text() {
+        let mut plan = sample_plan();
+        plan.source_snapshot.path = "/@snapshots/1\nspoof\u{1b}[2J".into();
+        plan.risks_and_warnings = vec!["review\rstate\u{202e}txt".into()];
+        let mut output = Vec::new();
+        render_recovery_human(&RecoveryOutcome::Plan(plan), &mut output).unwrap();
+
+        let mut error = SnapshotError::new(
+            crate::snapshot::model::SnapshotErrorKind::StateRecordCorrupt,
+            "bad record\nspoof\u{1b}[2J",
+        );
+        error.transaction_id = Some("tx\tspoof".into());
+        render_error(&mut output, &error).unwrap();
+        render_warnings(
+            &mut output,
+            &[crate::target::model::Warning::new(
+                "WARN\u{1b}",
+                "warning\nspoof\u{2066}",
+            )],
+        )
+        .unwrap();
+
+        let rendered = String::from_utf8(output).unwrap();
+        assert!(!rendered.contains('\u{1b}'));
+        assert!(!rendered.contains('\u{202e}'));
+        assert!(!rendered.contains('\u{2066}'));
+        assert!(rendered.contains("/@snapshots/1\\nspoof\\u{1b}[2J"));
+        assert!(rendered.contains("review\\rstate\\u{202e}txt"));
+        assert!(rendered.contains("bad record\\nspoof\\u{1b}[2J"));
+        assert!(rendered.contains("tx\\tspoof"));
+        assert!(rendered.contains("[WARN\\u{1b}] warning\\nspoof\\u{2066}"));
+    }
+
+    #[test]
+    fn json_preserves_untrusted_values_for_machine_consumers() {
+        let mut plan = sample_plan();
+        let raw_path = "/@snapshots/1\nspoof\u{1b}[2J";
+        let raw_risk = "review\rstate\u{202e}txt";
+        plan.source_snapshot.path = raw_path.into();
+        plan.risks_and_warnings = vec![raw_risk.into()];
+
+        let json = render_recovery_json(
+            &RecoveryOutcome::Plan(plan),
+            "catos-system",
+            std::path::Path::new("/"),
+        )
+        .unwrap();
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(value["payload"]["source_snapshot"]["path"], raw_path);
+        assert_eq!(value["payload"]["risks_and_warnings"][0], raw_risk);
     }
 
     #[test]
