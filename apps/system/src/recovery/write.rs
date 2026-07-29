@@ -16,10 +16,9 @@ use crate::snapshot::model::{
     BtrfsFilesystemIdentity, CleanupSummary, SnapshotError, SnapshotErrorKind, TransactionRecord,
     TransactionState,
 };
-use crate::snapshot::store;
 use crate::snapshot::verify::require_boot_consistency;
 
-use super::read::probe_existing_transaction_readonly;
+use super::read::{load_persisted_plan_readonly, probe_existing_transaction_readonly};
 use super::{ensure_cli_root_matches_plan, require_root, require_transaction_id};
 use crate::snapshot::diagnose::enumerate::probe_target_readonly;
 
@@ -42,13 +41,6 @@ pub(super) fn run_apply(
             "apply requires --confirm <token>",
         )
     })?;
-    let plan_file = args.plan_file.as_deref().ok_or_else(|| {
-        SnapshotError::new(
-            SnapshotErrorKind::TransactionNotFound,
-            "apply requires --plan-file <path>",
-        )
-    })?;
-
     // CLI-contract check FIRST: --esp-device is rejected before any
     // root check, plan load, or mount. A wrapper script that learned
     // the flag from `target plan` must learn it is unsupported
@@ -58,7 +50,7 @@ pub(super) fn run_apply(
 
     require_root()?;
 
-    let plan = store::load_plan(plan_file)?;
+    let plan = load_persisted_plan_readonly(&selection.root_device, plan_id_arg)?;
     crate::snapshot::verify::validate_plan_shape(&plan)?;
     crate::snapshot::verify::verify_confirmation_token(&plan, plan_id_arg, confirm)?;
 

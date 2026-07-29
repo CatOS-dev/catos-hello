@@ -269,9 +269,9 @@ fn run_context(context: CommandContext, argv: &[String]) -> i32 {
     }
 
     if invocation == Invocation::CatosRecovery
-        && argv
-            .first()
-            .is_some_and(|command| matches!(command.as_str(), "apply" | "resume" | "revert"))
+        && argv.first().is_some_and(|command| {
+            matches!(command.as_str(), "plan" | "apply" | "resume" | "revert")
+        })
         && recovery_write_contract_allows_elevation(argv)
     {
         if let Some(exit) = elevation::require_root_or_reexec("recovery", argv, context.program) {
@@ -391,7 +391,6 @@ fn is_legacy_low_level_option(argument: &str) -> bool {
             | "--esp-device"
             | "--snapshot-subvolume"
             | "--plan-id"
-            | "--plan-file"
             | "--confirm"
             | "--transaction"
     ) || [
@@ -401,7 +400,6 @@ fn is_legacy_low_level_option(argument: &str) -> bool {
         "--esp-device=",
         "--snapshot-subvolume=",
         "--plan-id=",
-        "--plan-file=",
         "--confirm=",
         "--transaction=",
     ]
@@ -687,8 +685,7 @@ fn prompt_manual_target(program: &str) -> Result<Option<InteractiveTarget>, Stri
 fn manual_target_from_device(device: String) -> Result<InteractiveTarget, String> {
     if !validate_repair_device_arg(std::path::Path::new(&device)) {
         return Err(
-            "root device must be an absolute /dev/... path without .. or prefix components"
-                .into(),
+            "root device must be an absolute /dev/... path without .. or prefix components".into(),
         );
     }
     Ok(InteractiveTarget::Explicit {
@@ -808,6 +805,46 @@ fn transaction_menu_items(
         .collect()
 }
 
+fn plan_menu_items(
+    report: &crate::recovery::model::RecoveryListReport,
+) -> Vec<(crate::recovery::model::RecoveryPlanSummary, String)> {
+    report
+        .plans
+        .iter()
+        .cloned()
+        .map(|plan| {
+            let label = format!(
+                "{} — snapshot {} — generated {}",
+                crate::selection_ui::terminal_text(&plan.plan_id),
+                crate::selection_ui::terminal_text(&plan.source_snapshot_path),
+                plan.generated_at_unix
+            );
+            (plan, label)
+        })
+        .collect()
+}
+
+fn choose_plan(
+    target: &InteractiveTarget,
+) -> Result<Option<crate::recovery::model::RecoveryPlanSummary>, String> {
+    let report = load_recovery_choices(target)?;
+    let choices = plan_menu_items(&report);
+    if choices.is_empty() {
+        write_interactive_text(
+            "No pending recovery plans were found. Create a plan before applying recovery.\n",
+        )?;
+        return Ok(None);
+    }
+    let labels = choices
+        .iter()
+        .map(|(_, label)| label.as_str())
+        .collect::<Vec<_>>();
+    let Some(selected) = menu::choose("Recovery Plan", &labels)? else {
+        return Ok(None);
+    };
+    Ok(Some(choices[selected].0.clone()))
+}
+
 fn choose_snapshot(target: &InteractiveTarget) -> Result<Option<String>, String> {
     let report = load_recovery_choices(target)?;
     let choices = snapshot_menu_items(&report);
@@ -879,16 +916,7 @@ fn load_recovery_status(
     }
 }
 
-fn load_interactive_recovery_plan(
-    path: &str,
-) -> Result<crate::snapshot::model::RecoveryPlan, String> {
-    let validated = crate::cli::parse_plan_file_path(path, "Recovery plan file")
-        .map_err(|error| error.to_string())?;
-    crate::snapshot::store::load_plan(&validated)
-        .map_err(|error| format!("cannot load recovery plan {path:?}: {error}"))
-}
-
-fn recovery_plan_summary(plan: &crate::snapshot::model::RecoveryPlan) -> String {
+fn recovery_plan_choice_summary(plan: &crate::recovery::model::RecoveryPlanSummary) -> String {
     use std::fmt::Write as _;
 
     let mut output = String::new();
@@ -898,43 +926,26 @@ fn recovery_plan_summary(plan: &crate::snapshot::model::RecoveryPlan) -> String 
         "  Plan ID         : {}",
         crate::selection_ui::terminal_text(&plan.plan_id)
     )
-        .expect("writing to String cannot fail");
-    writeln!(
-        output,
-        "  Filesystem      : {}",
-        crate::selection_ui::terminal_text(&plan.filesystem.fsid)
-    )
-        .expect("writing to String cannot fail");
-    writeln!(
-        output,
-        "  Current root    : {}",
-        crate::selection_ui::terminal_text(&plan.current_root.path)
-    )
-        .expect("writing to String cannot fail");
+    .expect("writing to String cannot fail");
     writeln!(
         output,
         "  Source snapshot : {}",
-        crate::selection_ui::terminal_text(&plan.source_snapshot.path)
+        crate::selection_ui::terminal_text(&plan.source_snapshot_path)
     )
-        .expect("writing to String cannot fail");
-    if !plan.risks_and_warnings.is_empty() {
-        writeln!(output, "  Risks and warnings:").expect("writing to String cannot fail");
-        for warning in &plan.risks_and_warnings {
-            writeln!(
-                output,
-                "    - {}",
-                crate::selection_ui::terminal_text(warning)
-            )
-            .expect("writing to String cannot fail");
-        }
-    }
+    .expect("writing to String cannot fail");
+    writeln!(
+        output,
+        "  Generated       : unix {}",
+        plan.generated_at_unix
+    )
+    .expect("writing to String cannot fail");
     output
 }
 
-fn print_recovery_plan_summary(
-    plan: &crate::snapshot::model::RecoveryPlan,
+fn print_recovery_plan_choice_summary(
+    plan: &crate::recovery::model::RecoveryPlanSummary,
 ) -> Result<(), String> {
-    write_interactive_text(&recovery_plan_summary(plan))
+    write_interactive_text(&recovery_plan_choice_summary(plan))
 }
 
 fn run_recovery_menu(context: CommandContext) -> i32 {
@@ -1009,14 +1020,11 @@ fn interactive_recovery_for_command(
             args.extend(["--snapshot-subvolume".into(), snapshot]);
         }
         "apply" => {
-            let Some(plan_file) = menu::prompt("Recovery plan file")? else {
+            let Some(plan) = choose_plan(&target)? else {
                 return Ok(None);
             };
-            let plan = load_interactive_recovery_plan(&plan_file)?;
-            print_recovery_plan_summary(&plan)?;
+            print_recovery_plan_choice_summary(&plan)?;
             args.extend([
-                "--plan-file".into(),
-                plan_file,
                 "--plan-id".into(),
                 plan.plan_id.clone(),
                 "--confirm".into(),
@@ -1223,9 +1231,7 @@ fn run_via_full_parser(context: CommandContext, argv: &[String]) -> i32 {
             let text = text.replacement_help_name(context.program);
             write_stdout_text(context.program, &text)
         }
-        Ok(crate::cli::ParseOutcome::Version(text)) => {
-            write_stdout_text(context.program, &text)
-        }
+        Ok(crate::cli::ParseOutcome::Version(text)) => write_stdout_text(context.program, &text),
         Ok(crate::cli::ParseOutcome::Run(args)) => {
             if args.command.is_inspection_command() {
                 run_inspection_command(context.report_invocation, *args)
@@ -1498,10 +1504,9 @@ fn run_repair_mount(context: CommandContext, argv: &[String]) -> i32 {
         }
     }
 
-    if let Some(exit) = reject_unsupported_standard_root_subvolume(
-        context.program,
-        root_subvolume.as_deref(),
-    ) {
+    if let Some(exit) =
+        reject_unsupported_standard_root_subvolume(context.program, root_subvolume.as_deref())
+    {
         return exit;
     }
 
@@ -1668,10 +1673,9 @@ fn run_repair_boot(context: CommandContext, argv: &[String]) -> i32 {
         }
     }
 
-    if let Some(exit) = reject_unsupported_standard_root_subvolume(
-        context.program,
-        root_subvolume.as_deref(),
-    ) {
+    if let Some(exit) =
+        reject_unsupported_standard_root_subvolume(context.program, root_subvolume.as_deref())
+    {
         return exit;
     }
 
@@ -1751,9 +1755,7 @@ fn reject_unsupported_standard_root_subvolume(
     if subvolume == "/@" {
         return None;
     }
-    eprintln!(
-        "{program}: --root-subvolume supports only the CatOS standard Btrfs root /@"
-    );
+    eprintln!("{program}: --root-subvolume supports only the CatOS standard Btrfs root /@");
     Some(exit_code::ARG_ERROR)
 }
 
@@ -1881,10 +1883,10 @@ fn print_recovery_command_help(context: CommandContext, command: &str) -> i32 {
             "{program} {version} - inspect a recovery source read-only\n\nUSAGE:\n    {program} inspect --root-device /dev/... --snapshot-subvolume PATH [OPTIONS]\n\nOPTIONS:\n    --snapshot-subvolume PATH  Read-only snapshot to inspect (required).\n{common_target}"
         ),
         "plan" => format!(
-            "{program} {version} - create an immutable recovery plan\n\nUSAGE:\n    {program} plan --root-device /dev/... --snapshot-subvolume PATH [OPTIONS]\n\nOPTIONS:\n    --snapshot-subvolume PATH  Read-only snapshot used as the replacement root (required).\n{common_target}\nOUTPUT:\n    The plan is written to stdout. Save it verbatim and pass the file to `{program} apply --plan-file`.\n"
+            "{program} {version} - create and persist an immutable recovery plan\n\nUSAGE:\n    {program} plan --root-device /dev/... --snapshot-subvolume PATH [OPTIONS]\n\nOPTIONS:\n    --snapshot-subvolume PATH  Read-only snapshot used as the replacement root (required).\n{common_target}\nOUTPUT:\n    The plan is stored on the target at /.catos-recovery/transactions/<plan-id>/plan.json.\n    Stdout reports the plan id, confirmation token, and canonical target path.\n"
         ),
         "apply" => format!(
-            "{program} {version} - apply a confirmed recovery plan\n\nUSAGE:\n    {program} apply --root-device /dev/... --plan-file PATH --plan-id ID --confirm TOKEN [OPTIONS]\n\nOPTIONS:\n    --plan-file PATH           Plan JSON emitted by `{program} plan` (required).\n    --plan-id ID               Expected immutable plan id (required).\n    --confirm TOKEN            Confirmation token embedded in the plan (required).\n{common_target}"
+            "{program} {version} - apply a confirmed recovery plan\n\nUSAGE:\n    {program} apply --root-device /dev/... --plan-id ID --confirm TOKEN [OPTIONS]\n\nOPTIONS:\n    --plan-id ID               Persisted immutable plan id (required).\n    --confirm TOKEN            Confirmation token embedded in the plan (required).\n{common_target}"
         ),
         "status" => format!(
             "{program} {version} - inspect and reconcile one transaction\n\nUSAGE:\n    {program} status --root-device /dev/... --transaction ID [OPTIONS]\n\nOPTIONS:\n    --transaction ID           Recovery transaction id (required).\n{common_target}"
@@ -2180,64 +2182,18 @@ mod tests {
     }
 
     #[test]
-    fn recovery_plan_summary_contains_confirmation_facts() {
-        let boot_layout = crate::boot::model::BootLayout::default();
-        let plan = crate::snapshot::model::RecoveryPlan {
-            schema_version: crate::snapshot::model::RECOVERY_PLAN_SCHEMA_VERSION,
-            plan_id: "plan-123".into(),
+    fn recovery_plan_summary_contains_selection_facts() {
+        let plan = crate::recovery::model::RecoveryPlanSummary {
+            plan_id: "tx-plan-123".into(),
             generated_at_unix: 1,
-            generated_on_host: None,
-            filesystem: crate::snapshot::model::BtrfsFilesystemIdentity {
-                fsid: "fsid-123".into(),
-                device_major_minor: "259:2".into(),
-                label: None,
-            },
-            current_root: crate::snapshot::model::BtrfsSubvolumeIdentity {
-                path: "/@".into(),
-                subvolume_id: 256,
-                generation: 100,
-                uuid: None,
-                parent_uuid: None,
-                read_only: false,
-                evidence: vec![],
-            },
-            source_snapshot: crate::snapshot::model::BtrfsSubvolumeIdentity {
-                path: "/.snapshots/42/snapshot\nspoof\x1b[2J".into(),
-                subvolume_id: 300,
-                generation: 80,
-                uuid: None,
-                parent_uuid: None,
-                read_only: true,
-                evidence: vec![],
-            },
-            target_catos_identity: Some(crate::snapshot::model::CatosIdentity::default()),
-            boot_consistency:
-                crate::boot::diagnose::layout::evaluate_readonly_consistency(&boot_layout),
-            boot_layout,
-            backup_root_path: "/.catos-recovery/backups/plan-123/root-before".into(),
-            staging_root_path: "/.catos-recovery/staging/plan-123/new-root".into(),
-            fstab_root_definition: crate::snapshot::model::FstabRootDefinition {
-                source: "/dev/nvme0n1p2".into(),
-                fstype: "btrfs".into(),
-                options: vec!["subvol=/@".into()],
-            },
-            predicted_steps: vec![],
-            refusal_conditions: vec![],
-            risks_and_warnings: vec!["review boot state\nspoof\x1b[2J".into()],
-            nonce: "00".repeat(32),
-            plan_digest: "00".repeat(32),
+            source_snapshot_path: "/.snapshots/42/snapshot\nspoof\x1b[2J".into(),
             confirmation_token: "token".into(),
-            evidence: vec![],
         };
 
-        let summary = recovery_plan_summary(&plan);
-        assert!(summary.contains("Plan ID         : plan-123"));
-        assert!(summary.contains("Filesystem      : fsid-123"));
-        assert!(summary.contains("Current root    : /@"));
-        assert!(summary.contains(
-            "Source snapshot : /.snapshots/42/snapshot\\nspoof\\u{1b}[2J"
-        ));
-        assert!(summary.contains("review boot state\\nspoof\\u{1b}[2J"));
+        let summary = recovery_plan_choice_summary(&plan);
+        assert!(summary.contains("Plan ID         : tx-plan-123"));
+        assert!(summary.contains("Source snapshot : /.snapshots/42/snapshot\\nspoof\\u{1b}[2J"));
+        assert!(summary.contains("Generated       : unix 1"));
         assert!(!summary.contains('\x1b'));
     }
 
@@ -2252,6 +2208,12 @@ mod tests {
                 parent_uuid: None,
                 read_only: true,
                 evidence: Vec::new(),
+            }],
+            plans: vec![crate::recovery::model::RecoveryPlanSummary {
+                plan_id: "tx-plan-123".into(),
+                generated_at_unix: 3,
+                source_snapshot_path: "/.snapshots/42/snapshot\nspoof\x1b[2J".into(),
+                confirmation_token: "token".into(),
             }],
             transactions: vec![crate::recovery::model::TransactionSummary {
                 transaction_id: "tx-123".into(),
@@ -2269,6 +2231,11 @@ mod tests {
         assert!(!snapshots[0].1.contains('\x1b'));
         assert!(!snapshots[0].1.contains('\n'));
         assert!(snapshots[0].1.contains("\\nspoof\\u{1b}[2J"));
+        let plans = plan_menu_items(&report);
+        assert_eq!(plans[0].0.plan_id, "tx-plan-123");
+        assert!(plans[0].1.contains("generated 3"));
+        assert!(!plans[0].1.contains('\x1b'));
+        assert!(!plans[0].1.contains('\n'));
         let transactions = transaction_menu_items(&report);
         assert_eq!(transactions[0].0, "tx-123");
         assert!(transactions[0].1.contains("completed"));
@@ -2354,15 +2321,6 @@ mod tests {
             ]
         );
         assert_eq!(repair_args("boot", &InteractiveTarget::Automatic), ["boot"]);
-    }
-
-    #[test]
-    fn interactive_recovery_plan_rejects_relative_path_before_loading() {
-        let error = load_interactive_recovery_plan("relative-plan.json").unwrap_err();
-        assert!(error.contains("must be an absolute path"));
-
-        let error = load_interactive_recovery_plan("/tmp/../plan.json").unwrap_err();
-        assert!(error.contains("unsafe path component"));
     }
 
     #[test]

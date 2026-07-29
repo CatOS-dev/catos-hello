@@ -142,13 +142,9 @@ pub struct RecoveryArgs {
     pub subcommand: RecoverySubcommand,
     pub target: TargetSelection,
     pub snapshot_subvolume: Option<String>,
-    /// `--plan-id <id>` (apply): cross-checks the plan file's id.
+    /// `--plan-id <id>` (apply): selects the immutable plan persisted
+    /// below `/.catos-recovery/transactions/<id>/plan.json` on the target.
     pub plan_id: Option<String>,
-    /// `--plan-file <path>` (apply): path to a JSON plan emitted by
-    /// `recovery plan`. The plan is read from this file rather than
-    /// from a target-side directory, so `plan` is purely read-only
-    /// with respect to the target device.
-    pub plan_file: Option<PathBuf>,
     /// `--confirm <token>` (apply, revert)
     pub confirm: Option<String>,
     /// `--transaction <id>` (status, resume, revert)

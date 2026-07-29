@@ -3,7 +3,7 @@
 use crate::boot::model::{BootConsistencyReport, BootLayout};
 use crate::snapshot::model::{
     BtrfsFilesystemIdentity, BtrfsSubvolumeIdentity, CatosIdentity, CleanupSummary, DiskFacts,
-    TransactionRecord, TransactionState,
+    RecoveryPlan, TransactionRecord, TransactionState,
 };
 use crate::target::model::Warning;
 use serde::{Deserialize, Serialize};
@@ -28,12 +28,31 @@ pub struct RecoveryListReport {
     /// recovery source.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub readonly_snapshots: Vec<BtrfsSubvolumeIdentity>,
+    /// Persisted plans that have not started a transaction yet.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub plans: Vec<RecoveryPlanSummary>,
     /// Transactions known to exist on this machine (across all
     /// filesystems), with their current state.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub transactions: Vec<TransactionSummary>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<Warning>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RecoveryPlanSummary {
+    pub plan_id: String,
+    pub generated_at_unix: u64,
+    pub source_snapshot_path: String,
+    pub confirmation_token: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RecoveryPlanReport {
+    #[serde(flatten)]
+    pub plan: RecoveryPlan,
+    pub plan_path: String,
+    pub mount_cleanup: CleanupSummary,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

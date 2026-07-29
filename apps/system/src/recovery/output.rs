@@ -6,7 +6,9 @@
 use std::io::Write;
 
 use crate::error::Error;
-use crate::recovery::model::{RecoveryInspectReport, RecoveryListReport, RecoveryStatusReport};
+use crate::recovery::model::{
+    RecoveryInspectReport, RecoveryListReport, RecoveryPlanReport, RecoveryStatusReport,
+};
 use crate::recovery::RecoveryOutcome;
 use crate::selection_ui::terminal_text;
 use crate::snapshot::model::{RecoveryPlan, SnapshotError, TransactionRecord};
@@ -29,11 +31,11 @@ pub fn render_recovery_json(
             "recovery_inspect",
             serde_json::to_value(report).map_err(|e| Error::SerializeFailed(e.to_string()))?,
         ),
-        RecoveryOutcome::Plan(plan) => json_envelope(
+        RecoveryOutcome::Plan(report) => json_envelope(
             invocation,
             target_root,
             "recovery_plan",
-            serde_json::to_value(plan).map_err(|e| Error::SerializeFailed(e.to_string()))?,
+            serde_json::to_value(report).map_err(|e| Error::SerializeFailed(e.to_string()))?,
         ),
         RecoveryOutcome::Apply {
             record,
@@ -140,7 +142,7 @@ pub fn render_recovery_human<W: Write>(
     match outcome {
         RecoveryOutcome::List(report) => render_list(out, report),
         RecoveryOutcome::Inspect(report) => render_inspect(out, report),
-        RecoveryOutcome::Plan(plan) => render_plan(out, plan),
+        RecoveryOutcome::Plan(report) => render_plan_report(out, report),
         RecoveryOutcome::Apply {
             record,
             final_state,
@@ -204,6 +206,16 @@ fn render_list<W: Write>(out: &mut W, report: &RecoveryListReport) -> std::io::R
             snapshot.read_only
         )?;
     }
+    writeln!(out, "  pending plans    : {}", report.plans.len())?;
+    for plan in &report.plans {
+        writeln!(
+            out,
+            "    {} snapshot={} generated={}",
+            terminal_text(&plan.plan_id),
+            terminal_text(&plan.source_snapshot_path),
+            plan.generated_at_unix
+        )?;
+    }
     writeln!(out, "  transactions     : {}", report.transactions.len())?;
     for transaction in &report.transactions {
         writeln!(
@@ -242,6 +254,20 @@ fn render_inspect<W: Write>(out: &mut W, report: &RecoveryInspectReport) -> std:
     )?;
     render_boot_consistency(out, &report.boot_consistency)?;
     render_warnings(out, &report.warnings)
+}
+
+fn render_plan_report<W: Write>(out: &mut W, report: &RecoveryPlanReport) -> std::io::Result<()> {
+    render_plan(out, &report.plan)?;
+    writeln!(
+        out,
+        "  persisted at     : {}",
+        terminal_text(&report.plan_path)
+    )?;
+    writeln!(
+        out,
+        "  mount cleanup    : clean={}",
+        report.mount_cleanup.all_clean
+    )
 }
 
 fn render_plan<W: Write>(out: &mut W, plan: &RecoveryPlan) -> std::io::Result<()> {
@@ -516,9 +542,20 @@ mod tests {
         }
     }
 
+    fn sample_plan_report() -> RecoveryPlanReport {
+        RecoveryPlanReport {
+            plan: sample_plan(),
+            plan_path: "/.catos-recovery/transactions/tx-1/plan.json".into(),
+            mount_cleanup: crate::snapshot::model::CleanupSummary {
+                all_clean: true,
+                ..Default::default()
+            },
+        }
+    }
+
     #[test]
     fn json_plan_envelope_carries_schema_and_kind() {
-        let outcome = RecoveryOutcome::Plan(sample_plan());
+        let outcome = RecoveryOutcome::Plan(sample_plan_report());
         let j = render_recovery_json(&outcome, "catos-system", std::path::Path::new("/")).unwrap();
         let v: serde_json::Value = serde_json::from_str(&j).unwrap();
         assert_eq!(v["schemaVersion"], 2);
@@ -527,6 +564,10 @@ mod tests {
         assert_eq!(v["payload"]["schema_version"], 4);
         assert_eq!(v["payload"]["boot_consistency"]["status"], "unknown");
         assert_eq!(v["payload"]["confirmation_token"], "v1:tx-1:abc");
+        assert_eq!(
+            v["payload"]["plan_path"],
+            "/.catos-recovery/transactions/tx-1/plan.json"
+        );
     }
 
     #[test]
@@ -545,7 +586,7 @@ mod tests {
 
     #[test]
     fn human_plan_output_has_no_ansi_escapes() {
-        let outcome = RecoveryOutcome::Plan(sample_plan());
+        let outcome = RecoveryOutcome::Plan(sample_plan_report());
         let mut buf = Vec::new();
         render_recovery_human(&outcome, &mut buf).unwrap();
         let s = String::from_utf8(buf).unwrap();
@@ -562,7 +603,18 @@ mod tests {
         plan.source_snapshot.path = "/@snapshots/1\nspoof\u{1b}[2J".into();
         plan.risks_and_warnings = vec!["review\rstate\u{202e}txt".into()];
         let mut output = Vec::new();
-        render_recovery_human(&RecoveryOutcome::Plan(plan), &mut output).unwrap();
+        render_recovery_human(
+            &RecoveryOutcome::Plan(RecoveryPlanReport {
+                plan,
+                plan_path: "/.catos-recovery/transactions/tx-1/plan.json".into(),
+                mount_cleanup: crate::snapshot::model::CleanupSummary {
+                    all_clean: true,
+                    ..Default::default()
+                },
+            }),
+            &mut output,
+        )
+        .unwrap();
 
         let mut error = SnapshotError::new(
             crate::snapshot::model::SnapshotErrorKind::StateRecordCorrupt,
@@ -599,7 +651,14 @@ mod tests {
         plan.risks_and_warnings = vec![raw_risk.into()];
 
         let json = render_recovery_json(
-            &RecoveryOutcome::Plan(plan),
+            &RecoveryOutcome::Plan(RecoveryPlanReport {
+                plan,
+                plan_path: "/.catos-recovery/transactions/tx-1/plan.json".into(),
+                mount_cleanup: crate::snapshot::model::CleanupSummary {
+                    all_clean: true,
+                    ..Default::default()
+                },
+            }),
             "catos-system",
             std::path::Path::new("/"),
         )

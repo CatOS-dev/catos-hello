@@ -182,20 +182,6 @@ pub fn parse(argv: &[String], default_root: SystemRoot) -> Result<ParseOutcome, 
                     Some(parse_opaque_id(&a["--plan-id=".len()..], "--plan-id")?);
                 idx += 1;
             }
-            "--plan-file" => {
-                let value = argv.get(idx + 1).ok_or_else(|| Error::InvalidArgument {
-                    message: "--plan-file requires a path".into(),
-                })?;
-                recovery_args.plan_file = Some(parse_plan_file_path(value, "--plan-file")?);
-                idx += 2;
-            }
-            a if a.starts_with("--plan-file=") => {
-                recovery_args.plan_file = Some(parse_plan_file_path(
-                    &a["--plan-file=".len()..],
-                    "--plan-file",
-                )?);
-                idx += 1;
-            }
             "--confirm" => {
                 let value = argv.get(idx + 1).ok_or_else(|| Error::InvalidArgument {
                     message: "--confirm requires a token".into(),
@@ -335,29 +321,6 @@ fn parse_opaque_id(value: &str, option: &str) -> Result<String, Error> {
         });
     }
     Ok(cleaned.to_string())
-}
-
-pub(crate) fn parse_plan_file_path(value: &str, option: &str) -> Result<PathBuf, Error> {
-    let path = Path::new(value);
-    if value.is_empty() || value.contains('\0') {
-        return Err(Error::InvalidArgument {
-            message: format!("{option} must be a non-empty path"),
-        });
-    }
-    if !path.is_absolute() {
-        return Err(Error::InvalidArgument {
-            message: format!("{option} must be an absolute path"),
-        });
-    }
-    if path
-        .components()
-        .any(|component| matches!(component, Component::ParentDir | Component::Prefix(_)))
-    {
-        return Err(Error::InvalidArgument {
-            message: format!("{option} contains an unsafe path component"),
-        });
-    }
-    Ok(path.to_path_buf())
 }
 
 fn root_error(error: catos_target::diagnose::system_root::RootError) -> crate::error::Error {

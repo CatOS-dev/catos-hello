@@ -60,47 +60,6 @@ fn run(args: &[&str]) -> (bool, i32, String, String) {
     )
 }
 
-fn minimal_plan_payload() -> serde_json::Value {
-    serde_json::json!({
-        "schema_version": 4,
-        "plan_id": "tx-00000000000000000000000000000001",
-        "generated_at_unix": 1,
-        "filesystem": {"fsid": "fsid-A", "device_major_minor": "259:0"},
-        "current_root": {
-            "path": "/@",
-            "subvolume_id": 256,
-            "generation": 10,
-            "read_only": false,
-        },
-        "source_snapshot": {
-            "path": "/@snapshots/1",
-            "subvolume_id": 300,
-            "generation": 8,
-            "read_only": true,
-        },
-        "boot_layout": {
-            "boot_inside_root": true,
-            "boot_separate_filesystem": false,
-            "boot_separate_subvolume": false,
-            "has_initramfs": false,
-        },
-        "boot_consistency": {"status": "consistent"},
-        "backup_root_path": "/.catos-recovery/backups/tx-00000000000000000000000000000001/root-before",
-        "staging_root_path": "/.catos-recovery/staging/tx-00000000000000000000000000000001/new-root",
-        "fstab_root_definition": {
-            "source": "/dev/null",
-            "fstype": "btrfs",
-            "options": ["subvol=/@"]
-        },
-        "predicted_steps": [],
-        "refusal_conditions": [],
-        "risks_and_warnings": [],
-        "nonce": "00".repeat(32),
-        "plan_digest": "00".repeat(32),
-        "confirmation_token": "v1:unused",
-    })
-}
-
 // ===========================================================================
 // A. --esp-device rejection contract
 // ===========================================================================
@@ -180,26 +139,6 @@ fn recovery_inspect_rejects_explicit_esp_before_probe() {
 
 #[test]
 fn recovery_apply_rejects_explicit_esp_before_persistent_write() {
-    let tempdir = std::env::temp_dir().join(format!(
-        "catos-esp-apply-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos(),
-    ));
-    std::fs::create_dir_all(&tempdir).unwrap();
-    let plan_file = tempdir.join("plan.json");
-    let envelope = serde_json::json!({
-        "schemaVersion": 2,
-        "programVersion": "0.1.0",
-        "invocation": "catos-system",
-        "targetRoot": "/",
-        "kind": "recovery_plan",
-        "payload": minimal_plan_payload(),
-    });
-    std::fs::write(&plan_file, serde_json::to_vec_pretty(&envelope).unwrap()).unwrap();
-
     let (ok, code, stdout, _stderr) = run(&[
         "recovery",
         "apply",
@@ -215,11 +154,8 @@ fn recovery_apply_rejects_explicit_esp_before_persistent_write() {
         "tx-00000000000000000000000000000001",
         "--confirm",
         "v1:unused",
-        "--plan-file",
-        plan_file.to_str().unwrap(),
         "--json",
     ]);
-    let _ = std::fs::remove_dir_all(&tempdir);
     assert!(!ok);
     assert_ne!(code, 0);
     let value: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap();

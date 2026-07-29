@@ -352,7 +352,9 @@ fn recovery_subcommands_route_directly() {
     let bin = bin_path();
     let tmp = TempDir::new("catos-recovery-direct").unwrap();
     let link = link_to(&bin, &tmp, "catos-recovery");
-    for sub in ["list", "inspect", "plan", "apply", "status", "resume", "revert"] {
+    for sub in [
+        "list", "inspect", "plan", "apply", "status", "resume", "revert",
+    ] {
         let (ok, code, stdout, stderr) = run_via(&link, &[sub, "--json"]);
         assert!(!ok, "catos-recovery {sub} unexpectedly succeeded");
         assert_eq!(code, 2, "catos-recovery {sub}: stderr={stderr}");
@@ -641,7 +643,10 @@ fn repair_rejects_nonstandard_root_subvolume_before_elevation() {
         assert_eq!(output.status.code(), Some(2), "domain={domain}");
         assert!(output.stdout.is_empty(), "domain={domain}");
         let stderr = String::from_utf8_lossy(&output.stderr);
-        assert!(stderr.contains("supports only"), "domain={domain}: {stderr}");
+        assert!(
+            stderr.contains("supports only"),
+            "domain={domain}: {stderr}"
+        );
         assert!(
             !stderr.contains("administrator privileges"),
             "domain={domain}: {stderr}"
@@ -656,8 +661,14 @@ fn repair_top_level_help_defers_to_command_specific_options() {
     let link = link_to(&bin, &tmp, "catos-repair");
     let (ok, code, stdout, stderr) = run_via(&link, &["--help"]);
     assert!(ok, "code={code} stderr={stderr}");
-    assert!(stdout.contains("catos-repair <COMMAND> --help"), "stdout={stdout}");
-    assert!(!stdout.contains("--root-device"), "top-level help must not imply every domain accepts the same options: {stdout}");
+    assert!(
+        stdout.contains("catos-repair <COMMAND> --help"),
+        "stdout={stdout}"
+    );
+    assert!(
+        !stdout.contains("--root-device"),
+        "top-level help must not imply every domain accepts the same options: {stdout}"
+    );
 }
 
 #[test]
@@ -669,7 +680,10 @@ fn recovery_top_level_help_explains_the_safe_workflow() {
     assert!(ok, "code={code} stderr={stderr}");
     assert!(stdout.contains("WORKFLOW:"), "stdout={stdout}");
     assert!(stdout.contains("State-changing"), "stdout={stdout}");
-    assert!(stdout.contains("List snapshots and recovery transactions"), "stdout={stdout}");
+    assert!(
+        stdout.contains("List snapshots and recovery transactions"),
+        "stdout={stdout}"
+    );
 }
 
 #[test]
@@ -806,12 +820,16 @@ fn recovery_subcommand_help_lists_real_required_options() {
         .expect("run catos-recovery apply --help");
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
-    for required in ["--root-device", "--plan-file", "--plan-id", "--confirm"] {
+    for required in ["--root-device", "--plan-id", "--confirm"] {
         assert!(
             stdout.contains(required),
             "missing {required} in apply help: {stdout}"
         );
     }
+    assert!(
+        !stdout.contains("--plan-file"),
+        "legacy plan-file option leaked into help"
+    );
     assert!(
         !stdout.contains("COMMANDS:\n    list"),
         "apply help fell back to top-level help"
@@ -821,7 +839,7 @@ fn recovery_subcommand_help_lists_real_required_options() {
         .expect("apply help must contain an options section")
         .1;
     assert!(
-        options.find("--plan-file").unwrap() < options.find("--root-device").unwrap(),
+        options.find("--plan-id").unwrap() < options.find("--root-device").unwrap(),
         "action-specific options should precede common target options: {stdout}"
     );
 }

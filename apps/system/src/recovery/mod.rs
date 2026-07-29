@@ -8,10 +8,10 @@
 //! All seven recovery subcommands route through here:
 //! `list`, `inspect`, `plan`, `apply`, `status`, `resume`, `revert`.
 //!
-//! `list`, `inspect`, `plan` are READ-ONLY. They mount targets only
-//! via the shared read-only target-probe infrastructure.
+//! `list` and `inspect` are read-only. `plan` performs read-only validation
+//! and then persists one immutable plan below the target recovery directory.
 //!
-//! `apply`, `resume`, `revert` mount the btrfs top-level READ-WRITE.
+//! `plan`, `apply`, `resume`, and `revert` mount the btrfs top-level READ-WRITE.
 //! These application paths coordinate snapshot-specific persistent writes;
 //! lower-level effects remain confined to capability execute modules.
 
@@ -25,12 +25,12 @@ use std::path::PathBuf;
 use crate::cli::{RecoveryArgs, RecoverySubcommand};
 use crate::error::exit_code;
 use crate::recovery::model::{
-    RecoveryInspectReport, RecoveryListReport, RecoveryRecommendation, RecoveryStatusReport,
+    RecoveryInspectReport, RecoveryListReport, RecoveryPlanReport, RecoveryRecommendation,
+    RecoveryStatusReport,
 };
 use crate::snapshot::diagnose::identity::{validate_recovery_id, SubvolumePath};
 use crate::snapshot::model::{
-    CleanupSummary, RecoveryPlan, SnapshotError, SnapshotErrorKind, TransactionRecord,
-    TransactionState,
+    CleanupSummary, SnapshotError, SnapshotErrorKind, TransactionRecord, TransactionState,
 };
 
 /// Outcome of a recovery command. Each variant carries the model
@@ -43,7 +43,7 @@ use crate::snapshot::model::{
 pub enum RecoveryOutcome {
     List(RecoveryListReport),
     Inspect(RecoveryInspectReport),
-    Plan(RecoveryPlan),
+    Plan(RecoveryPlanReport),
     Apply {
         record: TransactionRecord,
         final_state: TransactionState,
@@ -121,7 +121,10 @@ pub fn run_recovery(args: RecoveryArgs) -> RecoveryOutcome {
 pub(crate) fn write_cli_contract_is_valid(args: &RecoveryArgs) -> bool {
     matches!(
         args.subcommand,
-        RecoverySubcommand::Apply | RecoverySubcommand::Resume | RecoverySubcommand::Revert
+        RecoverySubcommand::Plan
+            | RecoverySubcommand::Apply
+            | RecoverySubcommand::Resume
+            | RecoverySubcommand::Revert
     ) && validate_cli_contract(args).is_ok()
 }
 
@@ -229,12 +232,6 @@ fn validate_cli_contract(args: &RecoveryArgs) -> Result<(), SnapshotError> {
                 return Err(SnapshotError::new(
                     SnapshotErrorKind::ConfirmationTokenMismatch,
                     "apply requires --confirm <token>",
-                ));
-            }
-            if args.plan_file.is_none() {
-                return Err(SnapshotError::new(
-                    SnapshotErrorKind::TransactionNotFound,
-                    "apply requires --plan-file <path>",
                 ));
             }
             args.require_target_selection()?;

@@ -191,6 +191,61 @@ pub fn list_records(
     (ok, errs)
 }
 
+/// Load plans that have been persisted but do not yet have a transaction
+/// state record. These are the plans eligible for a first `apply`.
+pub fn list_pending_plans(
+    transactions_dir: &Path,
+) -> (
+    Vec<(PathBuf, crate::model::RecoveryPlan)>,
+    Vec<SnapshotError>,
+) {
+    let mut ok = Vec::new();
+    let mut errs = Vec::new();
+    let entries = match confined::list_directory_names(transactions_dir) {
+        Ok(entries) => entries,
+        Err(error) => {
+            errs.push(fs_to_snapshot(error));
+            return (ok, errs);
+        }
+    };
+    for name in entries {
+        let Some(id) = name.to_str() else {
+            errs.push(SnapshotError::new(
+                SnapshotErrorKind::InvalidRecoveryId,
+                "transaction directory name is not valid UTF-8",
+            ));
+            continue;
+        };
+        if let Err(error) = validate_recovery_id(id) {
+            errs.push(error);
+            continue;
+        }
+        let directory = transactions_dir.join(&name);
+        let state_file = directory.join("state.json");
+        match load_record(&state_file) {
+            Ok(_) => continue,
+            Err(error) if error.kind == SnapshotErrorKind::TransactionNotFound => {}
+            Err(error) => {
+                errs.push(error);
+                continue;
+            }
+        }
+        let plan_file = directory.join("plan.json");
+        match load_plan(&plan_file) {
+            Ok(plan) if plan.plan_id == id => ok.push((plan_file, plan)),
+            Ok(plan) => errs.push(SnapshotError::new(
+                SnapshotErrorKind::StateRecordCorrupt,
+                format!(
+                    "plan id {} does not match transaction directory {id}",
+                    plan.plan_id
+                ),
+            )),
+            Err(error) => errs.push(error),
+        }
+    }
+    (ok, errs)
+}
+
 pub fn remove_transaction_metadata(state_path: &Path) -> Result<(), SnapshotError> {
     let directory = state_path.parent().ok_or_else(|| {
         SnapshotError::new(
@@ -305,11 +360,9 @@ pub fn load_plan(path: &Path) -> Result<crate::model::RecoveryPlan, SnapshotErro
     } else {
         confined::read_external_file(path)?
     };
-    // Operators produce a plan file by running `recovery plan --json`
-    // and redirecting stdout to a file. That output is the standard
-    // envelope `{ invocation, kind, payload, ... }`; the actual plan
-    // lives under `payload`. Accept both the bare `RecoveryPlan` and
-    // the wrapped envelope so a freshly-redirected file just works.
+    // Current plans are stored as bare RecoveryPlan JSON at the canonical
+    // target-side path. Wrapped envelopes remain accepted for compatibility
+    // with plans created by earlier versions.
     let value: serde_json::Value = match serde_json::from_slice(&body) {
         Ok(value) => value,
         Err(error) => {
@@ -613,6 +666,25 @@ mod tests {
         let (records, errors) = list_records(&dir);
         assert!(records.is_empty());
         assert!(errors.is_empty(), "{errors:?}");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn list_pending_plans_returns_only_plans_without_state_records() {
+        let root = scratch_root("list-pending-plans");
+        fs::create_dir_all(&root).unwrap();
+        let pending = plan_path(&root, ID1);
+        persist_plan(&pending, &sample_plan_for(ID1)).unwrap();
+        persist_plan(&plan_path(&root, ID2), &sample_plan_for(ID2)).unwrap();
+        persist_record(&state_path(&root, ID2), &record_for(ID2)).unwrap();
+
+        let dir = root.join(".catos-recovery/transactions");
+        let (plans, errors) = list_pending_plans(&dir);
+
+        assert!(errors.is_empty(), "{errors:?}");
+        assert_eq!(plans.len(), 1);
+        assert_eq!(plans[0].0, pending);
+        assert_eq!(plans[0].1.plan_id, ID1);
         let _ = fs::remove_dir_all(root);
     }
 

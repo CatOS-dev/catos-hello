@@ -1,4 +1,5 @@
-//! Read-only recovery subcommands: `list`, `inspect`, `plan`, `status`.
+//! Recovery discovery and planning subcommands. `plan` performs one bounded
+//! metadata write to persist its immutable artifact at the target-side path.
 
 use std::path::{Path, PathBuf};
 
@@ -6,9 +7,10 @@ use crate::cli::RecoveryArgs;
 use crate::mount::execute::secure_dir::SESSION_ROOT_PARENT;
 use crate::mount::model::CleanupReport;
 use crate::mount::plan::session::build_probe_plan;
-use crate::mount::session::ReadOnlyMountSession;
+use crate::mount::session::{BtrfsTopLevelRwSession, ReadOnlyMountSession};
 use crate::recovery::model::{
-    RecoveryInspectReport, RecoveryListReport, RecoveryStatusReport, TransactionSummary,
+    RecoveryInspectReport, RecoveryListReport, RecoveryPlanReport, RecoveryPlanSummary,
+    RecoveryStatusReport, TransactionSummary,
 };
 use crate::snapshot::diagnose::enumerate as btrfs;
 use crate::snapshot::diagnose::enumerate::probe_target_readonly;
@@ -27,12 +29,13 @@ use crate::snapshot::plan::{
 use crate::snapshot::store;
 use crate::target::model::Warning;
 
-use super::{recommend, require_transaction_id, revert_confirmation_is_safe};
+use super::{recommend, require_root, require_transaction_id, revert_confirmation_is_safe};
 
 type RecoveryListProbeResult = Result<
     (
         BtrfsFilesystemIdentity,
         Vec<BtrfsSubvolumeIdentity>,
+        Vec<(PathBuf, RecoveryPlan)>,
         Vec<(PathBuf, TransactionRecord)>,
         Vec<SnapshotError>,
     ),
@@ -73,8 +76,10 @@ pub(super) fn run_list(args: &RecoveryArgs) -> Result<RecoveryListReport, Snapsh
         let transactions_dir = mounted
             .target_root
             .join(TransactionPaths::transactions_dir().trim_start_matches('/'));
-        let (records, errs) = store::list_records(&transactions_dir);
-        Ok((target.filesystem, readonly_snapshots, records, errs))
+        let (plans, mut errs) = store::list_pending_plans(&transactions_dir);
+        let (records, record_errs) = store::list_records(&transactions_dir);
+        errs.extend(record_errs);
+        Ok((target.filesystem, readonly_snapshots, plans, records, errs))
     })();
 
     let cleanup = cleanup_summary(session.cleanup());
@@ -87,16 +92,25 @@ pub(super) fn run_list(args: &RecoveryArgs) -> Result<RecoveryListReport, Snapsh
             ),
         ));
     }
-    let (filesystem, readonly_snapshots, records, errs) = result?;
+    let (filesystem, readonly_snapshots, plans, records, errs) = result?;
     let mut report = RecoveryListReport {
         source_device: Some(canonical_device.display().to_string()),
         source_filesystem_fsid: Some(filesystem.fsid.clone()),
         mount_cleanup: Some(cleanup),
         filesystems: vec![filesystem],
         readonly_snapshots,
+        plans: Vec::new(),
         transactions: Vec::new(),
         warnings: Vec::new(),
     };
+    for (_, plan) in &plans {
+        report.plans.push(RecoveryPlanSummary {
+            plan_id: plan.plan_id.clone(),
+            generated_at_unix: plan.generated_at_unix,
+            source_snapshot_path: plan.source_snapshot.path.clone(),
+            confirmation_token: plan.confirmation_token.clone(),
+        });
+    }
     for (_, record) in &records {
         report.transactions.push(TransactionSummary {
             transaction_id: record.transaction_id.clone(),
@@ -147,7 +161,7 @@ pub(super) fn run_inspect(args: &RecoveryArgs) -> Result<RecoveryInspectReport, 
 // plan
 // ---------------------------------------------------------------------------
 
-pub(super) fn run_plan(args: &RecoveryArgs) -> Result<RecoveryPlan, SnapshotError> {
+pub(super) fn run_plan(args: &RecoveryArgs) -> Result<RecoveryPlanReport, SnapshotError> {
     let selection = args.require_target_selection()?;
     let device = selection.root_device;
     let root_subvolume = selection.root_subvolume;
@@ -158,10 +172,13 @@ pub(super) fn run_plan(args: &RecoveryArgs) -> Result<RecoveryPlan, SnapshotErro
         )
     })?;
 
+    require_root()?;
     let probe = probe_target_readonly(&device, root_subvolume.as_deref(), Some(&snapshot))?;
+    ensure_target_is_not_running_root(&probe.filesystem, &probe.current_root)?;
 
     let plan_id = generate_plan_id()?;
     let entropy = generate_entropy()?;
+    let canonical_device = probe.canonical_device.clone();
     let fstab_root_definition = probe.fstab_root_definition;
 
     let inputs = PlanInputs {
@@ -177,10 +194,107 @@ pub(super) fn run_plan(args: &RecoveryArgs) -> Result<RecoveryPlan, SnapshotErro
         confirmation_token_entropy: entropy,
     };
     let plan = build_recovery_plan(inputs)?;
-    // run_plan is read-only. The plan is emitted to stdout; the
-    // operator (or a wrapper script) saves it and feeds it back to
-    // `apply --plan-file <path>`.
-    Ok(plan)
+    let target_path = PathBuf::from(TransactionPaths::transactions_dir())
+        .join(&plan.plan_id)
+        .join("plan.json");
+
+    let mut session = BtrfsTopLevelRwSession::mount(&canonical_device)?;
+    let top_level_mount = session.top_level_mount().to_path_buf();
+    let persist_result = (|| {
+        let mounted = validate_mounted_filesystem(&top_level_mount, &canonical_device)?;
+        if mounted.filesystem != plan.filesystem {
+            return Err(SnapshotError::new(
+                SnapshotErrorKind::TargetChanged,
+                "target filesystem identity changed before the recovery plan was persisted",
+            ));
+        }
+        let mounted_path = top_level_mount.join(target_path.strip_prefix("/").map_err(|_| {
+            SnapshotError::new(
+                SnapshotErrorKind::UnsafeRecoveryPath,
+                "canonical recovery plan path is not absolute",
+            )
+        })?);
+        store::persist_plan(&mounted_path, &plan)
+    })();
+    let cleanup: CleanupSummary = session.cleanup().into();
+    if let Err(mut error) = persist_result {
+        if !cleanup.all_clean {
+            error.message = format!(
+                "{}; plan mount cleanup was incomplete: {:?}",
+                error.message, cleanup.residual
+            )
+            .into_boxed_str();
+        }
+        return Err(error);
+    }
+    if !cleanup.all_clean {
+        return Err(SnapshotError::new(
+            SnapshotErrorKind::CleanupIncomplete,
+            format!("plan mount cleanup was incomplete: {:?}", cleanup.residual),
+        ));
+    }
+
+    Ok(RecoveryPlanReport {
+        plan,
+        plan_path: target_path.display().to_string(),
+        mount_cleanup: cleanup,
+    })
+}
+
+pub(super) fn load_persisted_plan_readonly(
+    device: &Path,
+    plan_id: &str,
+) -> Result<RecoveryPlan, SnapshotError> {
+    crate::snapshot::diagnose::identity::validate_recovery_id(plan_id)?;
+    let (canonical_device, _) = canonical_block_identity(device)?;
+    let session_root =
+        PathBuf::from(SESSION_ROOT_PARENT).join(format!("recovery-plan-{}", std::process::id()));
+    let source = canonical_device.to_str().ok_or_else(|| {
+        SnapshotError::new(
+            SnapshotErrorKind::SyscallFailed,
+            format!("device {} is not valid UTF-8", canonical_device.display()),
+        )
+    })?;
+    let mount_plan = build_probe_plan(session_root, source, "btrfs", Some("subvolid=5"))
+        .map_err(|error| SnapshotError::new(SnapshotErrorKind::SyscallFailed, error.to_string()))?;
+    let mut session =
+        ReadOnlyMountSession::new(format!("recovery-plan-{}", std::process::id()), &mount_plan);
+    let mounted = session.run(&mount_plan).map_err(|error| {
+        SnapshotError::new(
+            SnapshotErrorKind::SyscallFailed,
+            format!("cannot mount recovery-plan target read-only: {error}"),
+        )
+    })?;
+    let result = (|| {
+        validate_mounted_filesystem(&mounted.target_root, &canonical_device)?;
+        let path = mounted
+            .target_root
+            .join(TransactionPaths::transactions_dir().trim_start_matches('/'))
+            .join(plan_id)
+            .join("plan.json");
+        let plan = store::load_plan(&path)?;
+        if plan.plan_id != plan_id {
+            return Err(SnapshotError::new(
+                SnapshotErrorKind::StateRecordCorrupt,
+                format!(
+                    "plan id {} does not match requested id {plan_id}",
+                    plan.plan_id
+                ),
+            ));
+        }
+        Ok(plan)
+    })();
+    let cleanup = cleanup_summary(session.cleanup());
+    if !cleanup.all_clean {
+        return Err(SnapshotError::new(
+            SnapshotErrorKind::CleanupIncomplete,
+            format!(
+                "recovery plan mount cleanup was incomplete: {:?}",
+                cleanup.residual
+            ),
+        ));
+    }
+    result
 }
 
 // ---------------------------------------------------------------------------
