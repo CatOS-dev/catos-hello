@@ -57,7 +57,14 @@ experienced users:
 `catos-repair` and `catos-recovery` also open interactive submenus when run
 without a command and attached to a terminal. Interactive repair and recovery
 can select a detected CatOS installation instead of requiring the operator to
-type a block-device path. Recovery lists detected snapshots, target-side pending plans, and transactions.
+type a block-device path. The `catos-system` health-check entry additionally
+turns safe Doctor recommendations into a typed action menu. It shows the exact
+target, asks for confirmation, executes only an allow-listed action, and then
+reruns Doctor against a freshly discovered target. It never parses or executes
+the human-readable recommendation command. Standalone `catos-doctor` remains
+read-only and only renders the report.
+
+Recovery lists detected snapshots, target-side pending plans, and transactions.
 Interactive Apply selects the immutable plan stored below the target's
 `/.catos-recovery/transactions/` directory. Revert and permanent Purge obtain
 separate state-bound tokens from a fresh status check; unused plans use their
@@ -426,7 +433,7 @@ The following surfaces are wired into CTest when `-DBUILD_TESTS=ON`:
 | `catos-system-recovery-qemu-smoke` | Authoritative real-Btrfs acceptance in QEMU. Exercises the happy path, all three fault windows, resume reconciliation, Completed revert including the reverse-swap crash window, non-default source identity, guest-side data/backup/readonly assertions, nested-layout refusal, external-ESP refusal, and byte-for-byte ESP no-write verification. Once QEMU starts, skipped assertions are hard failures. |
 | `catos-system-repair-qemu-smoke` | Real-filesystem repair acceptance in QEMU. It repairs deliberately damaged ext4 and FAT images, damages one metadata-DUP root-tree mirror and proves Btrfs escalates from the checksum diagnostic to `--repair` and a clean recheck, exercises normal XFS repair, and creates a real unclean XFS journal by killing a writer VM before proving `xfs_repair -L` reports `repaired_with_risk`. |
 | `catos-system-mount-repair-qemu-smoke` | State-changing mount-repair acceptance in QEMU. It exercises all six `/boot`/ESP layouts, a Btrfs `@boot`, an independent ext4 `/boot`, a plain ext4 target, the currently-running ext4 root without unmounting it, complete fstab mount verification, and empty-subvolume rollback after an induced verification failure. |
-| `catos-system-doctor-qemu-smoke` | Read-only Doctor acceptance in QEMU. Covers offline CatOS targets, provider detection, corruption, broken fstab, ambiguity, interrupted recovery, and a real running-root case that mounts the CatOS `@` subvolume as `/` and enters it with `switch_root` before executing `catos-doctor`. It asserts the correct `offline`/`running` target kind, cleanup, exit semantics, and byte-for-byte `sha256` no-write guarantees. Once QEMU starts, skipped assertions are hard failures. |
+| `catos-system-doctor-qemu-smoke` | Doctor acceptance in QEMU. Read-only scenarios cover offline targets, provider detection, corruption, broken fstab, ambiguity, interrupted recovery, and a real running root with byte-for-byte no-write hashes. A writable cross-workflow scenario runs `catos-system`, selects the typed mount-repair recommendation, verifies the fstab transaction and backup, automatically reruns Doctor, and requires the mount section to become healthy with no residual sessions. |
 | `catos-system-doctor-encrypted-root-qemu-smoke` | Real LUKS2 + Btrfs running-root acceptance. The guest unlocks `/dev/vda` as `/dev/mapper/cryptroot`, creates the CatOS subvolume layout, enters `/@` with `switch_root`, and proves Doctor associates `/dev/dm-0` with the mapper mount despite Btrfs `0:NN` mountinfo identity. It must select `target=running`, skip offline fsck on the RW root, and leave no session mounts. |
 
 The two minimal initramfs tests are opt-in through
@@ -483,7 +490,7 @@ On this host (rustc 1.96.1, x86_64-unknown-linux-musl):
 
 ```
 $ stat -c %s <binary>
-1893120
+1905408
 $ file <binary>
 ... static-pie linked ... stripped
 $ readelf -l <binary> | grep INTERP     # (empty)
@@ -492,7 +499,7 @@ $ bash scripts/verify-static.sh <binary>
 ok: no PT_INTERP segment
 ok: no NEEDED entries
 ok: ELF magic bytes present
-info: binary size 1893120 bytes (1848 KiB)
+info: binary size 1905408 bytes (1860 KiB)
 RESULT: OK (binary is fully static)
 ```
 
@@ -740,6 +747,11 @@ catos-doctor
   internal `catos-system` binary keeps a stable JSON renderer for future
   GUI/front-end consumption; the public entry point intentionally does not
   expose it.
+* **Standalone remains read-only.** `catos-doctor` never executes a
+  recommendation. From the aggregate `catos-system` menu, completed reports
+  may expose typed repair/recovery actions. Unstructured command text is never
+  an execution authority; actions are deduplicated, target-policy filtered,
+  explicitly confirmed, and followed by an automatic Doctor recheck.
 * `--help` / `--version` work as on every other entry point.
 * **Runtime-aware target policy.** On an installed CatOS system or inside a
   CatOS chroot, a confirmed `/` is selected before any offline installation and
