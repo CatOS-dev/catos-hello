@@ -1070,7 +1070,12 @@ impl ChrootEffects for RecordedEffects {
             .ok_or_else(|| "synthetic mountinfo was not configured".into())
     }
 
-    fn enter(&mut self, root: &Path, use_systemd_chroot: bool, shell: &str) -> Result<(), String> {
+    fn enter(
+        &mut self,
+        root: &Path,
+        use_systemd_chroot: bool,
+        shell: &str,
+    ) -> Result<Vec<String>, String> {
         self.record(format!(
             "enter:{}:{use_systemd_chroot}:{shell}",
             root.display()
@@ -1078,7 +1083,7 @@ impl ChrootEffects for RecordedEffects {
         if self.fail_enter {
             Err("synthetic shell failure".into())
         } else {
-            Ok(())
+            Ok(Vec::new())
         }
     }
 

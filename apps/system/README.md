@@ -140,10 +140,14 @@ may still offer a root with a credible system layout as an explicitly
 interactive selection and must also pass or explicitly override final target
 verification. Repair and Recovery discovery remain verified-only. Failures that
 Bash is preferred but not mandatory: when `/bin/bash` and `/usr/bin/bash` are
-unavailable, Chroot falls back to an executable `/bin/sh` or `/usr/bin/sh` and
-passes that shell explicitly to `arch-chroot`. Conditions that make a chroot
-actually impossible, such as inability to mount the selected root or runtime
-filesystems or absence of every usable maintenance shell, remain errors.
+unavailable, Chroot falls back to an executable `/bin/sh` or `/usr/bin/sh`. The
+selected shell is passed explicitly to the host entry tool. `arch-chroot` is
+preferred; if the rescue environment lacks it but provides a trusted `chroot`,
+CatOS uses plain `chroot` and warns that systemd chroot integration is
+unavailable. It does not retry a failed, already-started interactive entry with
+a different backend. Conditions that make a chroot actually impossible, such
+as inability to mount the selected root or runtime filesystems, absence of both
+host entry tools, or absence of every usable target shell, remain errors.
 
 Snapshot recovery mounts the Btrfs top level read-write inside a private mount
 namespace, validates the immutable plan and target identity, performs the root

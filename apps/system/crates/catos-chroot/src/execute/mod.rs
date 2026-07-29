@@ -54,7 +54,12 @@ pub trait ChrootEffects {
         runtime: ChrootRuntimeMount,
     ) -> Result<(), String>;
     fn read_mountinfo(&mut self) -> Result<String, String>;
-    fn enter(&mut self, root: &Path, use_systemd_chroot: bool, shell: &str) -> Result<(), String>;
+    fn enter(
+        &mut self,
+        root: &Path,
+        use_systemd_chroot: bool,
+        shell: &str,
+    ) -> Result<Vec<String>, String>;
     fn unmount(&mut self, target: &Path) -> Result<(), String>;
     fn confirm_unverified(&mut self, _verification: &ChrootVerification) -> Result<bool, String> {
         Ok(false)
@@ -67,6 +72,25 @@ pub struct ChrootExecutionPolicy {
 }
 
 pub struct SystemChrootEffects;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ChrootBackend {
+    ArchChroot(PathBuf),
+    PlainChroot(PathBuf),
+}
+
+fn select_chroot_backend(
+    arch_chroot: Option<PathBuf>,
+    plain_chroot: Option<PathBuf>,
+) -> Result<ChrootBackend, String> {
+    if let Some(path) = arch_chroot {
+        return Ok(ChrootBackend::ArchChroot(path));
+    }
+    if let Some(path) = plain_chroot {
+        return Ok(ChrootBackend::PlainChroot(path));
+    }
+    Err("neither arch-chroot nor chroot was found in trusted system directories".into())
+}
 
 struct PreparedMountpoint<'a> {
     session_root: &'a Path,
@@ -264,23 +288,43 @@ impl ChrootEffects for SystemChrootEffects {
             .map_err(|error| format!("cannot read /proc/self/mountinfo: {error}"))
     }
 
-    fn enter(&mut self, root: &Path, use_systemd_chroot: bool, shell: &str) -> Result<(), String> {
-        let arch_chroot = trusted_tool_path("arch-chroot")
-            .ok_or_else(|| "arch-chroot not found in trusted system directories".to_string())?;
-        let mut command = Command::new(arch_chroot);
-        if use_systemd_chroot {
-            command.arg("-S");
-        }
+    fn enter(
+        &mut self,
+        root: &Path,
+        use_systemd_chroot: bool,
+        shell: &str,
+    ) -> Result<Vec<String>, String> {
+        let backend = select_chroot_backend(
+            trusted_tool_path("arch-chroot"),
+            trusted_tool_path("chroot"),
+        )?;
+        let (mut command, tool_name, warnings) = match backend {
+            ChrootBackend::ArchChroot(path) => {
+                let mut command = Command::new(path);
+                if use_systemd_chroot {
+                    command.arg("-S");
+                }
+                (command, "arch-chroot", Vec::new())
+            }
+            ChrootBackend::PlainChroot(path) => {
+                let warning = if use_systemd_chroot {
+                    "arch-chroot is unavailable; using plain chroot without systemd chroot integration"
+                } else {
+                    "arch-chroot is unavailable; using plain chroot"
+                };
+                (Command::new(path), "chroot", vec![warning.into()])
+            }
+        };
         let status = command
             .arg(root)
             .arg(shell)
             .arg("-i")
             .status()
-            .map_err(|error| format!("failed to run arch-chroot: {error}"))?;
+            .map_err(|error| format!("failed to run {tool_name}: {error}"))?;
         if status.success() {
-            Ok(())
+            Ok(warnings)
         } else {
-            Err(format!("arch-chroot exited with status {status}"))
+            Err(format!("{tool_name} exited with status {status}"))
         }
     }
 
@@ -494,13 +538,16 @@ pub fn execute_plan_with_policy<E: ChrootEffects>(
     }
 
     match effects.enter(session_root, plan.use_systemd_chroot, shell) {
-        Ok(()) => finish_with_cleanup(
-            ChrootExecutionOutcome::Entered,
-            None,
-            mounted_paths,
-            warnings,
-            effects,
-        ),
+        Ok(enter_warnings) => {
+            warnings.extend(enter_warnings);
+            finish_with_cleanup(
+                ChrootExecutionOutcome::Entered,
+                None,
+                mounted_paths,
+                warnings,
+                effects,
+            )
+        }
         Err(error) => finish_with_cleanup(
             ChrootExecutionOutcome::ShellFailed,
             Some(error),
@@ -618,6 +665,32 @@ pub fn open_luks(
         mapper_path: PathBuf::from("/dev/mapper").join(mapper),
         closed: false,
     })
+}
+
+#[cfg(test)]
+mod backend_tests {
+    use super::*;
+
+    #[test]
+    fn arch_chroot_is_preferred_when_both_tools_exist() {
+        assert_eq!(
+            select_chroot_backend(
+                Some(PathBuf::from("/usr/bin/arch-chroot")),
+                Some(PathBuf::from("/usr/bin/chroot")),
+            )
+            .unwrap(),
+            ChrootBackend::ArchChroot(PathBuf::from("/usr/bin/arch-chroot"))
+        );
+    }
+
+    #[test]
+    fn plain_chroot_is_used_only_when_arch_chroot_is_missing() {
+        assert_eq!(
+            select_chroot_backend(None, Some(PathBuf::from("/usr/bin/chroot"))).unwrap(),
+            ChrootBackend::PlainChroot(PathBuf::from("/usr/bin/chroot"))
+        );
+        assert!(select_chroot_backend(None, None).is_err());
+    }
 }
 
 #[cfg(test)]

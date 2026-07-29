@@ -272,7 +272,7 @@ cat > "$INITRAMFS/bin/chroot-child" <<'CHILD'
 #!/bin/sh
 scenario=$1
 case "$scenario" in
-    default|cancel|missing_fstab|missing_os_release|missing_bash) /bin/catos-chroot --no-systemd-chroot ;;
+    default|cancel|missing_fstab|missing_os_release|missing_bash|missing_arch_chroot) /bin/catos-chroot --no-systemd-chroot ;;
     show_snapshots|show_snapshots_cancel) /bin/catos-chroot --no-systemd-chroot --show-btrfs-dot-snapshots ;;
     *) echo "unknown scenario $scenario" >&2; exit 2 ;;
 esac
@@ -307,11 +307,16 @@ case "$scenario" in
     default|missing_fstab) input='y\nn\n' ;;
     missing_os_release) input='1\nn\ny\n' ;;
     missing_bash) input='y\nn\n/usr/bin/chroot-acceptance\nexit\n' ;;
+    missing_arch_chroot) input='y\nn\n' ;;
     show_snapshots) input='1\nn\n' ;;
     cancel) input='n\n' ;;
     show_snapshots_cancel) input='0\n' ;;
     *) input='' ;;
 esac
+if [ "$scenario" = missing_arch_chroot ]; then
+    rm -f /usr/bin/arch-chroot /usr/sbin/arch-chroot \
+        /bin/arch-chroot /sbin/arch-chroot
+fi
 if [ "$scenario" = missing_fstab ] \
     || [ "$scenario" = missing_os_release ] \
     || [ "$scenario" = missing_bash ]; then
@@ -439,6 +444,11 @@ run_qemu missing_bash
 assert_contains "$LAST_LOG" "using fallback maintenance shell /bin/sh because Bash is unavailable" missing_bash
 assert_contains "$LAST_LOG" "__CHROOT_TARGET_VERIFIED__" missing_bash
 
+echo "=== scenario: missing-arch-chroot-plain-fallback ==="
+run_qemu missing_arch_chroot
+assert_contains "$LAST_LOG" "arch-chroot is unavailable; using plain chroot" missing_arch_chroot
+assert_contains "$LAST_LOG" "__CHROOT_TARGET_VERIFIED__" missing_arch_chroot
+
 echo "=== scenario: explicit-show-snapshots ==="
 run_qemu show_snapshots
 assert_contains "$LAST_LOG" "Available CatOS targets:" show_snapshots
@@ -454,4 +464,4 @@ echo "=== scenario: back-from-multiple-targets ==="
 run_qemu show_snapshots_cancel
 assert_contains "$LAST_LOG" "  [0] Back" show_snapshots_cancel
 
-echo "pass: Chroot QEMU acceptance exercised /bin/catos-chroot, target selection, target-local os-release links, unverified-root rescue selection, missing fstab fallback, Bash-to-sh fallback, unavailable and failed auxiliary mounts, descendant skipping, runtime setup, shell entry, reverse cleanup and session removal"
+echo "pass: Chroot QEMU acceptance exercised /bin/catos-chroot, target selection, target-local os-release links, unverified-root rescue selection, missing fstab fallback, Bash-to-sh fallback, arch-chroot-to-chroot fallback, unavailable and failed auxiliary mounts, descendant skipping, runtime setup, shell entry, reverse cleanup and session removal"
