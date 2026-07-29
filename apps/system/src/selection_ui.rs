@@ -178,12 +178,19 @@ fn select_from_candidates<R: BufRead, W: Write>(
 ) -> Selection {
     if !interactive {
         return match candidates {
+            [] => Selection::Unavailable("no target candidate was found".into()),
             [candidate] if candidate.confidence == RootCandidateConfidence::High => {
                 Selection::Selected(Box::new((*candidate).clone()))
             }
-            _ => Selection::Unavailable(
-                "multiple target candidates require an interactive terminal".into(),
-            ),
+            [candidate] => Selection::Unavailable(format!(
+                "the only target candidate {} has {:?} confidence and requires interactive confirmation",
+                candidate.root_device.display(),
+                candidate.confidence
+            )),
+            _ => Selection::Unavailable(format!(
+                "{} target candidates require an interactive terminal",
+                candidates.len()
+            )),
         };
     }
     if candidates.len() == 1 && candidates[0].confidence == RootCandidateConfidence::High {
@@ -431,6 +438,37 @@ mod tests {
         );
         assert!(matches!(selection, Selection::Selected(_)));
         assert!(output.is_empty());
+    }
+
+    #[test]
+    fn noninteractive_selection_distinguishes_low_confidence_from_multiple_candidates() {
+        let mut low = candidate("/dev/uncertain", false);
+        low.confidence = RootCandidateConfidence::Low;
+        let mut input = io::Cursor::new(Vec::<u8>::new());
+        let mut output = Vec::new();
+        match select_from_candidates(&[&low], "catos-repair", false, &mut input, &mut output) {
+            Selection::Unavailable(reason) => {
+                assert!(reason.contains("only target candidate"), "{reason}");
+                assert!(reason.contains("Low confidence"), "{reason}");
+                assert!(!reason.contains("multiple"), "{reason}");
+            }
+            other => panic!("expected unavailable selection, got {other:?}"),
+        }
+
+        let high_a = candidate("/dev/a", false);
+        let high_b = candidate("/dev/b", false);
+        match select_from_candidates(
+            &[&high_a, &high_b],
+            "catos-repair",
+            false,
+            &mut input,
+            &mut output,
+        ) {
+            Selection::Unavailable(reason) => {
+                assert!(reason.contains("2 target candidates"), "{reason}");
+            }
+            other => panic!("expected unavailable selection, got {other:?}"),
+        }
     }
 
     #[test]

@@ -85,6 +85,41 @@ fn each_symlink_is_recognised_in_help_output() {
 }
 
 #[test]
+fn public_help_lines_fit_an_eighty_column_terminal() {
+    let cases: &[&[&str]] = &[
+        &["--help"],
+        &["help", "doctor"],
+        &["help", "chroot"],
+        &["help", "repair"],
+        &["help", "repair", "fs"],
+        &["help", "repair", "mount"],
+        &["help", "repair", "boot"],
+        &["help", "recovery"],
+        &["help", "recovery", "list"],
+        &["help", "recovery", "inspect"],
+        &["help", "recovery", "plan"],
+        &["help", "recovery", "apply"],
+        &["help", "recovery", "status"],
+        &["help", "recovery", "resume"],
+        &["help", "recovery", "revert"],
+        &["help", "update"],
+        &["advanced", "--help"],
+    ];
+    for args in cases {
+        let output = Command::new(bin_path()).args(*args).output().unwrap();
+        assert!(output.status.success(), "help failed for {args:?}");
+        let stdout = String::from_utf8(output.stdout).unwrap();
+        for (line_number, line) in stdout.lines().enumerate() {
+            assert!(
+                line.chars().count() <= 80,
+                "help line {} for {args:?} exceeds 80 columns: {line:?}",
+                line_number + 1
+            );
+        }
+    }
+}
+
+#[test]
 fn core_probe_results_are_identical_across_entry_points() {
     // Public routing change: `catos-recovery` no longer inherits the
     // `catos-system inspect` subcommand. The public recovery surface is
@@ -681,7 +716,7 @@ fn recovery_top_level_help_explains_the_safe_workflow() {
     assert!(stdout.contains("WORKFLOW:"), "stdout={stdout}");
     assert!(stdout.contains("State-changing"), "stdout={stdout}");
     assert!(
-        stdout.contains("List snapshots and recovery transactions"),
+        stdout.contains("List snapshots, pending plans, and recovery transactions"),
         "stdout={stdout}"
     );
 }

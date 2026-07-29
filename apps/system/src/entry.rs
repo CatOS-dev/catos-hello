@@ -1249,6 +1249,20 @@ fn interactive_advanced(context: CommandContext) -> Result<Option<i32>, String> 
     Ok(Some(run_via_full_parser(context, &args)))
 }
 
+fn present_human_report<F>(render: F) -> Result<(), Error>
+where
+    F: FnOnce(&mut Vec<u8>) -> std::io::Result<()>,
+{
+    let mut bytes = Vec::new();
+    render(&mut bytes)
+        .map_err(|error| Error::SerializeFailed(format!("render report: {error}")))?;
+    let text = String::from_utf8(bytes)
+        .map_err(|error| Error::SerializeFailed(format!("rendered report is not UTF-8: {error}")))?;
+    let text = pager::wrap_for_columns(&text, pager::output_columns());
+    pager::present(&text)
+        .map_err(|error| Error::SerializeFailed(format!("stdout write: {error}")))
+}
+
 fn write_stdout_text(program: &str, text: &str) -> i32 {
     use std::io::Write;
 
@@ -1445,8 +1459,6 @@ fn run_repair(context: CommandContext, argv: &[String]) -> i32 {
 /// `--help` / `--version` are handled by the top-level dispatcher
 /// before this function is reached.
 fn run_repair_fs(context: CommandContext, argv: &[String]) -> i32 {
-    use std::io::Write;
-
     let mut json = false;
     let mut explicit_device: Option<String> = None;
     let mut idx = 0;
@@ -1512,10 +1524,7 @@ fn run_repair_fs(context: CommandContext, argv: &[String]) -> i32 {
             write_json_stdout(&s).map_err(|e| Error::SerializeFailed(format!("stdout write: {e}")))
         })
     } else {
-        let mut out = std::io::stdout();
-        crate::output::render_repair_human(&report, &mut out)
-            .and_then(|_| out.flush())
-            .map_err(|e| Error::SerializeFailed(format!("stdout write: {e}")))
+        present_human_report(|out| crate::output::render_repair_human(&report, out))
     };
     match render_result {
         Ok(()) => exit,
@@ -1578,8 +1587,6 @@ fn outcome_exit_code(outcome: crate::fs::model::FsRepairOutcome) -> i32 {
 /// `--help` / `--version` are handled by the top-level dispatcher
 /// before this function is reached.
 fn run_repair_mount(context: CommandContext, argv: &[String]) -> i32 {
-    use std::io::Write;
-
     let mut json = false;
     let mut root_device: Option<String> = None;
     let mut root_subvolume: Option<String> = None;
@@ -1698,10 +1705,7 @@ fn run_repair_mount(context: CommandContext, argv: &[String]) -> i32 {
             write_json_stdout(&s).map_err(|e| Error::SerializeFailed(format!("stdout write: {e}")))
         })
     } else {
-        let mut out = std::io::stdout();
-        crate::output::render_mount_repair_human(&report, &mut out)
-            .and_then(|_| out.flush())
-            .map_err(|e| Error::SerializeFailed(format!("stdout write: {e}")))
+        present_human_report(|out| crate::output::render_mount_repair_human(&report, out))
     };
     match render_result {
         Ok(()) => exit,
@@ -1747,8 +1751,6 @@ fn mount_outcome_exit_code(outcome: crate::mount::model::MountRepairOutcome) -> 
 /// `resume` public subcommands, and no per-provider subcommand
 /// (`catos-repair boot grub` is rejected).
 fn run_repair_boot(context: CommandContext, argv: &[String]) -> i32 {
-    use std::io::Write;
-
     let mut json = false;
     let mut root_device: Option<String> = None;
     let mut root_subvolume: Option<String> = None;
@@ -1867,10 +1869,9 @@ fn run_repair_boot(context: CommandContext, argv: &[String]) -> i32 {
             write_json_stdout(&s).map_err(|e| Error::SerializeFailed(format!("stdout write: {e}")))
         })
     } else {
-        let mut out = std::io::stdout();
-        crate::repair::boot_output::render_boot_repair_human(&report, &mut out)
-            .and_then(|_| out.flush())
-            .map_err(|e| Error::SerializeFailed(format!("stdout write: {e}")))
+        present_human_report(|out| {
+            crate::repair::boot_output::render_boot_repair_human(&report, out)
+        })
     };
     match render_result {
         Ok(()) => exit,
@@ -1981,7 +1982,8 @@ USAGE:
 
 OPTIONS:
     --root-device /dev/...    Select an offline root device.
-    --root-subvolume /@       Select the CatOS standard Btrfs root; other paths are unsupported.
+    --root-subvolume /@       Select the CatOS standard Btrfs root.
+                               Other paths are unsupported.
     --esp-device /dev/...     Select the EFI System Partition.
     --json                    Emit machine-readable JSON.
     -h, --help                Show this help message.
@@ -1998,7 +2000,8 @@ USAGE:
 
 OPTIONS:
     --root-device /dev/...    Select an offline root device.
-    --root-subvolume /@       Select the CatOS standard Btrfs root; other paths are unsupported.
+    --root-subvolume /@       Select the CatOS standard Btrfs root.
+                               Other paths are unsupported.
     --esp-device /dev/...     Select the EFI System Partition.
     --json                    Emit machine-readable JSON.
     -h, --help                Show this help message.
@@ -2021,28 +2024,28 @@ command does not migrate the installation to a different boot provider.
 fn print_recovery_command_help(context: CommandContext, command: &str) -> i32 {
     let version = crate::PROGRAM_VERSION;
     let program = context.program;
-    let common_target = "    --root-device /dev/...     Target Btrfs block device (required).\n    --root-subvolume PATH      Current root subvolume (optional; validated against the plan).\n    --json                     Emit stable JSON on stdout.\n    -h, --help                 Show this help message and exit.\n    -V, --version              Print program version and exit.\n";
+    let common_target = "    --root-device /dev/...     Target Btrfs block device (required).\n    --root-subvolume PATH      Current root subvolume (optional).\n                               Validated against the selected target or plan.\n    --json                     Emit stable JSON on stdout.\n    -h, --help                 Show this help message and exit.\n    -V, --version              Print program version and exit.\n";
     let body = match command {
         "list" => format!(
-            "{program} {version} - list snapshots and recovery transactions\n\nUSAGE:\n    {program} list --root-device /dev/... [OPTIONS]\n\nOPTIONS:\n{common_target}"
+            "{program} {version} - list snapshots, plans, and transactions\n\nUSAGE:\n    {program} list\n        --root-device /dev/... [OPTIONS]\n\nOPTIONS:\n{common_target}"
         ),
         "inspect" => format!(
-            "{program} {version} - inspect a recovery source read-only\n\nUSAGE:\n    {program} inspect --root-device /dev/... --snapshot-subvolume PATH [OPTIONS]\n\nOPTIONS:\n    --snapshot-subvolume PATH  Read-only snapshot to inspect (required).\n{common_target}"
+            "{program} {version} - inspect a recovery source read-only\n\nUSAGE:\n    {program} inspect\n        --root-device /dev/...\n        --snapshot-subvolume PATH [OPTIONS]\n\nOPTIONS:\n    --snapshot-subvolume PATH  Read-only snapshot to inspect (required).\n{common_target}"
         ),
         "plan" => format!(
-            "{program} {version} - create and persist an immutable recovery plan\n\nUSAGE:\n    {program} plan --root-device /dev/... --snapshot-subvolume PATH [OPTIONS]\n\nOPTIONS:\n    --snapshot-subvolume PATH  Read-only snapshot used as the replacement root (required).\n{common_target}\nOUTPUT:\n    The plan is stored on the target at /.catos-recovery/transactions/<plan-id>/plan.json.\n    Stdout reports the plan id, confirmation token, and canonical target path.\n"
+            "{program} {version} - create and persist an immutable recovery plan\n\nUSAGE:\n    {program} plan\n        --root-device /dev/...\n        --snapshot-subvolume PATH [OPTIONS]\n\nOPTIONS:\n    --snapshot-subvolume PATH  Read-only replacement snapshot (required).\n{common_target}\nOUTPUT:\n    Stored on the target at:\n      /.catos-recovery/transactions/<plan-id>/plan.json\n    Stdout reports the plan id, confirmation token, and target path.\n"
         ),
         "apply" => format!(
-            "{program} {version} - apply a confirmed recovery plan\n\nUSAGE:\n    {program} apply --root-device /dev/... --plan-id ID --confirm TOKEN [OPTIONS]\n\nOPTIONS:\n    --plan-id ID               Persisted immutable plan id (required).\n    --confirm TOKEN            Confirmation token embedded in the plan (required).\n{common_target}"
+            "{program} {version} - apply a confirmed recovery plan\n\nUSAGE:\n    {program} apply\n        --root-device /dev/...\n        --plan-id ID --confirm TOKEN [OPTIONS]\n\nOPTIONS:\n    --plan-id ID               Persisted immutable plan id (required).\n    --confirm TOKEN            Token embedded in the plan (required).\n{common_target}"
         ),
         "status" => format!(
-            "{program} {version} - inspect and reconcile one transaction\n\nUSAGE:\n    {program} status --root-device /dev/... --transaction ID [OPTIONS]\n\nOPTIONS:\n    --transaction ID           Recovery transaction id (required).\n{common_target}"
+            "{program} {version} - inspect and reconcile one transaction\n\nUSAGE:\n    {program} status\n        --root-device /dev/... --transaction ID [OPTIONS]\n\nOPTIONS:\n    --transaction ID           Recovery transaction id (required).\n{common_target}"
         ),
         "resume" => format!(
-            "{program} {version} - resume an interrupted transaction\n\nUSAGE:\n    {program} resume --root-device /dev/... --transaction ID [OPTIONS]\n\nOPTIONS:\n    --transaction ID           Recovery transaction id (required).\n{common_target}"
+            "{program} {version} - resume an interrupted transaction\n\nUSAGE:\n    {program} resume\n        --root-device /dev/... --transaction ID [OPTIONS]\n\nOPTIONS:\n    --transaction ID           Recovery transaction id (required).\n{common_target}"
         ),
         "revert" => format!(
-            "{program} {version} - restore the pre-recovery root\n\nUSAGE:\n    {program} revert --root-device /dev/... --transaction ID --confirm TOKEN [OPTIONS]\n\nOPTIONS:\n    --transaction ID           Recovery transaction id (required).\n    --confirm TOKEN            Revert token emitted by `{program} status` (required).\n{common_target}"
+            "{program} {version} - restore the pre-recovery root\n\nUSAGE:\n    {program} revert\n        --root-device /dev/... --transaction ID\n        --confirm TOKEN [OPTIONS]\n\nOPTIONS:\n    --transaction ID           Recovery transaction id (required).\n    --confirm TOKEN            Token emitted by `recovery status` (required).\n{common_target}"
         ),
         _ => {
             eprintln!(
@@ -2098,7 +2101,8 @@ OPTIONS:
     -h, --help    Show this help message.
 
 Run without a command to choose the repair interactively.
-Run `{program} <COMMAND> --help` for command-specific target and output options.
+Run `{program} <COMMAND> --help` for command-specific
+target and output options.
 "#
         ),
         Invocation::CatosUpdate => crate::update::help_text(program),
@@ -2111,18 +2115,19 @@ USAGE:
     {program} <COMMAND> [OPTIONS]
 
 COMMANDS:
-    list      List snapshots and recovery transactions.
+    list      List snapshots, pending plans, and recovery transactions.
     inspect   Inspect a snapshot and target read-only.
-    plan      Create an immutable recovery plan.
+    plan      Create and persist an immutable recovery plan.
     apply     Apply a confirmed recovery plan.
     status    Check and reconcile a transaction.
     resume    Resume an interrupted transaction.
     revert    Restore the previous root.
 
 WORKFLOW:
-    1. Use `list` to find a read-only snapshot.
+    1. Use `list` to find a read-only snapshot or pending plan.
     2. Use `inspect`, then `plan`, before applying changes.
-    3. State-changing commands are `apply`, `resume`, and `revert`.
+    3. `plan` stores its artifact on the selected target.
+    4. State-changing commands are `apply`, `resume`, and `revert`.
 
 Run without a command to choose an action interactively.
 Run `{program} <COMMAND> --help` for required arguments.
@@ -2136,8 +2141,6 @@ Run `{program} <COMMAND> --help` for required arguments.
 /// Dispatch a low-level inspection command.
 /// Builds an InspectionReport and renders the selected view.
 fn run_inspection_command(invocation: Invocation, args: crate::cli::CliArgs) -> i32 {
-    use std::io::Write;
-
     let view = args.command.view();
     match build_report(invocation, &args.root) {
         Ok(report) => {
@@ -2147,10 +2150,7 @@ fn run_inspection_command(invocation: Invocation, args: crate::cli::CliArgs) -> 
                         .map_err(|e| Error::SerializeFailed(format!("stdout write: {e}")))
                 })
             } else {
-                let mut out = std::io::stdout();
-                crate::output::render_human(&report, view, &mut out)
-                    .and_then(|_| out.flush())
-                    .map_err(|e| Error::SerializeFailed(format!("stdout write: {e}")))
+                present_human_report(|out| crate::output::render_human(&report, view, out))
             };
             match result {
                 Ok(()) => exit_code::SUCCESS,
@@ -2170,8 +2170,6 @@ fn run_inspection_command(invocation: Invocation, args: crate::cli::CliArgs) -> 
 /// Dispatch a storage or read-only target-mount command.
 /// Build and render the selected storage outcome.
 fn run_storage_command(invocation: Invocation, args: crate::cli::CliArgs) -> i32 {
-    use std::io::Write;
-
     let outcome_result = match args.command {
         crate::cli::Command::StorageScan => crate::system::run_storage_scan(&args.root),
         crate::cli::Command::TargetPlan => crate::system::run_target_plan(&args.root, &args.target),
@@ -2195,10 +2193,7 @@ fn run_storage_command(invocation: Invocation, args: crate::cli::CliArgs) -> i32
                         .map_err(|e| Error::SerializeFailed(format!("stdout write: {e}")))
                 })
             } else {
-                let mut out = std::io::stdout();
-                crate::output::render_system_human(&outcome, &mut out)
-                    .and_then(|_| out.flush())
-                    .map_err(|e| Error::SerializeFailed(format!("stdout write: {e}")))
+                present_human_report(|out| crate::output::render_system_human(&outcome, out))
             };
             match result {
                 Ok(()) => crate::system::exit_code_for(&outcome),
@@ -2236,8 +2231,6 @@ fn run_storage_command(invocation: Invocation, args: crate::cli::CliArgs) -> i32
 
 /// Dispatch a snapshot recovery command.
 fn run_recovery_command(context: CommandContext, args: crate::cli::CliArgs) -> i32 {
-    use std::io::Write;
-
     let recovery_args = match args.recovery.clone() {
         Some(recovery_args) => recovery_args,
         None => {
@@ -2259,10 +2252,9 @@ fn run_recovery_command(context: CommandContext, args: crate::cli::CliArgs) -> i
             write_json_stdout(&s).map_err(|e| Error::SerializeFailed(format!("stdout write: {e}")))
         })
     } else {
-        let mut out = std::io::stdout();
-        crate::recovery::output::render_recovery_human(&outcome, &mut out)
-            .and_then(|_| out.flush())
-            .map_err(|e| Error::SerializeFailed(format!("stdout write: {e}")))
+        present_human_report(|out| {
+            crate::recovery::output::render_recovery_human(&outcome, out)
+        })
     };
     match result {
         Ok(()) => crate::recovery::exit_code_for(&outcome),

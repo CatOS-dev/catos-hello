@@ -339,8 +339,30 @@ fn render_warnings<W: Write>(
         return Ok(());
     }
     writeln!(out, "Warnings")?;
-    for w in warnings {
-        writeln!(out, "  [{}] {}", w.code, w.message)?;
+    let permission_denied_blkid = warnings
+        .iter()
+        .filter(|warning| {
+            warning.code == "BLKID_FAILED"
+                && warning.message.to_ascii_lowercase().contains("permission denied")
+        })
+        .count();
+    if permission_denied_blkid > 0 {
+        writeln!(
+            out,
+            "  [BLKID_PERMISSION_DENIED] {permission_denied_blkid} devices could not be "
+        )?;
+        writeln!(
+            out,
+            "    probed without administrator privileges; rerun as root for complete metadata"
+        )?;
+    }
+    for warning in warnings {
+        if warning.code == "BLKID_FAILED"
+            && warning.message.to_ascii_lowercase().contains("permission denied")
+        {
+            continue;
+        }
+        writeln!(out, "  [{}] {}", warning.code, warning.message)?;
     }
     Ok(())
 }
@@ -367,6 +389,28 @@ mod tests {
         assert_eq!(v["schemaVersion"], 2);
         assert_eq!(v["kind"], "storage_scan");
         assert!(v.get("payload").is_some());
+    }
+
+    #[test]
+    fn human_warnings_aggregate_repeated_blkid_permission_failures() {
+        let warnings = vec![
+            crate::target::model::Warning::new(
+                "BLKID_FAILED",
+                "/usr/bin/blkid failed for /dev/a: Permission denied",
+            ),
+            crate::target::model::Warning::new(
+                "BLKID_FAILED",
+                "/usr/bin/blkid failed for /dev/b: Permission denied",
+            ),
+            crate::target::model::Warning::new("OTHER", "specific diagnostic"),
+        ];
+        let mut output = Vec::new();
+        render_warnings(&mut output, &warnings).unwrap();
+        let rendered = String::from_utf8(output).unwrap();
+        assert!(rendered.contains("2 devices could not be"));
+        assert!(rendered.contains("specific diagnostic"));
+        assert!(!rendered.contains("/dev/a"));
+        assert!(!rendered.contains("/dev/b"));
     }
 
     #[test]

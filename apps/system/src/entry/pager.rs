@@ -24,6 +24,92 @@ pub fn output_columns() -> usize {
     terminal_size().1
 }
 
+pub fn wrap_for_columns(text: &str, columns: usize) -> String {
+    let width = columns.max(1);
+    let mut rendered = String::new();
+    for line in text.split_inclusive('\n') {
+        let had_newline = line.ends_with('\n');
+        let line = line.strip_suffix('\n').unwrap_or(line);
+        wrap_line(line, width, &mut rendered);
+        if had_newline {
+            rendered.push('\n');
+        }
+    }
+    if text.is_empty() {
+        return rendered;
+    }
+    if !text.ends_with('\n') && rendered.ends_with('\n') {
+        rendered.pop();
+    }
+    rendered
+}
+
+fn wrap_line(line: &str, width: usize, output: &mut String) {
+    if line.chars().count() <= width {
+        output.push_str(line);
+        return;
+    }
+    let indent = line.chars().take_while(|character| character.is_whitespace()).count();
+    let continuation_indent = " ".repeat(indent.min(width.saturating_sub(1)));
+    let words = line.split_whitespace().collect::<Vec<_>>();
+    if words.is_empty() {
+        output.push_str(&line.chars().take(width).collect::<String>());
+        return;
+    }
+
+    let mut current = continuation_indent.clone();
+    let mut current_width = current.chars().count();
+    for word in words {
+        let separator = usize::from(current_width > continuation_indent.chars().count());
+        let word_width = word.chars().count();
+        if current_width + separator + word_width <= width {
+            if separator == 1 {
+                current.push(' ');
+                current_width += 1;
+            }
+            current.push_str(word);
+            current_width += word_width;
+            continue;
+        }
+        if current_width > continuation_indent.chars().count() {
+            output.push_str(&current);
+            output.push('\n');
+            current = continuation_indent.clone();
+            current_width = current.chars().count();
+        }
+        let available = width.saturating_sub(current_width).max(1);
+        let chunks = split_word(word, available);
+        for (index, chunk) in chunks.iter().enumerate() {
+            if index + 1 == chunks.len() {
+                current.push_str(chunk);
+                current_width += chunk.chars().count();
+            } else {
+                output.push_str(&current);
+                output.push_str(chunk);
+                output.push('\n');
+                current = continuation_indent.clone();
+                current_width = current.chars().count();
+            }
+        }
+    }
+    output.push_str(&current);
+}
+
+fn split_word(word: &str, width: usize) -> Vec<String> {
+    let mut chunks = Vec::new();
+    let mut current = String::new();
+    for character in word.chars() {
+        if current.chars().count() == width {
+            chunks.push(std::mem::take(&mut current));
+        }
+        current.push(character);
+    }
+    if !current.is_empty() {
+        chunks.push(current);
+    }
+    chunks
+}
+
 fn should_page(
     stdin_is_tty: bool,
     stdout_is_tty: bool,
@@ -124,6 +210,26 @@ mod tests {
         assert!(output.contains("four\nfive\nsix\n"));
         assert!(!output.contains("seven\n"));
         assert_eq!(output.matches("-- More --").count(), 2);
+    }
+
+    #[test]
+    fn wrapping_preserves_indentation_and_splits_long_tokens() {
+        let text = "  warning: a very long diagnostic sentence\n  /dev/abcdefghijklmnopqrstuvwxyz\n";
+        let wrapped = wrap_for_columns(text, 16);
+        assert!(wrapped.lines().all(|line| line.chars().count() <= 16));
+        assert!(wrapped.lines().skip(1).all(|line| line.starts_with("  ")));
+        assert!(wrapped.contains("diagnostic"));
+        let reconstructed_path = wrapped
+            .lines()
+            .skip_while(|line| !line.contains("/dev/"))
+            .map(str::trim)
+            .collect::<String>();
+        assert_eq!(reconstructed_path, "/dev/abcdefghijklmnopqrstuvwxyz");
+    }
+
+    #[test]
+    fn wrapping_leaves_short_and_blank_lines_unchanged() {
+        assert_eq!(wrap_for_columns("one\n\n  two\n", 20), "one\n\n  two\n");
     }
 
     #[test]
