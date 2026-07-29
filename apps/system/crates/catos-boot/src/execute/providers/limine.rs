@@ -71,13 +71,20 @@ impl BootProviderVerifier for LimineProvider {
         );
         result.command_results.push(cmd_result.clone());
         result.verification.checks.push("LIMINE_LIST".into());
-        let success =
-            cmd_result.exit_code == 0 && !cmd_result.binary_missing && !cmd_result.timed_out;
+        let listing_has_entry = cmd_result
+            .stdout
+            .iter()
+            .any(|byte| !byte.is_ascii_whitespace());
+        let success = cmd_result.exit_code == 0
+            && !cmd_result.binary_missing
+            && !cmd_result.timed_out
+            && !cmd_result.stdout_truncated
+            && listing_has_entry;
         result.verification.passed = success;
         result.passed = success;
         if !success {
             result.verification.failure_message = Some(format!(
-                "limine-list reported failure (exit={})",
+                "limine-list did not return a complete non-empty configuration tree (exit={})",
                 cmd_result.exit_code
             ));
         }
@@ -187,6 +194,23 @@ mod tests {
             b"missing",
         );
         let result = LimineProvider.verify(&ctx(), &runner);
+        assert!(!result.passed);
+        assert!(result.verification.failure_message.is_some());
+        runner.assert_consumed();
+    }
+
+    #[test]
+    fn limine_verify_rejects_an_empty_successful_listing() {
+        let runner = RecordedTargetRunner::new().expect_raw(
+            "limine-list",
+            Vec::<String>::new(),
+            0,
+            b" \n\t",
+            b"",
+        );
+
+        let result = LimineProvider.verify(&ctx(), &runner);
+
         assert!(!result.passed);
         assert!(result.verification.failure_message.is_some());
         runner.assert_consumed();
