@@ -141,7 +141,13 @@ If `os-release` is missing, unreadable, or no longer identifies CatOS, Chroot
 may still offer a root with a credible system layout as an explicitly
 `Unverified system` target. Such a target is never auto-selected: it requires
 interactive selection and must also pass or explicitly override final target
-verification. Repair and Recovery discovery remain verified-only. Failures that
+verification. If discovery cannot produce any candidate at all, an operator can
+use `--root-device /dev/...`; Btrfs roots may additionally specify
+`--root-subvolume PATH`. The path is resolved through a read-only top-level
+probe to its real subvolume ID. Omitting the Btrfs selector uses the filesystem's
+current default subvolume. Explicit encrypted containers must first be unlocked
+and referenced through their mapper device. Repair and Recovery discovery remain
+verified-only. Failures that
 Bash is preferred but not mandatory: when `/bin/bash` and `/usr/bin/bash` are
 unavailable, Chroot falls back to an executable `/bin/sh` or `/usr/bin/sh`. The
 selected shell is passed explicitly to the host entry tool. Offline

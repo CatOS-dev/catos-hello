@@ -274,6 +274,7 @@ scenario=$1
 case "$scenario" in
     default|cancel|missing_fstab|missing_os_release|missing_bash|missing_arch_chroot) /bin/catos-chroot ;;
     missing_os_release_force) /bin/catos-chroot --force-unsafe ;;
+    manual_target) /bin/catos-chroot --root-device /dev/vda --root-subvolume /@ --force-unsafe ;;
     show_snapshots|show_snapshots_cancel) /bin/catos-chroot --show-btrfs-dot-snapshots ;;
     *) echo "unknown scenario $scenario" >&2; exit 2 ;;
 esac
@@ -310,6 +311,7 @@ case "$scenario" in
     missing_os_release_force) input='' ;;
     missing_bash) input='y\nn\n/usr/bin/chroot-acceptance\nexit\n' ;;
     missing_arch_chroot) input='y\nn\n' ;;
+    manual_target) input='n\n/bin/chroot-acceptance\nexit\n' ;;
     show_snapshots) input='1\nn\n' ;;
     cancel) input='n\n' ;;
     show_snapshots_cancel) input='0\n' ;;
@@ -318,6 +320,27 @@ esac
 if [ "$scenario" = missing_arch_chroot ]; then
     rm -f /usr/bin/arch-chroot /usr/sbin/arch-chroot \
         /bin/arch-chroot /sbin/arch-chroot
+fi
+if [ "$scenario" = manual_target ]; then
+    mkdir -p /mnt/target
+    mount -t btrfs -o subvol=@ /dev/vda /mnt/target
+    cp /mnt/target/usr/bin/busybox /tmp/manual-target-busybox
+    rm -f /mnt/target/bin
+    mkdir -p /mnt/target/bin
+    cp /tmp/manual-target-busybox /mnt/target/bin/sh
+    cat > /mnt/target/bin/chroot-acceptance <<'MANUAL_TARGET'
+#!/bin/sh
+set -eu
+[ -r /proc/self/mountinfo ]
+[ -d /sys/class ]
+[ -d /dev ]
+[ -d /run ]
+echo __CHROOT_TARGET_VERIFIED__
+MANUAL_TARGET
+    chmod +x /mnt/target/bin/sh /mnt/target/bin/chroot-acceptance
+    rm -rf /mnt/target/usr
+    rm -f /mnt/target/etc/fstab /mnt/target/etc/os-release
+    umount /mnt/target
 fi
 if [ "$scenario" = missing_fstab ] \
     || [ "$scenario" = missing_os_release ] \
@@ -406,7 +429,7 @@ run_qemu() {
             assert_not_contains "$LAST_LOG" "__CHROOT_TARGET_VERIFIED__" "$scenario"
             assert_not_contains "$LAST_LOG" "__ARCH_CHROOT_BASH_ARGC__" "$scenario"
             ;;
-        missing_bash)
+        missing_bash|manual_target)
             assert_contains "$LAST_LOG" "__CHROOT_TARGET_VERIFIED__" "$scenario"
             assert_not_contains "$LAST_LOG" "__ARCH_CHROOT_BASH_ARGC__" "$scenario"
             ;;
@@ -453,6 +476,15 @@ assert_contains "$LAST_LOG" "__CHROOT_TARGET_VERIFIED__" missing_os_release_forc
 assert_not_contains "$LAST_LOG" "Available maintenance targets:" missing_os_release_force
 assert_not_contains "$LAST_LOG" "Enter the chroot anyway?" missing_os_release_force
 
+echo "=== scenario: explicit-manual-target-without-discovery-candidate ==="
+run_qemu manual_target
+assert_contains "$LAST_LOG" "using explicit root target /dev/vda" manual_target
+assert_contains "$LAST_LOG" "subvolid=" manual_target
+assert_contains "$LAST_LOG" "subvol=@" manual_target
+assert_contains "$LAST_LOG" "using fallback maintenance shell /bin/sh" manual_target
+assert_not_contains "$LAST_LOG" "Available maintenance targets:" manual_target
+assert_contains "$LAST_LOG" "__CHROOT_TARGET_VERIFIED__" manual_target
+
 echo "=== scenario: missing-bash-sh-fallback ==="
 run_qemu missing_bash
 assert_contains "$LAST_LOG" "using fallback maintenance shell /bin/sh because Bash is unavailable" missing_bash
@@ -478,4 +510,4 @@ echo "=== scenario: back-from-multiple-targets ==="
 run_qemu show_snapshots_cancel
 assert_contains "$LAST_LOG" "  [0] Back" show_snapshots_cancel
 
-echo "pass: Chroot QEMU acceptance exercised /bin/catos-chroot, default offline entry, target selection, target-local os-release links, unverified-root rescue selection, forced noninteractive unverified selection, missing fstab fallback, Bash-to-sh fallback, arch-chroot-to-chroot fallback, unavailable and failed auxiliary mounts, descendant skipping, runtime setup, shell entry, reverse cleanup and session removal"
+echo "pass: Chroot QEMU acceptance exercised /bin/catos-chroot, default offline entry, target selection, target-local os-release links, unverified-root rescue selection, forced noninteractive unverified selection, explicit manual Btrfs target selection, missing fstab fallback, Bash-to-sh fallback, arch-chroot-to-chroot fallback, unavailable and failed auxiliary mounts, descendant skipping, runtime setup, shell entry, reverse cleanup and session removal"

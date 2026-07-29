@@ -1031,6 +1031,8 @@ fn chroot_help_lists_documented_flags() {
     let (ok, _code, stdout, _stderr) = run_via(&link, &["--help"]);
     assert!(ok);
     for flag in [
+        "--root-device",
+        "--root-subvolume",
         "--no-auto-mount",
         "--systemd-chroot",
         "--no-systemd-chroot",

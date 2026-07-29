@@ -2,6 +2,7 @@
 
 use std::io::{self, BufRead, IsTerminal, Write};
 
+use crate::chroot::diagnose::btrfs::list_subvolumes;
 use crate::chroot::diagnose::fstab::read_from_device;
 use crate::chroot::execute::{
     authorize, execute_plan_with_policy, open_luks, ChrootExecutionPolicy, ChrootPrivilegeEvidence,
@@ -12,12 +13,14 @@ use crate::chroot::plan::{build_plan, ChrootPlanInputs, ExtraMountSelection};
 use crate::chroot::session::{establish_private_namespace, ChrootSessionRoot};
 use crate::error::exit_code;
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct ChrootOptions {
     no_auto_mount: bool,
     use_systemd_chroot: bool,
     show_btrfs_dot_snapshots: bool,
     allow_unsafe: bool,
+    root_device: Option<String>,
+    root_subvolume: Option<String>,
 }
 
 pub fn run(argv: &[String], program: &str) -> i32 {
@@ -66,15 +69,36 @@ pub fn run(argv: &[String], program: &str) -> i32 {
         return exit_code::PROBE_FAILED;
     }
 
-    let selection_policy = if options.allow_unsafe {
-        crate::selection_ui::TargetSelectionPolicy::OfflineOnlyAllowUnverified
-    } else {
-        crate::selection_ui::TargetSelectionPolicy::OfflineOnly
-    };
     let mut opened_luks: Option<OpenedLuks> = None;
-    let selected_target =
-        match crate::selection_ui::select_target_with_policy(&discovery, program, selection_policy)
-        {
+    let manual_target = match resolve_manual_target(&options, &devices) {
+        Ok(target) => target,
+        Err(error) => {
+            eprintln!("{program}: {error}");
+            return exit_code::ARG_ERROR;
+        }
+    };
+    let (root_device, selected_subvolume) = if let Some(target) = manual_target {
+        eprintln!(
+            "{program}: warning: using explicit root target {}{}",
+            target.0.name,
+            target
+                .1
+                .as_ref()
+                .map(|subvolume| format!(" subvolid={} subvol={}", subvolume.id, subvolume.name))
+                .unwrap_or_default()
+        );
+        target
+    } else {
+        let selection_policy = if options.allow_unsafe {
+            crate::selection_ui::TargetSelectionPolicy::OfflineOnlyAllowUnverified
+        } else {
+            crate::selection_ui::TargetSelectionPolicy::OfflineOnly
+        };
+        let selected_target = match crate::selection_ui::select_target_with_policy(
+            &discovery,
+            program,
+            selection_policy,
+        ) {
             crate::selection_ui::Selection::Selected(candidate) => *candidate,
             crate::selection_ui::Selection::Declined => return exit_code::SUCCESS,
             crate::selection_ui::Selection::Unavailable(reason)
@@ -145,43 +169,44 @@ pub fn run(argv: &[String], program: &str) -> i32 {
                 return exit_code::PROBE_FAILED;
             }
         };
-    let root_device = match find_selected_device(&devices, &selected_target.root_device) {
-        Some(device) => device.clone(),
-        None => {
-            return fail_with_luks_cleanup(
-                program,
-                opened_luks.take(),
-                exit_code::PROBE_FAILED,
-                format!(
-                    "selected device {} disappeared from fresh shared inventory",
-                    selected_target.root_device.display()
-                ),
-            );
-        }
-    };
-
-    let selected_subvolume = if root_device.is_btrfs() {
-        match (
-            selected_target.root_subvolume.as_deref(),
-            selected_target.root_subvolume_id,
-        ) {
-            (Some(path), Some(id)) => Some(Subvolume {
-                id,
-                name: path.trim_start_matches('/').to_string(),
-            }),
-            _ => {
+        let root_device = match find_selected_device(&devices, &selected_target.root_device) {
+            Some(device) => device.clone(),
+            None => {
                 return fail_with_luks_cleanup(
                     program,
                     opened_luks.take(),
                     exit_code::PROBE_FAILED,
-                    "selected Btrfs target has incomplete shared subvolume identity".into(),
-                )
+                    format!(
+                        "selected device {} disappeared from fresh shared inventory",
+                        selected_target.root_device.display()
+                    ),
+                );
             }
-        }
-    } else {
-        None
-    };
+        };
 
+        let selected_subvolume = if root_device.is_btrfs() {
+            match (
+                selected_target.root_subvolume.as_deref(),
+                selected_target.root_subvolume_id,
+            ) {
+                (Some(path), Some(id)) => Some(Subvolume {
+                    id,
+                    name: path.trim_start_matches('/').to_string(),
+                }),
+                _ => {
+                    return fail_with_luks_cleanup(
+                        program,
+                        opened_luks.take(),
+                        exit_code::PROBE_FAILED,
+                        "selected Btrfs target has incomplete shared subvolume identity".into(),
+                    )
+                }
+            }
+        } else {
+            None
+        };
+        (root_device, selected_subvolume)
+    };
     let fstab = if options.no_auto_mount {
         Vec::new()
     } else {
@@ -316,6 +341,102 @@ fn target_inventory_for_chroot(
     (devices, warnings)
 }
 
+fn resolve_manual_target(
+    options: &ChrootOptions,
+    devices: &[BlockDevice],
+) -> Result<Option<(BlockDevice, Option<Subvolume>)>, String> {
+    let Some(path) = options.root_device.as_deref() else {
+        return Ok(None);
+    };
+    let device = find_selected_device(devices, std::path::Path::new(path))
+        .ok_or_else(|| format!("explicit root device {path} was not found in block inventory"))?;
+    if device.is_crypto_luks() {
+        return Err(format!(
+            "explicit root device {path} is an encrypted container; unlock it and select its mapper device"
+        ));
+    }
+    let subvolume = match options.root_subvolume.as_deref() {
+        None => None,
+        Some(_) if !device.is_btrfs() => {
+            return Err(format!(
+                "--root-subvolume is valid only for a Btrfs root, but {path} is {}",
+                device.fs_type.as_deref().unwrap_or("untyped")
+            ));
+        }
+        Some(requested) => {
+            let subvolumes = list_subvolumes(&device, options.show_btrfs_dot_snapshots)
+                .map_err(|error| format!("cannot inspect Btrfs root {path}: {error}"))?;
+            Some(select_manual_subvolume(&subvolumes, requested)?)
+        }
+    };
+    Ok(Some((device, subvolume)))
+}
+
+fn select_manual_subvolume(subvolumes: &[Subvolume], requested: &str) -> Result<Subvolume, String> {
+    let requested = normalize_manual_subvolume(requested)?;
+    subvolumes
+        .iter()
+        .find(|subvolume| normalize_subvolume_name(&subvolume.name) == requested)
+        .cloned()
+        .ok_or_else(|| format!("Btrfs root subvolume {requested:?} was not found"))
+}
+
+fn normalize_subvolume_name(value: &str) -> String {
+    let trimmed = value.trim_start_matches('/');
+    if trimmed.is_empty() {
+        "/".into()
+    } else {
+        trimmed.into()
+    }
+}
+
+fn normalize_manual_subvolume(value: &str) -> Result<String, String> {
+    use std::path::Component;
+
+    if value.is_empty() || value.as_bytes().contains(&0) {
+        return Err("root subvolume path is empty or contains NUL".into());
+    }
+    let mut parts = Vec::new();
+    for component in std::path::Path::new(value).components() {
+        match component {
+            Component::RootDir => {}
+            Component::Normal(part) => parts.push(part.to_string_lossy().into_owned()),
+            Component::CurDir | Component::ParentDir | Component::Prefix(_) => {
+                return Err(format!(
+                    "root subvolume path {value:?} contains a dot, parent, or prefix component"
+                ));
+            }
+        }
+    }
+    if parts.is_empty() {
+        Ok("/".into())
+    } else {
+        Ok(parts.join("/"))
+    }
+}
+
+fn validate_manual_device_path(value: &str) -> Result<(), String> {
+    use std::path::Component;
+
+    let path = std::path::Path::new(value);
+    if !path.is_absolute() || !path.starts_with("/dev") || path == std::path::Path::new("/dev") {
+        return Err(format!(
+            "--root-device must be an absolute device path below /dev, got {value:?}"
+        ));
+    }
+    for component in path.components() {
+        match component {
+            Component::RootDir | Component::Normal(_) => {}
+            Component::CurDir | Component::ParentDir | Component::Prefix(_) => {
+                return Err(format!(
+                    "--root-device {value:?} contains a dot, parent, or prefix component"
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 fn validate_discovery_cleanup(
     report: &crate::target::discovery::DiscoveryReport,
 ) -> Result<(), String> {
@@ -430,6 +551,7 @@ pub fn help_text(program: &str) -> String {
 
 USAGE:
     {program} [OPTIONS]
+    {program} --root-device /dev/... [--root-subvolume PATH] [OPTIONS]
 
 The command finds installed CatOS systems, lets you choose one, unlocks an
 encrypted target when needed, mounts its configured filesystems, and opens
@@ -437,6 +559,8 @@ an interactive shell. Everything mounted or unlocked by this command is
 cleaned up when the shell exits.
 
 OPTIONS:
+    --root-device /dev/...     Use an explicit filesystem device as root.
+    --root-subvolume PATH      Explicit Btrfs root subvolume path.
     --no-auto-mount            Mount only the selected root filesystem.
     --systemd-chroot           Use arch-chroot systemd-run integration.
     --no-systemd-chroot        Use offline mode (the default).
@@ -453,19 +577,63 @@ is available.
 
 fn parse_argv(argv: &[String]) -> Result<ChrootOptions, String> {
     let mut options = ChrootOptions::default();
-    for argument in argv {
+    let mut index = 0;
+    while index < argv.len() {
+        let argument = &argv[index];
         match argument.as_str() {
             "--no-auto-mount" => options.no_auto_mount = true,
             "--systemd-chroot" => options.use_systemd_chroot = true,
             "--no-systemd-chroot" => options.use_systemd_chroot = false,
             "--show-btrfs-dot-snapshots" => options.show_btrfs_dot_snapshots = true,
             "--force-unsafe" => options.allow_unsafe = true,
+            "--root-device" => {
+                index += 1;
+                options.root_device = Some(
+                    argv.get(index)
+                        .filter(|value| !value.is_empty())
+                        .ok_or_else(|| "--root-device requires a /dev/... value".to_string())?
+                        .clone(),
+                );
+            }
+            "--root-subvolume" => {
+                index += 1;
+                options.root_subvolume = Some(
+                    argv.get(index)
+                        .filter(|value| !value.is_empty())
+                        .ok_or_else(|| "--root-subvolume requires a path".to_string())?
+                        .clone(),
+                );
+            }
+            other if other.starts_with("--root-device=") => {
+                let value = &other["--root-device=".len()..];
+                if value.is_empty() {
+                    return Err("--root-device requires a /dev/... value".into());
+                }
+                options.root_device = Some(value.into());
+            }
+            other if other.starts_with("--root-subvolume=") => {
+                let value = &other["--root-subvolume=".len()..];
+                if value.is_empty() {
+                    return Err("--root-subvolume requires a path".into());
+                }
+                options.root_subvolume = Some(value.into());
+            }
             other => {
                 return Err(format!(
-                    "unknown option {other:?}; expected --no-auto-mount, --systemd-chroot, --no-systemd-chroot, --show-btrfs-dot-snapshots, --force-unsafe"
-                ))
+                    "unknown option {other:?}; expected --root-device, --root-subvolume, --no-auto-mount, --systemd-chroot, --no-systemd-chroot, --show-btrfs-dot-snapshots, --force-unsafe"
+                ));
             }
         }
+        index += 1;
+    }
+    if options.root_subvolume.is_some() && options.root_device.is_none() {
+        return Err("--root-subvolume requires --root-device".into());
+    }
+    if let Some(device) = options.root_device.as_deref() {
+        validate_manual_device_path(device)?;
+    }
+    if let Some(subvolume) = options.root_subvolume.as_deref() {
+        normalize_manual_subvolume(subvolume)?;
     }
     Ok(options)
 }
@@ -653,16 +821,54 @@ mod tests {
             "--systemd-chroot".into(),
             "--show-btrfs-dot-snapshots".into(),
             "--force-unsafe".into(),
+            "--root-device".into(),
+            "/dev/mapper/catos-root".into(),
+            "--root-subvolume=/@".into(),
         ])
         .unwrap();
         assert!(options.no_auto_mount);
         assert!(options.use_systemd_chroot);
         assert!(options.show_btrfs_dot_snapshots);
         assert!(options.allow_unsafe);
+        assert_eq!(
+            options.root_device.as_deref(),
+            Some("/dev/mapper/catos-root")
+        );
+        assert_eq!(options.root_subvolume.as_deref(), Some("/@"));
 
         let offline =
             parse_argv(&["--systemd-chroot".into(), "--no-systemd-chroot".into()]).unwrap();
         assert!(!offline.use_systemd_chroot);
+    }
+
+    #[test]
+    fn manual_target_arguments_validate_device_and_subvolume_paths() {
+        assert!(parse_argv(&["--root-subvolume".into(), "/@".into()]).is_err());
+        assert!(parse_argv(&["--root-device".into(), "/tmp/root".into()]).is_err());
+        assert!(parse_argv(&[
+            "--root-device".into(),
+            "/dev/vda".into(),
+            "--root-subvolume".into(),
+            "/@/../host".into(),
+        ])
+        .is_err());
+    }
+
+    #[test]
+    fn manual_subvolume_selection_uses_real_subvolume_identity() {
+        let subvolumes = vec![
+            Subvolume {
+                id: 5,
+                name: "/".into(),
+            },
+            Subvolume {
+                id: 256,
+                name: "@".into(),
+            },
+        ];
+        assert_eq!(select_manual_subvolume(&subvolumes, "/@").unwrap().id, 256);
+        assert_eq!(select_manual_subvolume(&subvolumes, "/").unwrap().id, 5);
+        assert!(select_manual_subvolume(&subvolumes, "/missing").is_err());
     }
 
     #[test]
