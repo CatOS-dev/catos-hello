@@ -376,23 +376,39 @@ pub fn execute_plan_with_policy<E: ChrootEffects>(
     }
     mounted_paths.push(session_root.to_path_buf());
 
+    let mut effective_mounts = Vec::new();
+    let mut failed_mount_points: Vec<String> = Vec::new();
     for mount in &plan.mounts {
+        if let Some(parent) = failed_mount_points
+            .iter()
+            .find(|parent| is_descendant_mount_point(&mount.mount_point, parent))
+        {
+            warnings.push(format!(
+                "auxiliary mount {} was skipped because parent mount {parent} failed",
+                mount.mount_point
+            ));
+            continue;
+        }
+
         let target = target_path(session_root, &mount.mount_point);
-        if let Err(error) = effects.mount(
+        match effects.mount(
             &mount.device,
             session_root,
             &mount.mount_point,
             &mount.options,
         ) {
-            return finish_with_cleanup(
-                ChrootExecutionOutcome::MountFailed,
-                Some(error),
-                mounted_paths,
-                warnings,
-                effects,
-            );
+            Ok(()) => {
+                mounted_paths.push(target);
+                effective_mounts.push(mount.clone());
+            }
+            Err(error) => {
+                warnings.push(format!(
+                    "auxiliary mount {} from {} failed and was skipped: {error}",
+                    mount.mount_point, mount.device.name
+                ));
+                failed_mount_points.push(mount.mount_point.clone());
+            }
         }
-        mounted_paths.push(target);
     }
 
     for runtime in ChrootRuntimeMount::ALL {
@@ -421,7 +437,13 @@ pub fn execute_plan_with_policy<E: ChrootEffects>(
             );
         }
     };
-    let verification = verify_assembled_target(session_root, plan, &mountinfo);
+    let effective_plan = ChrootPlan {
+        root: plan.root.clone(),
+        mounts: effective_mounts,
+        use_systemd_chroot: plan.use_systemd_chroot,
+        warnings: Vec::new(),
+    };
+    let verification = verify_assembled_target(session_root, &effective_plan, &mountinfo);
     if !verification.ready {
         let continue_anyway = if policy.allow_unverified {
             true
@@ -520,6 +542,12 @@ fn finish_with_cleanup<E: ChrootEffects>(
             residual_paths,
         }
     }
+}
+
+fn is_descendant_mount_point(candidate: &str, parent: &str) -> bool {
+    let candidate = Path::new(candidate);
+    let parent = Path::new(parent);
+    candidate != parent && candidate.starts_with(parent)
 }
 
 fn target_path(root: &Path, mount_point: &str) -> PathBuf {

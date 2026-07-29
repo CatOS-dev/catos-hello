@@ -52,8 +52,9 @@ pub fn run(argv: &[String], program: &str) -> i32 {
         },
     );
     if let Err(error) = validate_discovery_cleanup(&discovery) {
-        eprintln!("{program}: {error}");
-        return exit_code::PROBE_FAILED;
+        eprintln!(
+            "{program}: warning: {error}; continuing because the private mount namespace is discarded on exit"
+        );
     }
     let (mut devices, inventory_warnings) = target_inventory_for_chroot(&discovery.inventory);
     for warning in inventory_warnings {
@@ -180,12 +181,8 @@ pub fn run(argv: &[String], program: &str) -> i32 {
         match read_from_device(&root_device, selected_subvolume.as_ref()) {
             Ok(entries) => entries,
             Err(message) => {
-                return fail_with_luks_cleanup(
-                    program,
-                    opened_luks.take(),
-                    exit_code::PROBE_FAILED,
-                    message,
-                );
+                eprintln!("{program}: warning: {message}; continuing with the selected root only");
+                Vec::new()
             }
         }
     };

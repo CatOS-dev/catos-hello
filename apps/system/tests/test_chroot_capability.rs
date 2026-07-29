@@ -247,6 +247,33 @@ fn chroot_plan_skips_unsafe_fstab_mountpoint_and_keeps_rescue_plan_usable() {
 }
 
 #[test]
+fn chroot_plan_skips_missing_secondary_device_without_nofail() {
+    let root = device("/dev/vda2", "ext4", "root");
+    let fstab = [FsTabEntry {
+        fs_spec: "UUID=missing-data".into(),
+        mountpoint: "/srv".into(),
+        vfs_type: "ext4".into(),
+        mount_options: vec!["defaults".into()],
+    }];
+
+    let plan = build_plan(ChrootPlanInputs {
+        root_device: &root,
+        root_subvolume: None,
+        fstab: &fstab,
+        devices: std::slice::from_ref(&root),
+        extra_mounts: &[],
+        use_systemd_chroot: true,
+    })
+    .unwrap();
+
+    assert!(plan.mounts.is_empty());
+    assert!(plan
+        .warnings
+        .iter()
+        .any(|warning| warning.contains("was not discovered")));
+}
+
+#[test]
 fn chroot_plan_rejects_mountpoint_escape() {
     let root = device("/dev/vda2", "ext4", "root");
     let data = device("/dev/vda3", "ext4", "data");
@@ -569,7 +596,7 @@ fn chroot_plan_deduplicates_equivalent_btrfs_subvolume_paths() {
 }
 
 #[test]
-fn chroot_plan_rejects_non_numeric_btrfs_subvolume_id() {
+fn chroot_plan_skips_non_numeric_btrfs_subvolume_id() {
     let root = device("/dev/vda2", "btrfs", "root");
     let selected = Subvolume {
         id: 256,
@@ -582,7 +609,7 @@ fn chroot_plan_rejects_non_numeric_btrfs_subvolume_id() {
         mount_options: vec!["subvolid=not-a-number".into()],
     }];
 
-    let error = build_plan(ChrootPlanInputs {
+    let plan = build_plan(ChrootPlanInputs {
         root_device: &root,
         root_subvolume: Some(&selected),
         fstab: &fstab,
@@ -590,13 +617,17 @@ fn chroot_plan_rejects_non_numeric_btrfs_subvolume_id() {
         extra_mounts: &[],
         use_systemd_chroot: true,
     })
-    .unwrap_err();
+    .unwrap();
 
-    assert!(error.to_string().contains("invalid Btrfs subvolid"));
+    assert!(plan.mounts.is_empty());
+    assert!(plan
+        .warnings
+        .iter()
+        .any(|warning| warning.contains("invalid Btrfs subvolid")));
 }
 
 #[test]
-fn chroot_plan_rejects_conflicting_sources_for_one_mountpoint() {
+fn chroot_plan_keeps_first_conflicting_mount_and_warns_about_the_later_entry() {
     let root = device("/dev/vda3", "ext4", "root");
     let first = device("/dev/vda1", "vfat", "first");
     let second = device("/dev/vda2", "ext4", "second");
@@ -616,7 +647,7 @@ fn chroot_plan_rejects_conflicting_sources_for_one_mountpoint() {
     ];
     let devices = [root.clone(), first, second];
 
-    let error = build_plan(ChrootPlanInputs {
+    let plan = build_plan(ChrootPlanInputs {
         root_device: &root,
         root_subvolume: None,
         fstab: &fstab,
@@ -624,13 +655,18 @@ fn chroot_plan_rejects_conflicting_sources_for_one_mountpoint() {
         extra_mounts: &[],
         use_systemd_chroot: true,
     })
-    .unwrap_err();
+    .unwrap();
 
-    assert!(error.to_string().contains("conflicting mount entries"));
+    assert_eq!(plan.mounts.len(), 1);
+    assert_eq!(plan.mounts[0].device.name, "/dev/vda1");
+    assert!(plan
+        .warnings
+        .iter()
+        .any(|warning| warning.contains("conflicting mount entries")));
 }
 
 #[test]
-fn chroot_plan_rejects_btrfs_selector_for_non_btrfs_filesystem() {
+fn chroot_plan_skips_btrfs_selector_for_non_btrfs_filesystem() {
     let root = device("/dev/vda2", "ext4", "root");
     let data = device("/dev/vda3", "ext4", "data");
     let fstab = [FsTabEntry {
@@ -641,7 +677,7 @@ fn chroot_plan_rejects_btrfs_selector_for_non_btrfs_filesystem() {
     }];
     let devices = [root.clone(), data];
 
-    let error = build_plan(ChrootPlanInputs {
+    let plan = build_plan(ChrootPlanInputs {
         root_device: &root,
         root_subvolume: None,
         fstab: &fstab,
@@ -649,13 +685,17 @@ fn chroot_plan_rejects_btrfs_selector_for_non_btrfs_filesystem() {
         extra_mounts: &[],
         use_systemd_chroot: true,
     })
-    .unwrap_err();
+    .unwrap();
 
-    assert!(error.to_string().contains("Btrfs selector"));
+    assert!(plan.mounts.is_empty());
+    assert!(plan
+        .warnings
+        .iter()
+        .any(|warning| warning.contains("Btrfs selector")));
 }
 
 #[test]
-fn chroot_plan_rejects_root_fstab_identity_mismatch() {
+fn chroot_plan_warns_on_root_fstab_identity_mismatch_and_keeps_selected_root() {
     let root = device("/dev/vda2", "ext4", "root");
     let other = device("/dev/vda3", "ext4", "other");
     let fstab = [FsTabEntry {
@@ -666,7 +706,7 @@ fn chroot_plan_rejects_root_fstab_identity_mismatch() {
     }];
     let devices = [root.clone(), other];
 
-    let error = build_plan(ChrootPlanInputs {
+    let plan = build_plan(ChrootPlanInputs {
         root_device: &root,
         root_subvolume: None,
         fstab: &fstab,
@@ -674,13 +714,17 @@ fn chroot_plan_rejects_root_fstab_identity_mismatch() {
         extra_mounts: &[],
         use_systemd_chroot: true,
     })
-    .unwrap_err();
+    .unwrap();
 
-    assert!(error.to_string().contains("root fstab entry"));
+    assert_eq!(plan.root.device, root);
+    assert!(plan
+        .warnings
+        .iter()
+        .any(|warning| warning.contains("root fstab entry")));
 }
 
 #[test]
-fn chroot_plan_rejects_swap_entry_masquerading_as_root() {
+fn chroot_plan_warns_on_swap_entry_masquerading_as_root() {
     let root = device("/dev/vda2", "ext4", "root");
     let fstab = [FsTabEntry {
         fs_spec: "UUID=root".into(),
@@ -689,7 +733,7 @@ fn chroot_plan_rejects_swap_entry_masquerading_as_root() {
         mount_options: vec!["defaults".into()],
     }];
 
-    let error = build_plan(ChrootPlanInputs {
+    let plan = build_plan(ChrootPlanInputs {
         root_device: &root,
         root_subvolume: None,
         fstab: &fstab,
@@ -697,9 +741,13 @@ fn chroot_plan_rejects_swap_entry_masquerading_as_root() {
         extra_mounts: &[],
         use_systemd_chroot: true,
     })
-    .unwrap_err();
+    .unwrap();
 
-    assert!(error.to_string().contains("root fstab entry"));
+    assert_eq!(plan.root.device, root);
+    assert!(plan
+        .warnings
+        .iter()
+        .any(|warning| warning.contains("root fstab entry")));
 }
 
 #[test]
@@ -780,7 +828,7 @@ fn chroot_plan_resolves_uuid_partuuid_label_and_device_path() {
 }
 
 #[test]
-fn chroot_plan_rejects_ambiguous_label_resolution() {
+fn chroot_plan_skips_ambiguous_label_resolution() {
     let root = device("/dev/vda3", "ext4", "root");
     let mut first = device("/dev/vda1", "vfat", "esp-a");
     first.label = Some("ESP".into());
@@ -794,7 +842,7 @@ fn chroot_plan_rejects_ambiguous_label_resolution() {
     }];
     let devices = [root.clone(), first, second];
 
-    let error = build_plan(ChrootPlanInputs {
+    let plan = build_plan(ChrootPlanInputs {
         root_device: &root,
         root_subvolume: None,
         fstab: &fstab,
@@ -802,9 +850,13 @@ fn chroot_plan_rejects_ambiguous_label_resolution() {
         extra_mounts: &[],
         use_systemd_chroot: true,
     })
-    .unwrap_err();
+    .unwrap();
 
-    assert!(error.to_string().contains("ambiguous across 2"));
+    assert!(plan.mounts.is_empty());
+    assert!(plan
+        .warnings
+        .iter()
+        .any(|warning| warning.contains("ambiguous across 2")));
 }
 
 #[test]
@@ -1163,14 +1215,21 @@ fn successful_shell_with_failed_unmount_is_cleanup_incomplete() {
 }
 
 #[test]
-fn mount_failure_cleans_completed_mounts_in_reverse_order() {
-    let root_device = device("/dev/vda3", "ext4", "root");
-    let boot_device = device("/dev/vda2", "ext4", "boot");
+fn auxiliary_mount_failure_warns_skips_descendants_and_still_enters_chroot() {
+    let root_device = device("/dev/vda4", "ext4", "root");
+    let boot_device = device("/dev/vda3", "ext4", "boot");
+    let home_device = device("/dev/vda2", "ext4", "home");
     let esp_device = device("/dev/vda1", "vfat", "esp");
     let fstab = [
         FsTabEntry {
             fs_spec: "UUID=boot".into(),
             mountpoint: "/boot".into(),
+            vfs_type: "ext4".into(),
+            mount_options: vec!["defaults".into()],
+        },
+        FsTabEntry {
+            fs_spec: "UUID=home".into(),
+            mountpoint: "/home".into(),
             vfs_type: "ext4".into(),
             mount_options: vec!["defaults".into()],
         },
@@ -1185,14 +1244,34 @@ fn mount_failure_cleans_completed_mounts_in_reverse_order() {
         root_device: &root_device,
         root_subvolume: None,
         fstab: &fstab,
-        devices: &[root_device.clone(), boot_device, esp_device],
+        devices: &[root_device.clone(), boot_device, home_device, esp_device],
         extra_mounts: &[],
         use_systemd_chroot: true,
     })
     .unwrap();
     let authorization = authorize(ChrootPrivilegeEvidence::EffectiveUid(0)).unwrap();
-    let session_root = scratch("reverse-cleanup");
-    let expected_calls = VecDeque::from([
+    let session_root = scratch("auxiliary-mount-failure");
+    fs::create_dir_all(session_root.join("etc")).unwrap();
+    write_valid_arch_chroot_shell(&session_root);
+    fs::write(session_root.join("etc/os-release"), b"ID=catos\n").unwrap();
+
+    let mut effective_plan = plan.clone();
+    effective_plan
+        .mounts
+        .retain(|mount| mount.mount_point == "/home");
+    let mountinfo = mountinfo_for_plan(&session_root, &effective_plan);
+
+    let boot = plan
+        .mounts
+        .iter()
+        .find(|mount| mount.mount_point == "/boot")
+        .unwrap();
+    let home = plan
+        .mounts
+        .iter()
+        .find(|mount| mount.mount_point == "/home")
+        .unwrap();
+    let mut expected_calls = VecDeque::from([
         mount_call(
             &plan.root.device,
             &session_root,
@@ -1200,23 +1279,81 @@ fn mount_failure_cleans_completed_mounts_in_reverse_order() {
             &plan.root.options,
         ),
         mount_call(
-            &plan.mounts[0].device,
+            &boot.device,
             &session_root,
-            &plan.mounts[0].mount_point,
-            &plan.mounts[0].options,
+            &boot.mount_point,
+            &boot.options,
         ),
         mount_call(
-            &plan.mounts[1].device,
+            &home.device,
             &session_root,
-            &plan.mounts[1].mount_point,
-            &plan.mounts[1].options,
+            &home.mount_point,
+            &home.options,
         ),
-        unmount_call(&session_root.join("boot")),
-        unmount_call(&session_root),
     ]);
+    for runtime in ChrootRuntimeMount::ALL {
+        expected_calls.push_back(runtime_call(&session_root, runtime));
+    }
+    expected_calls.push_back("mountinfo".into());
+    expected_calls.push_back(format!(
+        "enter:{}:{}",
+        session_root.display(),
+        plan.use_systemd_chroot
+    ));
+    for runtime in ChrootRuntimeMount::ALL.into_iter().rev() {
+        expected_calls.push_back(unmount_call(
+            &session_root.join(runtime.mount_point().trim_start_matches('/')),
+        ));
+    }
+    expected_calls.push_back(unmount_call(&session_root.join("home")));
+    expected_calls.push_back(unmount_call(&session_root));
+
     let mut effects = RecordedEffects {
         expected_calls,
-        fail_mount_point: Some("/boot/efi".into()),
+        fail_mount_point: Some("/boot".into()),
+        mountinfo: Some(mountinfo),
+        ..RecordedEffects::default()
+    };
+
+    let report = execute_plan(&plan, authorization, &session_root, &mut effects);
+
+    assert_eq!(report.outcome, ChrootExecutionOutcome::Entered);
+    assert!(report
+        .warnings
+        .iter()
+        .any(|warning| warning.contains("/boot") && warning.contains("failed")));
+    assert!(report
+        .warnings
+        .iter()
+        .any(|warning| warning.contains("/boot/efi") && warning.contains("parent")));
+    assert!(!effects.calls.iter().any(|call| call.contains("/boot/efi")));
+    effects.assert_consumed();
+    let _ = fs::remove_dir_all(session_root);
+}
+
+#[test]
+fn root_mount_failure_remains_fatal() {
+    let root_device = device("/dev/vda2", "ext4", "root");
+    let plan = build_plan(ChrootPlanInputs {
+        root_device: &root_device,
+        root_subvolume: None,
+        fstab: &[],
+        devices: std::slice::from_ref(&root_device),
+        extra_mounts: &[],
+        use_systemd_chroot: true,
+    })
+    .unwrap();
+    let authorization = authorize(ChrootPrivilegeEvidence::EffectiveUid(0)).unwrap();
+    let session_root = scratch("root-mount-failure");
+    let expected_calls = VecDeque::from([mount_call(
+        &plan.root.device,
+        &session_root,
+        &plan.root.mount_point,
+        &plan.root.options,
+    )]);
+    let mut effects = RecordedEffects {
+        expected_calls,
+        fail_mount_point: Some("/".into()),
         ..RecordedEffects::default()
     };
 
@@ -1224,18 +1361,6 @@ fn mount_failure_cleans_completed_mounts_in_reverse_order() {
 
     assert_eq!(report.outcome, ChrootExecutionOutcome::MountFailed);
     assert!(report.cleanup_complete);
-    assert_eq!(
-        effects
-            .calls
-            .iter()
-            .filter(|call| call.starts_with("umount:"))
-            .cloned()
-            .collect::<Vec<_>>(),
-        [
-            format!("umount:{}", session_root.join("boot").display()),
-            format!("umount:{}", session_root.display()),
-        ]
-    );
     effects.assert_consumed();
     let _ = fs::remove_dir_all(session_root);
 }

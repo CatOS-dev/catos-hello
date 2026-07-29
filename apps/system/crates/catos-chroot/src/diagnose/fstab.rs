@@ -3,8 +3,9 @@
 //! Only the fields the chroot auto-mount logic consults are decoded:
 //! `fs_spec`, `mountpoint`, `vfs_type`. `mount_options` and the
 //! numeric dump/pass fields are validated by the shared target parser.
-//! Production reads fail closed on malformed rows or a missing root entry;
-//! the small tolerant `parse` helper remains only for legacy parser tests.
+//! Production reads report malformed rows or a missing root entry to the
+//! chroot orchestrator, which can continue with the selected root only.
+//! The small tolerant `parse` helper remains only for legacy parser tests.
 
 use crate::model::{BlockDevice, FsTabEntry, Subvolume};
 use crate::session::ReadOnlyMountProbe;
@@ -28,9 +29,7 @@ pub fn read_from_device(
                 .map_err(|error| format!("target /etc/fstab is not UTF-8: {error}"))?;
             parse_strict(&contents)
         }
-        Ok(None) | Err(FsError::NotFound) => {
-            Err("target /etc/fstab is missing; refusing incomplete chroot mount plan".into())
-        }
+        Ok(None) | Err(FsError::NotFound) => Err("target /etc/fstab is missing".into()),
         Err(error) => Err(format!("cannot inspect target /etc/fstab: {error}")),
     })();
     let cleanup_result = probe.cleanup();

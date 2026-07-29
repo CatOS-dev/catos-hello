@@ -129,9 +129,13 @@ preflight findings. Target-local symbolic links such as
 target are resolved inside the selected installation. Invalid secondary fstab
 mount points are skipped with warnings. If final target verification still
 fails, an interactive operator may continue after reviewing the reasons;
-non-interactive rescue workflows can use `--force-unsafe`. Failures that make a
-chroot impossible, such as inability to mount the selected root or runtime
-filesystems, remain errors.
+non-interactive rescue workflows can use `--force-unsafe`. Missing, malformed,
+or stale fstab data falls back to the selected root. Unavailable, ambiguous,
+conflicting, or invalid secondary fstab entries are skipped with warnings. If
+an auxiliary filesystem fails to mount, Chroot keeps unrelated successful
+mounts, skips descendants of the failed mount point, and still opens the shell.
+Failures that make a chroot impossible, such as inability to mount the selected
+root or runtime filesystems, remain errors.
 
 Snapshot recovery mounts the Btrfs top level read-write inside a private mount
 namespace, validates the immutable plan and target identity, performs the root

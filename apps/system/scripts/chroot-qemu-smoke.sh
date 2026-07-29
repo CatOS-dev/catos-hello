@@ -118,7 +118,8 @@ ROOT_UUID=aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee
 TREE=$WORKDIR/tree
 mkdir -p \
     "$TREE/@/etc" "$TREE/@/usr/bin" "$TREE/@/usr/lib" "$TREE/@/home" "$TREE/@/root" \
-    "$TREE/@/srv" "$TREE/@/var/cache" "$TREE/@/var/tmp" \
+    "$TREE/@/srv" "$TREE/@/broken" "$TREE/@/broken/child" "$TREE/@/lost" \
+    "$TREE/@/var/cache" "$TREE/@/var/tmp" \
     "$TREE/@/var/log" "$TREE/@/.snapshots" "$TREE/@/proc" \
     "$TREE/@/sys" "$TREE/@/dev/pts" "$TREE/@/dev/shm" "$TREE/@/run" "$TREE/@/tmp" \
     "$TREE/@home" "$TREE/@root" "$TREE/@srv" "$TREE/@cache" \
@@ -139,6 +140,9 @@ UUID=$ROOT_UUID /var/cache btrfs defaults,subvol=/@cache 0 0
 UUID=$ROOT_UUID /var/tmp btrfs defaults,subvol=/@tmp 0 0
 UUID=$ROOT_UUID /var/log btrfs defaults,subvol=/@log 0 0
 UUID=$ROOT_UUID /.snapshots btrfs defaults,subvol=/@snapshots 0 0
+UUID=11111111-2222-4333-8444-555555555555 /lost ext4 defaults 0 0
+UUID=$ROOT_UUID /broken btrfs defaults,subvol=/@missing 0 0
+UUID=$ROOT_UUID /broken/child btrfs defaults,subvol=/@also-missing 0 0
 FSTAB
 printf 'home-subvolume\n' > "$TREE/@home/.catos-home-marker"
 printf 'root-subvolume\n' > "$TREE/@root/.catos-root-marker"
@@ -165,13 +169,18 @@ done
 cat > "$TREE/@/usr/bin/chroot-acceptance" <<'TARGET'
 #!/bin/sh
 set -eu
-[ "$(cat /home/.catos-home-marker)" = home-subvolume ]
-[ "$(cat /root/.catos-root-marker)" = root-subvolume ]
-[ "$(cat /srv/.catos-srv-marker)" = srv-subvolume ]
-[ "$(cat /var/cache/.catos-cache-marker)" = cache-subvolume ]
-[ "$(cat /var/tmp/.catos-tmp-marker)" = tmp-subvolume ]
-[ "$(cat /var/log/.catos-log-marker)" = log-subvolume ]
-[ "$(cat /.snapshots/.catos-snapshots-marker)" = snapshots-subvolume ]
+if [ -e /run/catos-chroot-root-only ]; then
+    [ ! -e /home/.catos-home-marker ]
+    [ ! -e /root/.catos-root-marker ]
+else
+    [ "$(cat /home/.catos-home-marker)" = home-subvolume ]
+    [ "$(cat /root/.catos-root-marker)" = root-subvolume ]
+    [ "$(cat /srv/.catos-srv-marker)" = srv-subvolume ]
+    [ "$(cat /var/cache/.catos-cache-marker)" = cache-subvolume ]
+    [ "$(cat /var/tmp/.catos-tmp-marker)" = tmp-subvolume ]
+    [ "$(cat /var/log/.catos-log-marker)" = log-subvolume ]
+    [ "$(cat /.snapshots/.catos-snapshots-marker)" = snapshots-subvolume ]
+fi
 [ -r /proc/self/mountinfo ]
 [ -d /sys/class ]
 [ -d /dev ]
@@ -263,7 +272,7 @@ cat > "$INITRAMFS/bin/chroot-child" <<'CHILD'
 #!/bin/sh
 scenario=$1
 case "$scenario" in
-    default|cancel) /bin/catos-chroot --no-systemd-chroot ;;
+    default|cancel|missing_fstab) /bin/catos-chroot --no-systemd-chroot ;;
     show_snapshots|show_snapshots_cancel) /bin/catos-chroot --no-systemd-chroot --show-btrfs-dot-snapshots ;;
     *) echo "unknown scenario $scenario" >&2; exit 2 ;;
 esac
@@ -295,12 +304,19 @@ for arg in $(cat /proc/cmdline); do
     case "$arg" in catos_chroot_scenario=*) scenario=${arg#catos_chroot_scenario=} ;; esac
 done
 case "$scenario" in
-    default) input='y\nn\n' ;;
+    default|missing_fstab) input='y\nn\n' ;;
     show_snapshots) input='1\nn\n' ;;
     cancel) input='n\n' ;;
     show_snapshots_cancel) input='0\n' ;;
     *) input='' ;;
 esac
+if [ "$scenario" = missing_fstab ]; then
+    mkdir -p /mnt/target
+    mount -t btrfs -o subvol=@ /dev/vda /mnt/target
+    rm -f /mnt/target/etc/fstab
+    umount /mnt/target
+    touch /run/catos-chroot-root-only
+fi
 rm -f /tmp/chroot.rc /tmp/chroot.out /tmp/chroot.err /tmp/typescript
 printf '%b' "$input" | timeout -s KILL 45 script -q \
     -c "/bin/chroot-child $scenario" /tmp/typescript \
@@ -383,6 +399,15 @@ assert_contains "$LAST_LOG" "Selected target: CatOS Chroot QEMU Fixture" default
 assert_not_contains "$LAST_LOG" "Available CatOS targets:" default
 assert_not_contains "$LAST_LOG" "CatOS Historical Snapshot" default
 
+assert_contains "$LAST_LOG" "fstab entry UUID=11111111-2222-4333-8444-555555555555 at /lost was skipped" default
+assert_contains "$LAST_LOG" "auxiliary mount /broken from /dev/vda failed and was skipped" default
+assert_contains "$LAST_LOG" "auxiliary mount /broken/child was skipped because parent mount /broken failed" default
+
+echo "=== scenario: missing-fstab-root-only ==="
+run_qemu missing_fstab
+assert_contains "$LAST_LOG" "target /etc/fstab is missing; continuing with the selected root only" missing_fstab
+assert_contains "$LAST_LOG" "__CHROOT_TARGET_VERIFIED__" missing_fstab
+
 echo "=== scenario: explicit-show-snapshots ==="
 run_qemu show_snapshots
 assert_contains "$LAST_LOG" "Available CatOS targets:" show_snapshots
@@ -398,4 +423,4 @@ echo "=== scenario: back-from-multiple-targets ==="
 run_qemu show_snapshots_cancel
 assert_contains "$LAST_LOG" "  [0] Back" show_snapshots_cancel
 
-echo "pass: Chroot QEMU acceptance exercised /bin/catos-chroot, the host arch-chroot implementation, its /bin/bash -i default entrypoint, target selection, snapshot visibility, same-filesystem Btrfs subvolume assembly, mount verification, reverse cleanup and session removal"
+echo "pass: Chroot QEMU acceptance exercised /bin/catos-chroot, target selection, target-local os-release links, missing fstab fallback, unavailable and failed auxiliary mounts, descendant skipping, runtime setup, shell entry, reverse cleanup and session removal"

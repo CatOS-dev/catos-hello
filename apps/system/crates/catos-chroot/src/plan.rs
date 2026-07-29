@@ -120,12 +120,16 @@ pub fn build_plan(inputs: ChrootPlanInputs<'_>) -> Result<ChrootPlan, ChrootPlan
 
     for entry in inputs.fstab {
         if entry.mountpoint == "/" {
-            validate_root_fstab_entry(
+            if let Err(error) = validate_root_fstab_entry(
                 entry,
                 inputs.root_device,
                 inputs.root_subvolume,
                 inputs.devices,
-            )?;
+            ) {
+                warnings.push(format!(
+                    "root fstab entry was ignored; selected root remains authoritative: {error}"
+                ));
+            }
             continue;
         }
         if entry.vfs_type.eq_ignore_ascii_case("swap") {
@@ -151,30 +155,37 @@ pub fn build_plan(inputs: ChrootPlanInputs<'_>) -> Result<ChrootPlan, ChrootPlan
         }
         let device = match resolve_device(&entry.fs_spec, inputs.devices) {
             Ok(device) => device,
-            Err(error) if entry.mount_options.iter().any(|option| option == "nofail") => {
-                warnings.push(format!(
-                    "optional fstab device {} for {} was skipped: {error}",
-                    entry.fs_spec, entry.mountpoint,
-                ));
+            Err(error) => {
+                warnings.push(fstab_skip_warning(entry, &error));
                 continue;
             }
-            Err(error) => return Err(error),
         };
-        validate_entry_filesystem(entry, device)?;
-        let options = selected_mount_options(entry, device)?;
+        if let Err(error) = validate_entry_filesystem(entry, device) {
+            warnings.push(fstab_skip_warning(entry, &error));
+            continue;
+        }
+        let options = match selected_mount_options(entry, device) {
+            Ok(options) => options,
+            Err(error) => {
+                warnings.push(fstab_skip_warning(entry, &error));
+                continue;
+            }
+        };
         let mount = ChrootMount {
             device: device.clone(),
             mount_point: entry.mountpoint.clone(),
             options,
             kind: ChrootMountKind::Fstab,
         };
-        register_mount(
+        if let Err(error) = register_mount(
             mount,
             &mut mounts,
             &mut exact_mounts,
             &mut mount_points,
             &mut warnings,
-        )?;
+        ) {
+            warnings.push(fstab_skip_warning(entry, &error));
+        }
     }
 
     for selection in inputs.extra_mounts {
@@ -215,6 +226,13 @@ pub fn build_plan(inputs: ChrootPlanInputs<'_>) -> Result<ChrootPlan, ChrootPlan
         use_systemd_chroot: inputs.use_systemd_chroot,
         warnings,
     })
+}
+
+fn fstab_skip_warning(entry: &FsTabEntry, error: &ChrootPlanError) -> String {
+    format!(
+        "fstab entry {} at {} was skipped: {error}",
+        entry.fs_spec, entry.mountpoint
+    )
 }
 
 fn register_mount(
