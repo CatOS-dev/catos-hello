@@ -72,6 +72,35 @@ pub fn choose_with_cancel<R: BufRead, W: Write>(
     }
 }
 
+pub fn prompt_optional(label: &str) -> Result<Option<String>, String> {
+    let stdin = io::stdin();
+    let stdout = io::stdout();
+    let mut input = stdin.lock();
+    let mut output = stdout.lock();
+    prompt_optional_with(&mut input, &mut output, label)
+}
+
+pub fn prompt_optional_with<R: BufRead, W: Write>(
+    input: &mut R,
+    output: &mut W,
+    label: &str,
+) -> Result<Option<String>, String> {
+    write!(output, "{label}: ").map_err(write_error)?;
+    output.flush().map_err(write_error)?;
+    let mut line = String::new();
+    let read = input.read_line(&mut line).map_err(read_error)?;
+    if read == 0 {
+        writeln!(output).map_err(write_error)?;
+        return Ok(None);
+    }
+    let value = line.trim();
+    if value.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(value.to_string()))
+    }
+}
+
 pub fn prompt(label: &str) -> Result<Option<String>, String> {
     let stdin = io::stdin();
     let stdout = io::stdout();
@@ -201,6 +230,24 @@ mod tests {
             choose_with(&mut zero, &mut output, "Menu", &["Action"]).unwrap(),
             None
         );
+    }
+
+    #[test]
+    fn optional_prompt_uses_blank_as_an_automatic_value() {
+        let mut blank = Cursor::new(b"\n".to_vec());
+        let mut output = Vec::new();
+        assert_eq!(
+            prompt_optional_with(&mut blank, &mut output, "Root subvolume").unwrap(),
+            None
+        );
+
+        let mut value = Cursor::new(b"  /@  \n".to_vec());
+        let mut output = Vec::new();
+        assert_eq!(
+            prompt_optional_with(&mut value, &mut output, "Root subvolume").unwrap(),
+            Some("/@".into())
+        );
+        assert!(String::from_utf8(output).unwrap().contains("Root subvolume:"));
     }
 
     #[test]

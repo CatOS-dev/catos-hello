@@ -137,10 +137,12 @@ pub fn build_report(
 /// before work starts. Filesystem and mount repair are implemented; boot
 /// remains a stable reserved domain until its provider stage.
 const REPAIR_DOMAINS: &[&str] = &["fs", "mount", "boot"];
-const RECOVERY_MENU_COMMANDS: &[&str] = &[
-    "list", "inspect", "plan", "apply", "status", "resume", "revert",
-];
 const INTERACTIVE_MENU_MARKER: &str = "--continue-interactive-menu";
+const INTERACTIVE_MENU_ROOT_ACTION: &str = "menu";
+const REPAIR_MENU_ACTIONS: &[&str] = &["menu", "fs", "mount", "boot"];
+const RECOVERY_MENU_ACTIONS: &[&str] = &[
+    "menu", "list", "inspect", "plan", "apply", "status", "resume", "revert",
+];
 
 /// Run the program. Returns the exit code; `main.rs` forwards it to
 /// `std::process::exit`.
@@ -156,8 +158,8 @@ fn run_context(context: CommandContext, argv: &[String]) -> i32 {
     let invocation = context.role;
 
     if invocation == Invocation::CatosRepair {
-        match interactive_menu_action(argv, REPAIR_DOMAINS) {
-            Ok(Some(domain)) => {
+        match interactive_menu_action(argv, REPAIR_MENU_ACTIONS) {
+            Ok(Some(action)) => {
                 if !menu::is_interactive() {
                     return usage_error(
                         context.program,
@@ -165,7 +167,11 @@ fn run_context(context: CommandContext, argv: &[String]) -> i32 {
                         "Run the repair command normally instead of using internal menu arguments.",
                     );
                 }
-                return continue_repair_menu(context, &domain);
+                return if action == INTERACTIVE_MENU_ROOT_ACTION {
+                    run_repair_menu_elevated(context)
+                } else {
+                    continue_repair_menu(context, &action)
+                };
             }
             Ok(None) => {}
             Err(error) => {
@@ -178,8 +184,8 @@ fn run_context(context: CommandContext, argv: &[String]) -> i32 {
         }
     }
     if invocation == Invocation::CatosRecovery {
-        match interactive_menu_action(argv, RECOVERY_MENU_COMMANDS) {
-            Ok(Some(command)) => {
+        match interactive_menu_action(argv, RECOVERY_MENU_ACTIONS) {
+            Ok(Some(action)) => {
                 if !menu::is_interactive() {
                     return usage_error(
                         context.program,
@@ -187,7 +193,11 @@ fn run_context(context: CommandContext, argv: &[String]) -> i32 {
                         "Run the recovery command normally instead of using internal menu arguments.",
                     );
                 }
-                return continue_recovery_menu(context, &command);
+                return if action == INTERACTIVE_MENU_ROOT_ACTION {
+                    run_recovery_menu_elevated(context)
+                } else {
+                    continue_recovery_menu(context, &action)
+                };
             }
             Ok(None) => {}
             Err(error) => {
@@ -461,62 +471,63 @@ fn run_system_menu() -> i32 {
                 return exit_code::PROBE_FAILED;
             }
         };
-        match selected {
+        let exit = match selected {
             None => return exit_code::SUCCESS,
-            Some(0) => {
-                let exit = run_context(CommandContext::aggregate(Invocation::CatosDoctor), &[]);
-                if exit != exit_code::SUCCESS {
-                    return exit;
-                }
-            }
-            Some(1) => {
-                let exit = run_context(CommandContext::aggregate(Invocation::CatosChroot), &[]);
-                if exit != exit_code::SUCCESS {
-                    return exit;
-                }
-            }
-            Some(2) => {
-                let exit = run_repair_menu(CommandContext::aggregate(Invocation::CatosRepair));
-                if exit != exit_code::SUCCESS {
-                    return exit;
-                }
-            }
-            Some(3) => {
-                let exit = run_recovery_menu(CommandContext::aggregate(Invocation::CatosRecovery));
-                if exit != exit_code::SUCCESS {
-                    return exit;
-                }
-            }
-            Some(4) => {
-                let exit = run_context(CommandContext::aggregate(Invocation::CatosUpdate), &[]);
-                if exit != exit_code::SUCCESS {
-                    return exit;
-                }
-            }
-            Some(5) => match interactive_advanced() {
-                Ok(Some(exit)) if exit == exit_code::SUCCESS => {}
-                Ok(Some(exit)) => return exit,
+            Some(0) => run_context(CommandContext::aggregate(Invocation::CatosDoctor), &[]),
+            Some(1) => run_context(CommandContext::aggregate(Invocation::CatosChroot), &[]),
+            Some(2) => run_repair_menu(CommandContext::aggregate(Invocation::CatosRepair)),
+            Some(3) => run_recovery_menu(CommandContext::aggregate(Invocation::CatosRecovery)),
+            Some(4) => run_context(CommandContext::aggregate(Invocation::CatosUpdate), &[]),
+            Some(5) => match interactive_advanced(CommandContext::standalone(
+                Invocation::CatosSystem,
+            )) {
+                Ok(Some(exit)) => exit,
                 Ok(None) => continue,
                 Err(error) => {
                     eprintln!("catos-system: {error}");
-                    return exit_code::PROBE_FAILED;
+                    exit_code::PROBE_FAILED
                 }
             },
             Some(_) => unreachable!("menu returned an out-of-range action"),
-        }
+        };
+        report_menu_action_result("catos-system", exit);
+    }
+}
+
+fn report_menu_action_result(program: &str, exit: i32) {
+    if exit != exit_code::SUCCESS {
+        eprintln!(
+            "{program}: action failed with exit status {exit}; returning to the previous menu"
+        );
     }
 }
 
 fn run_repair_menu(context: CommandContext) -> i32 {
-    let domain = match choose_repair_domain(context) {
-        Ok(Some(domain)) => domain,
-        Ok(None) => return exit_code::SUCCESS,
-        Err(error) => {
-            eprintln!("{}: {error}", context.program);
-            return exit_code::PROBE_FAILED;
-        }
-    };
-    continue_repair_menu(context, domain)
+    let continuation = vec![
+        INTERACTIVE_MENU_MARKER.to_string(),
+        INTERACTIVE_MENU_ROOT_ACTION.to_string(),
+    ];
+    if let Some(exit) =
+        elevation::elevate_interactive_if_needed("repair", &continuation, context.program)
+    {
+        return exit;
+    }
+    run_repair_menu_elevated(context)
+}
+
+fn run_repair_menu_elevated(context: CommandContext) -> i32 {
+    loop {
+        let domain = match choose_repair_domain(context) {
+            Ok(Some(domain)) => domain,
+            Ok(None) => return exit_code::SUCCESS,
+            Err(error) => {
+                eprintln!("{}: {error}", context.program);
+                return exit_code::PROBE_FAILED;
+            }
+        };
+        let exit = continue_repair_menu(context, domain);
+        report_menu_action_result(context.program, exit);
+    }
 }
 
 fn choose_repair_domain(context: CommandContext) -> Result<Option<&'static str>, String> {
@@ -538,12 +549,6 @@ fn choose_repair_domain(context: CommandContext) -> Result<Option<&'static str>,
 }
 
 fn continue_repair_menu(context: CommandContext, domain: &str) -> i32 {
-    let continuation = vec![INTERACTIVE_MENU_MARKER.to_string(), domain.to_string()];
-    if let Some(exit) =
-        elevation::elevate_interactive_if_needed("repair", &continuation, context.program)
-    {
-        return exit;
-    }
     match interactive_repair_for_domain(context, domain) {
         Ok(Some(exit)) => exit,
         Ok(None) => exit_code::SUCCESS,
@@ -560,44 +565,64 @@ fn interactive_repair_for_domain(
 ) -> Result<Option<i32>, String> {
     let description = match domain {
         "fs" => "Run filesystem repair now?",
-        "mount" => "Repair the selected system's mount configuration now?",
-        "boot" => "Repair the selected system's boot setup now?",
+        "mount" => "Repair this system's mount configuration now?",
+        "boot" => "Repair this system's boot setup now?",
         _ => return Err(format!("unknown repair domain {domain:?}")),
     };
-    let Some(target) = choose_repair_target(context.program, domain)? else {
-        return Ok(None);
-    };
-    let args = repair_args(domain, &target);
-    if !menu::confirm(description)? {
-        return Ok(None);
+    loop {
+        let Some(target) = choose_repair_target(context.program, domain)? else {
+            return Ok(None);
+        };
+        write_interactive_text(&interactive_target_summary(&target, domain != "fs"))?;
+        let args = repair_args(domain, &target);
+        if !menu::confirm(description)? {
+            continue;
+        }
+        return Ok(Some(run_repair(context, &args)));
     }
-    Ok(Some(run_repair(context, &args)))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum InteractiveTarget {
-    Automatic,
     Explicit {
         device: String,
         root_subvolume: Option<String>,
+        esp_device: Option<String>,
     },
 }
 
 fn choose_repair_target(program: &str, domain: &str) -> Result<Option<InteractiveTarget>, String> {
-    let choice = menu::choose(
-        "Repair Target",
-        &[
-            "Choose a detected CatOS installation",
-            "Let CatOS choose the only safe target automatically",
-            "Enter a root device manually",
-        ],
-    )?;
-    match choice {
-        None => Ok(None),
-        Some(0) => select_detected_target(program, repair_target_policy(domain)),
-        Some(1) => Ok(Some(InteractiveTarget::Automatic)),
-        Some(2) => prompt_manual_target(program),
-        Some(_) => unreachable!("menu returned an out-of-range repair target action"),
+    loop {
+        let choice = menu::choose(
+            "Repair Target",
+            &[
+                "Choose a detected CatOS installation",
+                "Enter target details manually",
+            ],
+        )?;
+        match choice {
+            None => return Ok(None),
+            Some(0) => {
+                if let Some(target) =
+                    select_detected_target(program, repair_target_policy(domain))?
+                {
+                    return Ok(Some(target));
+                }
+            }
+            Some(1) => {
+                let include_subvolume = domain != "fs";
+                let include_esp = matches!(domain, "mount" | "boot");
+                if let Some(target) = prompt_manual_target(
+                    program,
+                    include_subvolume,
+                    include_esp,
+                    include_subvolume,
+                )? {
+                    return Ok(Some(target));
+                }
+            }
+            Some(_) => unreachable!("menu returned an out-of-range repair target action"),
+        }
     }
 }
 
@@ -610,21 +635,31 @@ fn repair_target_policy(domain: &str) -> crate::selection_ui::TargetSelectionPol
 }
 
 fn choose_recovery_target(program: &str) -> Result<Option<InteractiveTarget>, String> {
-    let choice = menu::choose(
-        "Recovery Target",
-        &[
-            "Choose a detected CatOS installation",
-            "Enter a root device manually",
-        ],
-    )?;
-    match choice {
-        None => Ok(None),
-        Some(0) => select_detected_target(
-            program,
-            crate::selection_ui::TargetSelectionPolicy::OfflineOnly,
-        ),
-        Some(1) => prompt_manual_target(program),
-        Some(_) => unreachable!("menu returned an out-of-range recovery target action"),
+    loop {
+        let choice = menu::choose(
+            "Recovery Target",
+            &[
+                "Choose a detected CatOS installation",
+                "Enter target details manually",
+            ],
+        )?;
+        match choice {
+            None => return Ok(None),
+            Some(0) => {
+                if let Some(target) = select_detected_target(
+                    program,
+                    crate::selection_ui::TargetSelectionPolicy::OfflineOnly,
+                )? {
+                    return Ok(Some(target));
+                }
+            }
+            Some(1) => {
+                if let Some(target) = prompt_manual_target(program, true, false, false)? {
+                    return Ok(Some(target));
+                }
+            }
+            Some(_) => unreachable!("menu returned an out-of-range recovery target action"),
+        }
     }
 }
 
@@ -663,6 +698,7 @@ fn select_detected_target(
             Ok(Some(InteractiveTarget::Explicit {
                 device: candidate.root_device.display().to_string(),
                 root_subvolume: candidate.root_subvolume.clone(),
+                esp_device: None,
             }))
         }
         crate::selection_ui::Selection::Declined => Ok(None),
@@ -670,47 +706,145 @@ fn select_detected_target(
     }
 }
 
-fn prompt_manual_target(program: &str) -> Result<Option<InteractiveTarget>, String> {
-    loop {
+fn prompt_manual_target(
+    program: &str,
+    include_subvolume: bool,
+    include_esp: bool,
+    standard_root_only: bool,
+) -> Result<Option<InteractiveTarget>, String> {
+    let device = loop {
         let Some(device) = menu::prompt("Root device, for example /dev/nvme0n1p2")? else {
             return Ok(None);
         };
-        match manual_target_from_device(device) {
-            Ok(target) => return Ok(Some(target)),
-            Err(error) => eprintln!("{program}: {error}"),
+        if validate_repair_device_arg(std::path::Path::new(&device)) {
+            break device;
         }
-    }
+        eprintln!(
+            "{program}: root device must be an absolute /dev/... path without .. or prefix components"
+        );
+    };
+
+    let root_subvolume = if include_subvolume {
+        loop {
+            let value = menu::prompt_optional(
+                "Root subvolume (blank for automatic detection, for example /@)",
+            )?;
+            let Some(value) = value else {
+                break None;
+            };
+            match normalize_subvolume_arg(&value) {
+                Ok(value) if !standard_root_only || value == "/@" => break Some(value),
+                Ok(_) => eprintln!(
+                    "{program}: this repair supports only the CatOS standard root subvolume /@"
+                ),
+                Err(error) => eprintln!("{program}: {error}"),
+            }
+        }
+    } else {
+        None
+    };
+
+    let esp_device = if include_esp {
+        loop {
+            let value = menu::prompt_optional(
+                "EFI System Partition device (blank for automatic detection)",
+            )?;
+            let Some(value) = value else {
+                break None;
+            };
+            if validate_repair_device_arg(std::path::Path::new(&value)) {
+                break Some(value);
+            }
+            eprintln!(
+                "{program}: ESP device must be an absolute /dev/... path without .. or prefix components"
+            );
+        }
+    } else {
+        None
+    };
+
+    Ok(Some(InteractiveTarget::Explicit {
+        device,
+        root_subvolume,
+        esp_device,
+    }))
 }
 
-fn manual_target_from_device(device: String) -> Result<InteractiveTarget, String> {
-    if !validate_repair_device_arg(std::path::Path::new(&device)) {
-        return Err(
-            "root device must be an absolute /dev/... path without .. or prefix components".into(),
-        );
+fn normalize_subvolume_arg(value: &str) -> Result<String, String> {
+    use std::path::Component;
+
+    if value.is_empty() || value.contains([',', '\0']) {
+        return Err("root subvolume must be a non-empty path without commas or NUL".into());
     }
-    Ok(InteractiveTarget::Explicit {
+    let normalized = if value.starts_with('/') {
+        value.to_string()
+    } else {
+        format!("/{value}")
+    };
+    if std::path::Path::new(&normalized)
+        .components()
+        .any(|component| matches!(component, Component::ParentDir | Component::Prefix(_)))
+    {
+        return Err("root subvolume cannot contain parent components".into());
+    }
+    Ok(normalized)
+}
+
+fn interactive_target_summary(target: &InteractiveTarget, include_esp: bool) -> String {
+    use std::fmt::Write as _;
+
+    let InteractiveTarget::Explicit {
         device,
-        root_subvolume: None,
-    })
+        root_subvolume,
+        esp_device,
+    } = target;
+    let mut output = String::from("Selected target:\n");
+    writeln!(
+        output,
+        "  Root device    : {}",
+        crate::selection_ui::terminal_text(device)
+    )
+    .expect("writing to String cannot fail");
+    writeln!(
+        output,
+        "  Root subvolume : {}",
+        root_subvolume
+            .as_deref()
+            .map(crate::selection_ui::terminal_text)
+            .unwrap_or_else(|| "automatic detection".into())
+    )
+    .expect("writing to String cannot fail");
+    if include_esp {
+        writeln!(
+            output,
+            "  ESP device     : {}",
+            esp_device
+                .as_deref()
+                .map(crate::selection_ui::terminal_text)
+                .unwrap_or_else(|| "automatic detection".into())
+        )
+        .expect("writing to String cannot fail");
+    }
+    output
 }
 
 fn repair_args(domain: &str, target: &InteractiveTarget) -> Vec<String> {
     let mut args = vec![domain.to_string()];
-    match target {
-        InteractiveTarget::Automatic => {}
-        InteractiveTarget::Explicit {
-            device,
-            root_subvolume,
-        } if domain == "fs" => args.push(device.clone()),
-        InteractiveTarget::Explicit {
-            device,
-            root_subvolume,
-        } => {
-            args.extend(["--root-device".into(), device.clone()]);
-            if let Some(root_subvolume) = root_subvolume {
-                args.extend(["--root-subvolume".into(), root_subvolume.clone()]);
-            }
-        }
+    let InteractiveTarget::Explicit {
+        device,
+        root_subvolume,
+        esp_device,
+    } = target;
+    if domain == "fs" {
+        args.push(device.clone());
+        return args;
+    }
+    args.extend(["--root-device".into(), device.clone()]);
+    if let Some(root_subvolume) = root_subvolume {
+        args.extend(["--root-subvolume".into(), root_subvolume.clone()]);
+    }
+    if let Some(esp_device) = esp_device {
+        args.extend(["--esp-device".into(), esp_device.clone()]);
     }
     args
 }
@@ -719,10 +853,8 @@ fn append_recovery_target_args(args: &mut Vec<String>, target: &InteractiveTarge
     let InteractiveTarget::Explicit {
         device,
         root_subvolume,
-    } = target
-    else {
-        unreachable!("recovery target cannot use automatic selection")
-    };
+        ..
+    } = target;
     args.extend(["--root-device".into(), device.clone()]);
     if let Some(root_subvolume) = root_subvolume {
         args.extend(["--root-subvolume".into(), root_subvolume.clone()]);
@@ -733,10 +865,8 @@ fn recovery_target_selection(target: &InteractiveTarget) -> crate::cli::TargetSe
     let InteractiveTarget::Explicit {
         device,
         root_subvolume,
-    } = target
-    else {
-        unreachable!("recovery target cannot use automatic selection")
-    };
+        ..
+    } = target;
     crate::cli::TargetSelection {
         root_device: Some(std::path::PathBuf::from(device)),
         root_subvolume: root_subvolume.clone(),
@@ -949,22 +1079,38 @@ fn print_recovery_plan_choice_summary(
 }
 
 fn run_recovery_menu(context: CommandContext) -> i32 {
-    let command = match choose_recovery_command(context) {
-        Ok(Some(command)) => command,
-        Ok(None) => return exit_code::SUCCESS,
-        Err(error) => {
-            eprintln!("{}: {error}", context.program);
-            return exit_code::PROBE_FAILED;
-        }
-    };
-    continue_recovery_menu(context, command)
+    let continuation = vec![
+        INTERACTIVE_MENU_MARKER.to_string(),
+        INTERACTIVE_MENU_ROOT_ACTION.to_string(),
+    ];
+    if let Some(exit) =
+        elevation::elevate_interactive_if_needed("recovery", &continuation, context.program)
+    {
+        return exit;
+    }
+    run_recovery_menu_elevated(context)
+}
+
+fn run_recovery_menu_elevated(context: CommandContext) -> i32 {
+    loop {
+        let command = match choose_recovery_command(context) {
+            Ok(Some(command)) => command,
+            Ok(None) => return exit_code::SUCCESS,
+            Err(error) => {
+                eprintln!("{}: {error}", context.program);
+                return exit_code::PROBE_FAILED;
+            }
+        };
+        let exit = continue_recovery_menu(context, command);
+        report_menu_action_result(context.program, exit);
+    }
 }
 
 fn choose_recovery_command(context: CommandContext) -> Result<Option<&'static str>, String> {
     let selected = menu::choose_with_cancel_from_terminal(
         "Btrfs Snapshot Recovery",
         &[
-            "List snapshots and recovery transactions",
+            "List snapshots, plans, and recovery transactions",
             "Inspect a snapshot",
             "Create a recovery plan",
             "Apply a recovery plan",
@@ -987,12 +1133,6 @@ fn choose_recovery_command(context: CommandContext) -> Result<Option<&'static st
 }
 
 fn continue_recovery_menu(context: CommandContext, command: &str) -> i32 {
-    let continuation = vec![INTERACTIVE_MENU_MARKER.to_string(), command.to_string()];
-    if let Some(exit) =
-        elevation::elevate_interactive_if_needed("recovery", &continuation, context.program)
-    {
-        return exit;
-    }
     match interactive_recovery_for_command(context, command) {
         Ok(Some(exit)) => exit,
         Ok(None) => exit_code::SUCCESS,
@@ -1007,69 +1147,72 @@ fn interactive_recovery_for_command(
     context: CommandContext,
     command: &str,
 ) -> Result<Option<i32>, String> {
-    let Some(target) = choose_recovery_target(context.program)? else {
-        return Ok(None);
-    };
-    let mut args = vec![command.to_string()];
-    append_recovery_target_args(&mut args, &target);
-    match command {
-        "inspect" | "plan" => {
-            let Some(snapshot) = choose_snapshot(&target)? else {
-                return Ok(None);
-            };
-            args.extend(["--snapshot-subvolume".into(), snapshot]);
-        }
-        "apply" => {
-            let Some(plan) = choose_plan(&target)? else {
-                return Ok(None);
-            };
-            print_recovery_plan_choice_summary(&plan)?;
-            args.extend([
-                "--plan-id".into(),
-                plan.plan_id.clone(),
-                "--confirm".into(),
-                plan.confirmation_token.clone(),
-            ]);
-            if !menu::confirm("Apply this recovery plan now?")? {
-                return Ok(None);
-            }
-        }
-        "status" | "resume" | "revert" => {
-            let Some(transaction) = choose_transaction(&target)? else {
-                return Ok(None);
-            };
-            if command == "revert" {
-                let status = load_recovery_status(&target, &transaction)?;
-                write_interactive_text(&format!(
-                    "Transaction state: {}\n",
-                    status.reconciled_state.code()
-                ))?;
-                let Some(token) = status.revert_confirmation_token else {
-                    return Err(format!(
-                        "transaction {transaction:?} cannot be reverted from state {}",
-                        status.reconciled_state.code()
-                    ));
+    loop {
+        let Some(target) = choose_recovery_target(context.program)? else {
+            return Ok(None);
+        };
+        write_interactive_text(&interactive_target_summary(&target, false))?;
+        let mut args = vec![command.to_string()];
+        append_recovery_target_args(&mut args, &target);
+        match command {
+            "inspect" | "plan" => {
+                let Some(snapshot) = choose_snapshot(&target)? else {
+                    continue;
                 };
-                args.extend(["--confirm".into(), token]);
+                args.extend(["--snapshot-subvolume".into(), snapshot]);
             }
-            args.extend(["--transaction".into(), transaction]);
-            if matches!(command, "resume" | "revert")
-                && !menu::confirm(if command == "resume" {
-                    "Resume this transaction now?"
-                } else {
-                    "Revert this transaction now?"
-                })?
-            {
-                return Ok(None);
+            "apply" => {
+                let Some(plan) = choose_plan(&target)? else {
+                    continue;
+                };
+                print_recovery_plan_choice_summary(&plan)?;
+                args.extend([
+                    "--plan-id".into(),
+                    plan.plan_id.clone(),
+                    "--confirm".into(),
+                    plan.confirmation_token.clone(),
+                ]);
+                if !menu::confirm("Apply this recovery plan now?")? {
+                    continue;
+                }
             }
+            "status" | "resume" | "revert" => {
+                let Some(transaction) = choose_transaction(&target)? else {
+                    continue;
+                };
+                if command == "revert" {
+                    let status = load_recovery_status(&target, &transaction)?;
+                    write_interactive_text(&format!(
+                        "Transaction state: {}\n",
+                        status.reconciled_state.code()
+                    ))?;
+                    let Some(token) = status.revert_confirmation_token else {
+                        return Err(format!(
+                            "transaction {transaction:?} cannot be reverted from state {}",
+                            status.reconciled_state.code()
+                        ));
+                    };
+                    args.extend(["--confirm".into(), token]);
+                }
+                args.extend(["--transaction".into(), transaction]);
+                if matches!(command, "resume" | "revert")
+                    && !menu::confirm(if command == "resume" {
+                        "Resume this transaction now?"
+                    } else {
+                        "Revert this transaction now?"
+                    })?
+                {
+                    continue;
+                }
+            }
+            "list" => {}
+            _ => unreachable!("unknown recovery menu command"),
         }
-        "list" => {}
-        _ => unreachable!("unknown recovery menu command"),
+        return Ok(Some(run_context(context, &args)));
     }
-    Ok(Some(run_context(context, &args)))
 }
 
-fn interactive_advanced() -> Result<Option<i32>, String> {
+fn interactive_advanced(context: CommandContext) -> Result<Option<i32>, String> {
     let selected = menu::choose(
         "Advanced Diagnostics",
         &[
@@ -1096,10 +1239,14 @@ fn interactive_advanced() -> Result<Option<i32>, String> {
     .into_iter()
     .map(str::to_string)
     .collect::<Vec<_>>();
-    Ok(Some(run_via_full_parser(
-        CommandContext::standalone(Invocation::CatosSystem),
-        &args,
-    )))
+    if selected >= 3 {
+        if let Some(exit) =
+            elevation::elevate_interactive_if_needed("advanced", &args, context.program)
+        {
+            return Ok(Some(exit));
+        }
+    }
+    Ok(Some(run_via_full_parser(context, &args)))
 }
 
 fn write_stdout_text(program: &str, text: &str) -> i32 {
@@ -2265,31 +2412,59 @@ mod tests {
         assert_eq!(
             interactive_menu_action(
                 &["--continue-interactive-menu".into(), "mount".into()],
-                REPAIR_DOMAINS,
+                REPAIR_MENU_ACTIONS,
             )
             .unwrap(),
             Some("mount".to_string())
         );
+        assert_eq!(
+            interactive_menu_action(
+                &["--continue-interactive-menu".into(), "menu".into()],
+                REPAIR_MENU_ACTIONS,
+            )
+            .unwrap(),
+            Some("menu".to_string())
+        );
         assert!(interactive_menu_action(
             &["--continue-interactive-menu".into(), "invalid".into()],
-            REPAIR_DOMAINS,
+            REPAIR_MENU_ACTIONS,
         )
         .is_err());
-        assert_eq!(interactive_menu_action(&[], REPAIR_DOMAINS).unwrap(), None);
+        assert_eq!(interactive_menu_action(&[], REPAIR_MENU_ACTIONS).unwrap(), None);
     }
 
     #[test]
-    fn manual_target_rejects_paths_outside_dev_before_discovery() {
-        assert!(manual_target_from_device("relative".into()).is_err());
-        assert!(manual_target_from_device("/tmp/disk".into()).is_err());
-        assert!(manual_target_from_device("/dev/../tmp/disk".into()).is_err());
-        assert_eq!(
-            manual_target_from_device("/dev/mapper/catos-root".into()).unwrap(),
-            InteractiveTarget::Explicit {
-                device: "/dev/mapper/catos-root".into(),
-                root_subvolume: None,
-            }
-        );
+    fn manual_target_validation_rejects_paths_outside_dev() {
+        assert!(!validate_repair_device_arg(std::path::Path::new("relative")));
+        assert!(!validate_repair_device_arg(std::path::Path::new("/tmp/disk")));
+        assert!(!validate_repair_device_arg(std::path::Path::new(
+            "/dev/../tmp/disk"
+        )));
+        assert!(validate_repair_device_arg(std::path::Path::new(
+            "/dev/mapper/catos-root"
+        )));
+    }
+
+    #[test]
+    fn manual_subvolume_normalization_is_safe() {
+        assert_eq!(normalize_subvolume_arg("@").unwrap(), "/@");
+        assert_eq!(normalize_subvolume_arg("/@").unwrap(), "/@");
+        assert!(normalize_subvolume_arg("../@").is_err());
+        assert!(normalize_subvolume_arg("/@,rw").is_err());
+    }
+
+    #[test]
+    fn target_summary_contains_every_execution_relevant_identity() {
+        let target = InteractiveTarget::Explicit {
+            device: "/dev/nvme0n1p2\nspoof".into(),
+            root_subvolume: Some("/@".into()),
+            esp_device: Some("/dev/nvme0n1p1".into()),
+        };
+        let summary = interactive_target_summary(&target, true);
+        assert!(summary.contains("/dev/nvme0n1p2\\nspoof"));
+        assert!(summary.contains("Root subvolume : /@"));
+        assert!(summary.contains("ESP device     : /dev/nvme0n1p1"));
+        assert!(!summary.contains('\n') || summary.lines().all(|line| !line.contains("spoof") || line.contains("\\nspoof")));
     }
 
     #[test]
@@ -2308,6 +2483,7 @@ mod tests {
         let target = InteractiveTarget::Explicit {
             device: "/dev/nvme0n1p2".into(),
             root_subvolume: Some("/@".into()),
+            esp_device: Some("/dev/nvme0n1p1".into()),
         };
         assert_eq!(repair_args("fs", &target), ["fs", "/dev/nvme0n1p2"]);
         assert_eq!(
@@ -2318,9 +2494,22 @@ mod tests {
                 "/dev/nvme0n1p2",
                 "--root-subvolume",
                 "/@",
+                "--esp-device",
+                "/dev/nvme0n1p1",
             ]
         );
-        assert_eq!(repair_args("boot", &InteractiveTarget::Automatic), ["boot"]);
+        assert_eq!(
+            repair_args("boot", &target),
+            [
+                "boot",
+                "--root-device",
+                "/dev/nvme0n1p2",
+                "--root-subvolume",
+                "/@",
+                "--esp-device",
+                "/dev/nvme0n1p1",
+            ]
+        );
     }
 
     #[test]
@@ -2328,6 +2517,7 @@ mod tests {
         let target = InteractiveTarget::Explicit {
             device: "/dev/does-not-exist".into(),
             root_subvolume: None,
+            esp_device: None,
         };
         let error = load_recovery_status(&target, "not-a-transaction").unwrap_err();
         assert!(error.contains("cannot inspect recovery transaction"));
@@ -2342,6 +2532,7 @@ mod tests {
             &InteractiveTarget::Explicit {
                 device: "/dev/vda2".into(),
                 root_subvolume: Some("/@".into()),
+                esp_device: None,
             },
         );
         assert_eq!(
