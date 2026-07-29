@@ -117,6 +117,12 @@ mount-state, topology, and shared-device-lock checks. Write-capable repair
 commands have no short default deadline, and capped output is drained to EOF
 so a verbose repair process is not terminated by `SIGPIPE`.
 
+Doctor treats incomplete read-only facts as scoped limitations rather than a
+startup failure. Missing fstab, unresolved ESP, unavailable `/boot`, Btrfs
+top-level open failures, and discovery-cleanup residuals do not discard an
+already selected root: independent sections continue and the final report plus
+cleanup record states exactly which checks were unavailable.
+
 `catos-repair mount` uses the target's own fstab and os-release, binds the
 operation to target identity and an fstab digest, writes through confined
 dirfd operations, verifies the resulting mount layout, and restores the

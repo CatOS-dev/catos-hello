@@ -107,6 +107,7 @@ UUID_LIMINE=22222222-2222-4222-8222-222222222222
 UUID_SYSTEMD=33333333-3333-4333-8333-333333333333
 UUID_UKI=44444444-4444-4444-8444-444444444444
 UUID_BROKEN=55555555-5555-4555-8555-555555555555
+UUID_NO_FSTAB=5f5f5f5f-5f5f-4f5f-8f5f-5f5f5f5f5f5f
 UUID_CORRUPT=66666666-6666-4666-8666-666666666666
 UUID_INTERRUPTED=77777777-7777-4777-8777-777777777777
 UUID_AMBIG_A=88888888-8888-4888-8888-888888888888
@@ -118,6 +119,7 @@ ROOT_LIMINE=$WORKDIR/root-limine.img
 ROOT_SYSTEMD=$WORKDIR/root-systemd.img
 ROOT_UKI=$WORKDIR/root-uki.img
 ROOT_BROKEN=$WORKDIR/root-broken.img
+ROOT_NO_FSTAB=$WORKDIR/root-no-fstab.img
 ROOT_CORRUPT=$WORKDIR/root-corrupt.img
 ROOT_INTERRUPTED=$WORKDIR/root-interrupted.img
 ROOT_AMBIG_A=$WORKDIR/root-ambiguous-a.img
@@ -172,6 +174,7 @@ CFG
 
 build_root_image() {
     local image=$1 root_uuid=$2 provider=$3 fstab_uuid=$4 metadata_dup=$5 runtime_tree=${6:-}
+    local omit_fstab=${7:-no}
     local tree
     tree=$WORKDIR/tree-$(basename "$image" .img)
     rm -rf "$tree"
@@ -203,7 +206,8 @@ ID=catos
 ID_LIKE=arch
 PRETTY_NAME="CatOS QEMU Fixture"
 OS_RELEASE
-    cat > "$tree/@/etc/fstab" <<FSTAB
+    if [[ $omit_fstab != yes ]]; then
+        cat > "$tree/@/etc/fstab" <<FSTAB
 UUID=$fstab_uuid / btrfs defaults,subvol=/@ 0 0
 UUID=$root_uuid /home btrfs defaults,subvol=/@home 0 0
 UUID=$root_uuid /root btrfs defaults,subvol=/@root 0 0
@@ -214,6 +218,7 @@ UUID=$root_uuid /var/log btrfs defaults,subvol=/@log 0 0
 UUID=$root_uuid /.snapshots btrfs defaults,subvol=/@snapshots 0 0
 UUID=$ESP_UUID /boot/efi vfat umask=0077 0 2
 FSTAB
+    fi
     cat > "$tree/@/var/lib/pacman/local/catos-base-1/desc" <<'DESC'
 %NAME%
 catos-base
@@ -384,6 +389,7 @@ build_root_image "$ROOT_LIMINE" "$UUID_LIMINE" limine "$UUID_LIMINE" no
 build_root_image "$ROOT_SYSTEMD" "$UUID_SYSTEMD" systemd_boot "$UUID_SYSTEMD" no
 build_root_image "$ROOT_UKI" "$UUID_UKI" uki "$UUID_UKI" no
 build_root_image "$ROOT_BROKEN" "$UUID_BROKEN" grub deadbeef-dead-4bad-8bad-deadbeefdead no
+build_root_image "$ROOT_NO_FSTAB" "$UUID_NO_FSTAB" grub "$UUID_NO_FSTAB" no "" yes
 build_root_image "$ROOT_CORRUPT" "$UUID_CORRUPT" grub "$UUID_CORRUPT" yes
 corrupt_btrfs_metadata_mirror "$ROOT_CORRUPT"
 build_root_image "$ROOT_INTERRUPTED" "$UUID_INTERRUPTED" grub "$UUID_INTERRUPTED" no
@@ -650,6 +656,8 @@ elif [ "$SCENARIO" = ambiguous ]; then
     run_tty '1\n'
 elif [ "$SCENARIO" = cancel ]; then
     run_tty 'n\n'
+elif [ "$SCENARIO" = missing_fstab ]; then
+    run_tty 'y\n\n\n\n\n\n\n\n\n\n'
 else
     run_tty 'y\n'
 fi
@@ -841,6 +849,18 @@ assert_contains "$LAST_LOG" "__DOCTOR_NO_RESIDUAL_SESSION_DIRS__" cancel
 assert_not_contains "$LAST_LOG" "Item          | Status" cancel
 assert_not_contains "$LAST_LOG" "TARGET_NOT_FOUND" cancel
 
+echo "=== scenario: missing-fstab-partial-diagnosis ==="
+run_qemu missing_fstab "$ROOT_NO_FSTAB" "$ESP_GRUB"
+assert_doctor_success "$LAST_LOG" missing_fstab
+assert_contains "$LAST_LOG" "Selected target: CatOS QEMU Fixture" missing_fstab
+assert_contains "$LAST_LOG" "MOUNT_FACTS_INCOMPLETE" missing_fstab
+assert_contains "$LAST_LOG" "ESP_FACTS_INCOMPLETE" missing_fstab
+assert_contains "$LAST_LOG" "BOOT_LAYOUT_FACTS_INCOMPLETE" missing_fstab
+assert_contains "$LAST_LOG" "BOOT_FILES_INCOMPLETE" missing_fstab
+assert_contains "$LAST_LOG" "Filesystem    |" missing_fstab
+assert_contains "$LAST_LOG" "Recovery      |" missing_fstab
+assert_not_contains "$LAST_LOG" "DOCTOR_CONTEXT_OPEN_FAILED" missing_fstab
+
 echo "=== scenario: broken-fstab ==="
 run_qemu broken_fstab "$ROOT_BROKEN" "$ESP_GRUB"
 assert_doctor_success "$LAST_LOG" broken_fstab
@@ -892,4 +912,4 @@ assert_contains "$LAST_LOG" "RECOVERY_TRANSACTION_INTERRUPTED" interrupted_trans
 assert_contains "$LAST_LOG" "catos-recovery resume" interrupted_transaction
 assert_contains "$LAST_LOG" "tx-00000000000000000000000000000004" interrupted_transaction
 
-echo "pass: Doctor QEMU acceptance exercised read-only diagnosis, typed recommendation execution, automatic recheck, provider matrix, corruption, ambiguity, recovery, cleanup and no-write hashes"
+echo "pass: Doctor QEMU acceptance exercised read-only diagnosis, typed recommendation execution, automatic recheck, provider matrix, partial diagnosis without fstab, corruption, ambiguity, recovery, cleanup and no-write hashes"

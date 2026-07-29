@@ -26,7 +26,6 @@ pub enum TargetDiscoveryErrorKind {
     NotFound,
     Ambiguous,
     Declined,
-    CleanupIncomplete,
     OpenFailed,
 }
 
@@ -58,35 +57,31 @@ pub fn target_summary(target: &TargetIdentity) -> DoctorTarget {
     }
 }
 
-pub fn discover_target_session() -> Result<SelectedTargetSession, TargetDiscoveryError> {
-    let policy = current_doctor_selection_policy();
-    let report = discover_for_policy(policy);
-    let dirty_cleanup = report
-        .cleanup
+pub(crate) fn dirty_discovery_cleanup_reason(cleanup: &[ProbeCleanup]) -> Option<String> {
+    let residual = cleanup
         .iter()
-        .filter(|cleanup| !cleanup.is_clean())
-        .map(|cleanup| {
+        .filter(|item| !item.is_clean())
+        .map(|item| {
             format!(
                 "{}: {}",
-                cleanup.mountpoint.display(),
-                cleanup
-                    .error
+                item.mountpoint.display(),
+                item.error
                     .as_deref()
                     .unwrap_or("probe mountpoint was not fully removed")
             )
         })
         .collect::<Vec<_>>();
-    if !dirty_cleanup.is_empty() {
-        return Err(TargetDiscoveryError {
-            kind: TargetDiscoveryErrorKind::CleanupIncomplete,
-            reason: format!(
-                "readonly target discovery cleanup incomplete: {}",
-                dirty_cleanup.join("; ")
-            ),
-            candidates: Vec::new(),
-            cleanup: report.cleanup,
-        });
-    }
+    (!residual.is_empty()).then(|| {
+        format!(
+            "readonly target discovery cleanup incomplete: {}",
+            residual.join("; ")
+        )
+    })
+}
+
+pub fn discover_target_session() -> Result<SelectedTargetSession, TargetDiscoveryError> {
+    let policy = current_doctor_selection_policy();
+    let report = discover_for_policy(policy);
     let candidate = match select_target_with_policy(&report, "catos-doctor", policy) {
         Selection::Selected(candidate) => *candidate,
         Selection::Declined => {
@@ -217,6 +212,27 @@ mod tests {
             confidence: crate::target::model::RootCandidateConfidence::High,
             evidence: Vec::new(),
         }
+    }
+
+    #[test]
+    fn dirty_discovery_cleanup_is_reportable_without_discarding_candidates() {
+        let cleanup = vec![ProbeCleanup {
+            mountpoint: PathBuf::from("/tmp/doctor-probe"),
+            unmounted: false,
+            removed: false,
+            error: Some("busy".into()),
+        }];
+        let reason = dirty_discovery_cleanup_reason(&cleanup).unwrap();
+        assert!(reason.contains("cleanup incomplete"));
+        assert!(reason.contains("/tmp/doctor-probe: busy"));
+
+        let clean = vec![ProbeCleanup {
+            mountpoint: PathBuf::from("/tmp/clean-probe"),
+            unmounted: true,
+            removed: true,
+            error: None,
+        }];
+        assert!(dirty_discovery_cleanup_reason(&clean).is_none());
     }
 
     #[test]
