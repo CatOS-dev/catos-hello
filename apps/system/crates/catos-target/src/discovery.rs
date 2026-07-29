@@ -150,6 +150,11 @@ pub struct DiscoveryOptions {
     /// equivalent `@snapshots/<id>/snapshot` layout). Normal discovery hides
     /// these historical roots so they cannot create false target ambiguity.
     pub include_dot_snapshots: bool,
+    /// Include roots with a credible Linux/CatOS layout even when os-release
+    /// is missing, unreadable, or identifies another distribution. This is
+    /// reserved for interactive rescue Chroot selection; repair and recovery
+    /// discovery leave it disabled.
+    pub include_unverified_roots: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -224,7 +229,16 @@ fn inspect_running_device(device: &BlockDevice, report: &mut DiscoveryReport) ->
     let Some(path) = device.dev_path.as_ref() else { return false };
     let Some(mount) = device.mounts.iter().find(|mount| mount.mount_point == Path::new("/")) else { return false };
     let subvolume = (fstype == "btrfs").then(|| normalise_subvolume_path(&mount.root)).flatten();
-    match inspect_at(device, Path::new("/"), subvolume, None, true, true, "current running root") {
+    match inspect_at(
+        device,
+        Path::new("/"),
+        subvolume,
+        None,
+        true,
+        true,
+        "current running root",
+        false,
+    ) {
         Some(candidate) => report.candidates.push(candidate),
         None => report.rejected.push(rejected(path, "current running root does not identify as CatOS".into())),
     }
@@ -250,6 +264,7 @@ fn inspect_device(device: &BlockDevice, options: DiscoveryOptions, report: &mut 
     let result = inspect_at(
         device, probe.path(), None, None, currently_mounted,
         running_environment_member, "readonly no-replay temporary mount",
+        options.include_unverified_roots,
     );
     let cleanup = probe.cleanup();
     let clean = cleanup.is_clean();
@@ -303,6 +318,7 @@ fn inspect_btrfs_device(device: &BlockDevice, options: DiscoveryOptions, report:
         let candidate = inspect_at(
             device, subprobe.path(), Some(subvolume_path), Some(subvolume_id),
             currently_mounted, false, "readonly no-replay Btrfs subvolume mount",
+            options.include_unverified_roots,
         );
         let cleanup = subprobe.cleanup();
         let clean = cleanup.is_clean();
@@ -376,13 +392,24 @@ fn inspect_at(
     currently_mounted: bool,
     running_environment_member: bool,
     probe_kind: &str,
+    allow_unverified: bool,
 ) -> Option<TargetCandidate> {
     let root_text = root.to_str()?;
     let system_root = SystemRoot::from_user_input(root_text).ok()?;
     let mut warnings = Vec::new();
     let inspection = inspect_target(&RealFilesystem, &system_root, &mut warnings);
-    if !inspection.is_catos_target.is_detected() { return None }
-    let os_release = inspection.os_release?;
+    let verified_catos = inspection.is_catos_target.is_detected();
+    let confidence = if verified_catos {
+        RootCandidateConfidence::High
+    } else if allow_unverified {
+        maintenance_target_confidence(&inspection)
+    } else {
+        return None;
+    };
+    if confidence == RootCandidateConfidence::Unknown {
+        return None;
+    }
+    let os_release = inspection.os_release.clone().unwrap_or_default();
     let fstab_identity = RealFilesystem
         .rooted_read_to_string(root, Path::new("etc/fstab"))
         .ok()
@@ -393,9 +420,20 @@ fn inspect_at(
                 .to_string()
         });
     let mut evidence = device.evidence.clone();
-    evidence.push(Evidence::new(
-        "CANDIDATE_OS_RELEASE", root.display().to_string(), "CatOS identity read from candidate root",
-    ));
+    if verified_catos {
+        evidence.push(Evidence::new(
+            "CANDIDATE_OS_RELEASE",
+            root.display().to_string(),
+            "CatOS identity read from candidate root",
+        ));
+    } else {
+        evidence.push(Evidence::new(
+            "UNVERIFIED_MAINTENANCE_TARGET",
+            root.display().to_string(),
+            "root has a credible system layout but CatOS identity is not verified",
+        ));
+        evidence.extend(inspection.is_catos_target.evidence.clone());
+    }
     evidence.push(Evidence::new("PROBE_ROOT", root.display().to_string(), probe_kind));
     if running_environment_member {
         evidence.push(Evidence::new(
@@ -407,8 +445,23 @@ fn inspect_at(
         root_device: device.dev_path.clone()?, root_fstype: device.filesystem.clone()?, root_uuid: device.uuid.clone(),
         root_subvolume: subvolume, root_subvolume_id: subvolume_id, filesystem_id: device.uuid.clone(),
         label: device.label.clone(), os_release, fstab_identity, currently_mounted, running_environment_member,
-        confidence: RootCandidateConfidence::High, evidence,
+        confidence, evidence,
     })
+}
+
+fn maintenance_target_confidence(inspection: &crate::model::TargetInspection) -> RootCandidateConfidence {
+    use crate::model::Presence;
+
+    let has_usr = inspection.has_usr == Presence::Present;
+    let has_pacman_db = inspection.has_pacman_db == Presence::Present;
+    let has_fstab = inspection.has_fstab == Presence::Present;
+    if has_usr && (has_pacman_db || has_fstab) {
+        RootCandidateConfidence::Medium
+    } else if has_usr || has_pacman_db || has_fstab {
+        RootCandidateConfidence::Low
+    } else {
+        RootCandidateConfidence::Unknown
+    }
 }
 
 fn rejected(path: &Path, reason: String) -> DiscoveryRejection {
@@ -459,6 +512,100 @@ impl Drop for ReadonlyProbe { fn drop(&mut self) { if self.mounted { eprintln!("
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn offline_device(path: &str, filesystem: &str) -> BlockDevice {
+        BlockDevice {
+            name: "fixture".into(),
+            dev_path: Some(PathBuf::from(path)),
+            major_minor: None,
+            parent: String::new(),
+            class: crate::model::DeviceClass::Partition,
+            disk_kind: crate::model::DiskKind::Unknown,
+            partition_role: crate::model::PartitionRole::LinuxFilesystem,
+            partition_number: None,
+            size_sectors: None,
+            read_only: false,
+            removable: false,
+            filesystem: Some(filesystem.into()),
+            uuid: Some("fixture-fsid".into()),
+            part_uuid: None,
+            label: None,
+            part_label: None,
+            mount_point: None,
+            mounts: Vec::new(),
+            mounted_before_session: false,
+            evidence: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn unverified_maintenance_root_is_chroot_only_and_requires_confirmation() {
+        let root = std::env::temp_dir().join(format!(
+            "catos-unverified-root-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("usr/bin")).unwrap();
+        std::fs::create_dir_all(root.join("etc")).unwrap();
+        std::fs::write(root.join("etc/fstab"), b"UUID=root / ext4 defaults 0 1\n").unwrap();
+        let device = offline_device("/dev/fixture-root", "ext4");
+
+        assert!(inspect_at(
+            &device,
+            &root,
+            None,
+            None,
+            false,
+            false,
+            "test",
+            false,
+        )
+        .is_none());
+        let candidate = inspect_at(
+            &device,
+            &root,
+            None,
+            None,
+            false,
+            false,
+            "test",
+            true,
+        )
+        .expect("rescue discovery should retain a credible unverified root");
+        assert_eq!(candidate.confidence, RootCandidateConfidence::Medium);
+        assert!(!candidate.os_release.looks_like_catos());
+        assert!(candidate
+            .evidence
+            .iter()
+            .any(|evidence| evidence.code == "UNVERIFIED_MAINTENANCE_TARGET"));
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn unverified_data_only_subvolume_is_not_a_maintenance_target() {
+        let root = std::env::temp_dir().join(format!(
+            "catos-unverified-data-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("home/user")).unwrap();
+        let device = offline_device("/dev/fixture-data", "btrfs");
+
+        assert!(inspect_at(
+            &device,
+            &root,
+            Some("/@home".into()),
+            Some(257),
+            false,
+            false,
+            "test",
+            true,
+        )
+        .is_none());
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn ordering_is_stable_and_prefers_high_confidence() {
         let base = |path: &str, confidence| TargetCandidate { root_device: PathBuf::from(path), root_fstype: "ext4".into(), root_uuid: None, root_subvolume: None, root_subvolume_id: None, filesystem_id: None, label: None, os_release: OsRelease::default(), fstab_identity: None, currently_mounted: false, running_environment_member: false, confidence, evidence: Vec::new() };

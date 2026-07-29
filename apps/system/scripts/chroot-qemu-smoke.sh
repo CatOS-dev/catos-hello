@@ -272,7 +272,7 @@ cat > "$INITRAMFS/bin/chroot-child" <<'CHILD'
 #!/bin/sh
 scenario=$1
 case "$scenario" in
-    default|cancel|missing_fstab) /bin/catos-chroot --no-systemd-chroot ;;
+    default|cancel|missing_fstab|missing_os_release) /bin/catos-chroot --no-systemd-chroot ;;
     show_snapshots|show_snapshots_cancel) /bin/catos-chroot --no-systemd-chroot --show-btrfs-dot-snapshots ;;
     *) echo "unknown scenario $scenario" >&2; exit 2 ;;
 esac
@@ -305,17 +305,22 @@ for arg in $(cat /proc/cmdline); do
 done
 case "$scenario" in
     default|missing_fstab) input='y\nn\n' ;;
+    missing_os_release) input='1\nn\ny\n' ;;
     show_snapshots) input='1\nn\n' ;;
     cancel) input='n\n' ;;
     show_snapshots_cancel) input='0\n' ;;
     *) input='' ;;
 esac
-if [ "$scenario" = missing_fstab ]; then
+if [ "$scenario" = missing_fstab ] || [ "$scenario" = missing_os_release ]; then
     mkdir -p /mnt/target
     mount -t btrfs -o subvol=@ /dev/vda /mnt/target
-    rm -f /mnt/target/etc/fstab
+    if [ "$scenario" = missing_fstab ]; then
+        rm -f /mnt/target/etc/fstab
+        touch /run/catos-chroot-root-only
+    else
+        rm -f /mnt/target/etc/os-release /mnt/target/usr/lib/os-release
+    fi
     umount /mnt/target
-    touch /run/catos-chroot-root-only
 fi
 rm -f /tmp/chroot.rc /tmp/chroot.out /tmp/chroot.err /tmp/typescript
 printf '%b' "$input" | timeout -s KILL 45 script -q \
@@ -408,6 +413,14 @@ run_qemu missing_fstab
 assert_contains "$LAST_LOG" "target /etc/fstab is missing; continuing with the selected root only" missing_fstab
 assert_contains "$LAST_LOG" "__CHROOT_TARGET_VERIFIED__" missing_fstab
 
+echo "=== scenario: missing-os-release-unverified-root ==="
+run_qemu missing_os_release
+assert_contains "$LAST_LOG" "Available maintenance targets:" missing_os_release
+assert_contains "$LAST_LOG" "Unverified system — /dev/vda — btrfs" missing_os_release
+assert_contains "$LAST_LOG" "target os-release was not found" missing_os_release
+assert_contains "$LAST_LOG" "Enter the chroot anyway? [y/N]" missing_os_release
+assert_contains "$LAST_LOG" "__CHROOT_TARGET_VERIFIED__" missing_os_release
+
 echo "=== scenario: explicit-show-snapshots ==="
 run_qemu show_snapshots
 assert_contains "$LAST_LOG" "Available CatOS targets:" show_snapshots
@@ -423,4 +436,4 @@ echo "=== scenario: back-from-multiple-targets ==="
 run_qemu show_snapshots_cancel
 assert_contains "$LAST_LOG" "  [0] Back" show_snapshots_cancel
 
-echo "pass: Chroot QEMU acceptance exercised /bin/catos-chroot, target selection, target-local os-release links, missing fstab fallback, unavailable and failed auxiliary mounts, descendant skipping, runtime setup, shell entry, reverse cleanup and session removal"
+echo "pass: Chroot QEMU acceptance exercised /bin/catos-chroot, target selection, target-local os-release links, unverified-root rescue selection, missing fstab fallback, unavailable and failed auxiliary mounts, descendant skipping, runtime setup, shell entry, reverse cleanup and session removal"

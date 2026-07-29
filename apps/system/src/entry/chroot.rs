@@ -49,6 +49,7 @@ pub fn run(argv: &[String], program: &str) -> i32 {
     let discovery = crate::target::discovery::discover_targets_with_options(
         crate::target::discovery::DiscoveryOptions {
             include_dot_snapshots: options.show_btrfs_dot_snapshots,
+            include_unverified_roots: true,
         },
     );
     if let Err(error) = validate_discovery_cleanup(&discovery) {
@@ -106,6 +107,7 @@ pub fn run(argv: &[String], program: &str) -> i32 {
                     crate::target::discovery::discover_targets_with_options(
                         crate::target::discovery::DiscoveryOptions {
                             include_dot_snapshots: options.show_btrfs_dot_snapshots,
+                            include_unverified_roots: true,
                         },
                     )
                 },

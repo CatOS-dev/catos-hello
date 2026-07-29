@@ -204,7 +204,15 @@ fn select_from_candidates<R: BufRead, W: Write>(
             Err(error) => Selection::Unavailable(error),
         };
     }
-    if let Err(error) = writeln!(output, "Available CatOS targets:")
+    let heading = if candidates
+        .iter()
+        .any(|candidate| !candidate.os_release.looks_like_catos())
+    {
+        "Available maintenance targets:"
+    } else {
+        "Available CatOS targets:"
+    };
+    if let Err(error) = writeln!(output, "{heading}")
         .map_err(|error| format!("stdout write failed: {error}"))
     {
         return Selection::Unavailable(error);
@@ -304,12 +312,21 @@ fn luks_candidates(devices: &[BlockDevice]) -> Vec<&BlockDevice> {
 }
 
 pub fn summary(candidate: &TargetCandidate) -> String {
-    let distro = candidate
-        .os_release
-        .pretty_name
-        .as_deref()
-        .or(candidate.os_release.name.as_deref())
-        .unwrap_or("CatOS");
+    let distro = if candidate.os_release.looks_like_catos() {
+        candidate
+            .os_release
+            .pretty_name
+            .as_deref()
+            .or(candidate.os_release.name.as_deref())
+            .unwrap_or("CatOS")
+    } else {
+        candidate
+            .os_release
+            .pretty_name
+            .as_deref()
+            .or(candidate.os_release.name.as_deref())
+            .unwrap_or("Unverified system")
+    };
     let uuid = candidate.root_uuid.as_deref().unwrap_or("unknown");
     let subvol = candidate
         .root_subvolume
@@ -535,6 +552,28 @@ mod tests {
         assert!(!rendered.contains('\n'));
         assert!(rendered.contains("CatOS\\u{1b}[2J\\nspoof"));
         assert!(rendered.contains("subvol=/@\\nother"));
+    }
+
+    #[test]
+    fn unverified_target_summary_and_heading_do_not_claim_catos_identity() {
+        let mut target = candidate("/dev/unverified", false);
+        target.os_release = Default::default();
+        target.confidence = RootCandidateConfidence::Medium;
+        assert!(summary(&target).starts_with("Unverified system — "));
+
+        let mut input = io::Cursor::new(b"0\n".to_vec());
+        let mut output = Vec::new();
+        let result = select_from_candidates(
+            &[&target],
+            "catos-chroot",
+            true,
+            &mut input,
+            &mut output,
+        );
+        assert!(matches!(result, Selection::Declined));
+        let output = String::from_utf8(output).unwrap();
+        assert!(output.contains("Available maintenance targets:"));
+        assert!(!output.contains("Available CatOS targets:"));
     }
 
     #[test]

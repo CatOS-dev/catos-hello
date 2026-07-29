@@ -134,8 +134,13 @@ or stale fstab data falls back to the selected root. Unavailable, ambiguous,
 conflicting, or invalid secondary fstab entries are skipped with warnings. If
 an auxiliary filesystem fails to mount, Chroot keeps unrelated successful
 mounts, skips descendants of the failed mount point, and still opens the shell.
-Failures that make a chroot impossible, such as inability to mount the selected
-root or runtime filesystems, remain errors.
+If `os-release` is missing, unreadable, or no longer identifies CatOS, Chroot
+may still offer a root with a credible system layout as an explicitly
+`Unverified system` target. Such a target is never auto-selected: it requires
+interactive selection and must also pass or explicitly override final target
+verification. Repair and Recovery discovery remain verified-only. Failures that
+make a chroot impossible, such as inability to mount the selected root or
+runtime filesystems, remain errors.
 
 Snapshot recovery mounts the Btrfs top level read-write inside a private mount
 namespace, validates the immutable plan and target identity, performs the root
