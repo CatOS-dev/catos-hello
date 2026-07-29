@@ -162,9 +162,10 @@ fn target_systemd_boot_entry_present(target_root: &Path, esp: &str, kernels: &[K
     else {
         return false;
     };
+    let esp_rooted = format!("/{}", esp.trim_matches('/'));
     let entries = catos_target::execute::confined::list_rooted_directory_names(
         target_root,
-        &format!("/{esp}/loader/entries"),
+        &format!("{esp_rooted}/loader/entries"),
     )
     .unwrap_or_default();
     !kernels.is_empty()
@@ -177,7 +178,8 @@ fn target_systemd_boot_entry_present(target_root: &Path, esp: &str, kernels: &[K
                 if !entry.starts_with(&prefix) || !entry.ends_with(".conf") {
                     return false;
                 }
-                read_target_file_checked(target_root, &format!("{esp}/loader/entries/{entry}"))
+                let entry_relative = format!("{}/loader/entries/{entry}", esp.trim_matches('/'));
+                read_target_file_checked(target_root, &entry_relative)
                     .ok()
                     .flatten()
                     .is_some_and(|contents| {
@@ -202,9 +204,30 @@ fn systemd_boot_entry_references_assets(contents: &str, machine_id: &str, versio
             continue;
         }
         let mut fields = trimmed.split_whitespace();
-        match (fields.next(), fields.next()) {
-            (Some("linux"), Some(path)) if path == expected_linux => has_linux = true,
-            (Some("initrd"), Some(path)) if path == expected_initrd => has_initrd = true,
+        let Some(directive) = fields.next() else {
+            continue;
+        };
+        match directive {
+            "linux" => {
+                let Some(path) = fields.next() else {
+                    return false;
+                };
+                if fields.next().is_some() || has_linux || path != expected_linux {
+                    return false;
+                }
+                has_linux = true;
+            }
+            "initrd" => {
+                let Some(path) = fields.next() else {
+                    return false;
+                };
+                if fields.next().is_some() {
+                    return false;
+                }
+                if path == expected_initrd {
+                    has_initrd = true;
+                }
+            }
             _ => {}
         }
     }
@@ -213,7 +236,46 @@ fn systemd_boot_entry_references_assets(contents: &str, machine_id: &str, versio
 
 #[cfg(test)]
 mod tests {
-    use super::grub_config_has_bootable_linux_entry;
+    use super::{grub_config_has_bootable_linux_entry, systemd_boot_entry_references_assets};
+
+    #[test]
+    fn systemd_boot_entry_rejects_trailing_linux_tokens() {
+        let entry = "linux /machine-id/6.18.0/linux extra\ninitrd /machine-id/6.18.0/initrd\n";
+
+        assert!(!systemd_boot_entry_references_assets(
+            entry,
+            "machine-id",
+            "6.18.0"
+        ));
+    }
+
+    #[test]
+    fn systemd_boot_entry_rejects_duplicate_or_conflicting_linux_directives() {
+        let duplicate = "linux /machine-id/6.18.0/linux\nlinux /machine-id/6.18.0/linux\ninitrd /machine-id/6.18.0/initrd\n";
+        let conflicting = "linux /machine-id/6.18.0/linux\nlinux /other/linux\ninitrd /machine-id/6.18.0/initrd\n";
+
+        assert!(!systemd_boot_entry_references_assets(
+            duplicate,
+            "machine-id",
+            "6.18.0"
+        ));
+        assert!(!systemd_boot_entry_references_assets(
+            conflicting,
+            "machine-id",
+            "6.18.0"
+        ));
+    }
+
+    #[test]
+    fn systemd_boot_entry_allows_additional_valid_initrd_assets() {
+        let entry = "linux /machine-id/6.18.0/linux\ninitrd /intel-ucode.img\ninitrd /machine-id/6.18.0/initrd\n";
+
+        assert!(systemd_boot_entry_references_assets(
+            entry,
+            "machine-id",
+            "6.18.0"
+        ));
+    }
 
     #[test]
     fn grub_verification_rejects_commands_split_across_menuentries() {
