@@ -123,16 +123,24 @@ pub fn rollback_nested_esp_mountpoint(
                 create_session_dir(Path::new(SESSION_ROOT_PARENT), "mount-repair-boot-rollback")
                     .map_err(|error| error.to_string())?;
             let mount_point = session_dir.join("boot");
-            std::fs::create_dir(&mount_point)
-                .map_err(|error| format!("cannot create rollback /boot mountpoint: {error}"))?;
-            syscall::mount(
+            if let Err(error) = std::fs::create_dir(&mount_point) {
+                return Err(cleanup_session_error(
+                    &session_dir,
+                    format!("cannot create rollback /boot mountpoint: {error}"),
+                ));
+            }
+            if let Err(error) = syscall::mount(
                 Some(source),
                 &mount_point,
                 Some(fstype),
                 ms_flags::MS_NOSUID | ms_flags::MS_NODEV,
                 None,
-            )
-            .map_err(|error| format!("cannot mount separate /boot for rollback: {error}"))?;
+            ) {
+                return Err(cleanup_session_error(
+                    &session_dir,
+                    format!("cannot mount separate /boot for rollback: {error}"),
+                ));
+            }
             let remove_result = confined::remove_empty_rooted_directory(&mount_point, "/efi")
                 .map_err(|error| error.to_string());
             let unmount_result = syscall::umount2(&mount_point, 0)
@@ -230,8 +238,12 @@ pub fn ensure_nested_esp_mountpoint(
                 create_session_dir(Path::new(SESSION_ROOT_PARENT), "mount-repair-boot-parent")
                     .map_err(|error| error.to_string())?;
             let mount_point = session_dir.join("boot");
-            std::fs::create_dir(&mount_point)
-                .map_err(|error| format!("cannot create temporary /boot mountpoint: {error}"))?;
+            if let Err(error) = std::fs::create_dir(&mount_point) {
+                return Err(cleanup_session_error(
+                    &session_dir,
+                    format!("cannot create temporary /boot mountpoint: {error}"),
+                ));
+            }
             if let Err(error) = syscall::mount(
                 Some(source),
                 &mount_point,
@@ -243,18 +255,21 @@ pub fn ensure_nested_esp_mountpoint(
                 return Err(format!("cannot mount separate /boot read-write: {error}"));
             }
             let fs = RealFilesystem;
-            let existed = match fs.rooted_metadata(&mount_point, Path::new("efi")) {
+            let existed_result = match fs.rooted_metadata(&mount_point, Path::new("efi")) {
                 Ok(metadata) if metadata.is_dir && !metadata.is_symlink => true,
-                Ok(_) => {
-                    let _ = syscall::umount2(&mount_point, 0);
-                    return Err("separate /boot contains a non-directory efi entry".into());
-                }
+                Ok(_) => return cleanup_mounted_session_error(
+                    &session_dir,
+                    &mount_point,
+                    "separate /boot contains a non-directory efi entry".into(),
+                ),
                 Err(catos_target::FsError::NotFound) => false,
-                Err(error) => {
-                    let _ = syscall::umount2(&mount_point, 0);
-                    return Err(format!("cannot inspect separate /boot/efi: {error}"));
-                }
+                Err(error) => return cleanup_mounted_session_error(
+                    &session_dir,
+                    &mount_point,
+                    format!("cannot inspect separate /boot/efi: {error}"),
+                ),
             };
+            let existed = existed_result;
             let create_result = if existed {
                 Ok(())
             } else {
@@ -292,5 +307,33 @@ pub fn ensure_nested_esp_mountpoint(
             Ok((!existed).then(|| "/boot/efi".to_string()))
         }
         _ => Ok(None),
+    }
+}
+
+fn cleanup_session_error(session_dir: &Path, message: String) -> String {
+    match remove_session_dir(Path::new(SESSION_ROOT_PARENT), session_dir) {
+        Ok(()) => message,
+        Err(error) => format!("{message}; session cleanup failed: {error}"),
+    }
+}
+
+fn cleanup_mounted_session_error(
+    session_dir: &Path,
+    mount_point: &Path,
+    message: String,
+) -> Result<Option<String>, String> {
+    let unmount_error = syscall::umount2(mount_point, 0)
+        .err()
+        .map(|error| format!("cannot unmount temporary separate /boot: {error}"));
+    let session_error = remove_session_dir(Path::new(SESSION_ROOT_PARENT), session_dir)
+        .err()
+        .map(|error| error.to_string());
+    match (unmount_error, session_error) {
+        (None, None) => Err(message),
+        (Some(unmount), None) => Err(format!("{message}; {unmount}")),
+        (None, Some(session)) => Err(format!("{message}; session cleanup failed: {session}")),
+        (Some(unmount), Some(session)) => Err(format!(
+            "{message}; {unmount}; session cleanup failed: {session}"
+        )),
     }
 }

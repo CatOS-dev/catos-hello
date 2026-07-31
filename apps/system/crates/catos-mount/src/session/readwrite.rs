@@ -95,16 +95,22 @@ impl PlainRwSession {
         })?;
         let session_dir = create_session_dir(Path::new(SESSION_ROOT_PARENT), "mount-repair-rw")?;
         let mount_root = session_dir.join("root");
-        std::fs::create_dir(&mount_root).map_err(|error| MountSessionError {
-            kind: MountSessionErrorKind::SessionDirectoryNotSecure,
-            message: format!("cannot create plain-root mountpoint: {error}"),
-            errno: error.raw_os_error(),
-        })?;
-        let source = device.to_str().ok_or_else(|| MountSessionError {
-            kind: MountSessionErrorKind::InvalidDevicePath,
-            message: "plain root device path is not UTF-8".into(),
-            errno: None,
-        })?;
+        if let Err(error) = std::fs::create_dir(&mount_root) {
+            let _ = remove_session_dir(Path::new(SESSION_ROOT_PARENT), &session_dir);
+            return Err(MountSessionError {
+                kind: MountSessionErrorKind::SessionDirectoryNotSecure,
+                message: format!("cannot create plain-root mountpoint: {error}"),
+                errno: error.raw_os_error(),
+            });
+        }
+        let Some(source) = device.to_str() else {
+            let _ = remove_session_dir(Path::new(SESSION_ROOT_PARENT), &session_dir);
+            return Err(MountSessionError {
+                kind: MountSessionErrorKind::InvalidDevicePath,
+                message: "plain root device path is not UTF-8".into(),
+                errno: None,
+            });
+        };
         if let Err(error) = syscall::mount(
             Some(source),
             &mount_root,
