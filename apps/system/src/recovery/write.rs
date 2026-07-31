@@ -244,7 +244,10 @@ pub(super) fn run_apply(
 
     let mut mount_session = BtrfsTopLevelRwSession::mount(&device)?;
     let top_level_mount = mount_session.top_level_mount().to_path_buf();
-    let rw_target = validate_mounted_filesystem(&top_level_mount, &device)?;
+    let rw_target = match validate_mounted_filesystem(&top_level_mount, &device) {
+        Ok(target) => target,
+        Err(error) => return Err(cleanup_rw_session_after_validation_error(&mut mount_session, error)),
+    };
     let validated_filesystem = rw_target.filesystem.clone();
 
     let drive_outcome = (|| {
@@ -316,7 +319,10 @@ pub(super) fn run_resume(
     let device = probe.canonical_device;
     let mut mount_session = BtrfsTopLevelRwSession::mount(&device)?;
     let top_level_mount = mount_session.top_level_mount().to_path_buf();
-    let target = validate_mounted_filesystem(&top_level_mount, &device)?;
+    let target = match validate_mounted_filesystem(&top_level_mount, &device) {
+        Ok(target) => target,
+        Err(error) => return Err(cleanup_rw_session_after_validation_error(&mut mount_session, error)),
+    };
     if target.filesystem != probe.filesystem {
         let cleanup = mount_session.cleanup().into();
         let mut error = SnapshotError::new(
@@ -395,7 +401,10 @@ pub(super) fn run_revert(
     let device = probe.canonical_device;
     let mut mount_session = BtrfsTopLevelRwSession::mount(&device)?;
     let top_level_mount = mount_session.top_level_mount().to_path_buf();
-    let target = validate_mounted_filesystem(&top_level_mount, &device)?;
+    let target = match validate_mounted_filesystem(&top_level_mount, &device) {
+        Ok(target) => target,
+        Err(error) => return Err(cleanup_rw_session_after_validation_error(&mut mount_session, error)),
+    };
     if target.filesystem != probe.filesystem {
         let cleanup = mount_session.cleanup().into();
         let mut error = SnapshotError::new(
@@ -457,6 +466,14 @@ fn engine_attach_cleanup_into_error(error: &mut SnapshotError, cleanup: CleanupS
         combined.push_str(&suffix);
         error.message = combined.into_boxed_str();
     }
+}
+
+fn cleanup_rw_session_after_validation_error(
+    session: &mut BtrfsTopLevelRwSession,
+    mut error: SnapshotError,
+) -> SnapshotError {
+    engine_attach_cleanup_into_error(&mut error, session.cleanup().into());
+    error
 }
 
 /// Persist the real post-teardown `CleanupSummary` into the on-disk
