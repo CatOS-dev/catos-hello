@@ -32,6 +32,18 @@ HomePage::HomePage(QWidget *parent) : QWidget(parent)
              env.live ? tr("Live session") : tr("Installed system")), content);
     summary->setWordWrap(true);
     layout->addWidget(summary);
+    if (env.live) {
+        auto *installActions = new QHBoxLayout;
+        for (const auto &item : {qMakePair(tr("Install CatOS"), QStringLiteral("install")),
+                                 qMakePair(tr("Advanced installer"), QStringLiteral("install-advanced"))}) {
+            auto *button = new QPushButton(item.first, content);
+            connect(button, &QPushButton::clicked, this, [this, action = item.second] {
+                emit actionRequested(action);
+            });
+            installActions->addWidget(button);
+        }
+        layout->addLayout(installActions);
+    }
 
     auto *links = new QHBoxLayout;
     for (const auto &entry : {qMakePair(tr("Software manager"), QStringLiteral("software")),

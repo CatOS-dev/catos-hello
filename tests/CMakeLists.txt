@@ -40,3 +40,11 @@ add_executable(test_onboarding
 target_include_directories(test_onboarding PRIVATE ${HELLO_SOURCE_DIR})
 target_link_libraries(test_onboarding PRIVATE Qt6::Test Qt6::Network)
 add_test(NAME test_onboarding COMMAND test_onboarding)
+
+add_executable(test_toolrunner
+    test_toolrunner.cpp
+    ${HELLO_SOURCE_DIR}/ToolRunner.cpp
+)
+target_include_directories(test_toolrunner PRIVATE ${HELLO_SOURCE_DIR})
+target_link_libraries(test_toolrunner PRIVATE Qt6::Test)
+add_test(NAME test_toolrunner COMMAND test_toolrunner)

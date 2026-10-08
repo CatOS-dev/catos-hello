@@ -1,39 +1,24 @@
-#ifndef MAINWINDOW_H
-#define MAINWINDOW_H
+#pragma once
 
 #include <QMainWindow>
-#include "GeneralNewsTab.h"
-#include "PostInstallGuideTab.h"
-#include "AssistantTab.h"
-#include "TipsTab.h"
-#include "InstallAppsTab.h"
 
-QT_BEGIN_NAMESPACE
-namespace Ui { class MainWindow; }
-QT_END_NAMESPACE
+class QListWidget;
+class QStackedWidget;
+class ToolRunner;
+class SoftwarePage;
+class MaintenancePage;
 
-class MainWindow : public QMainWindow
-{
+class MainWindow : public QMainWindow {
     Q_OBJECT
-
 public:
-    MainWindow(QWidget *parent = nullptr);
-    ~MainWindow();
-
-private slots:
-    void onSoftwareNewsButtonClicked();
-    void onViewLogsButtonClicked();
-    void onNoShowButtonClicked();
-    void onExitButtonClicked();
+    explicit MainWindow(QWidget *parent = nullptr);
 
 private:
-    Ui::MainWindow *ui;
-
-    GeneralNewsTab *generalNewsTab{};
-    PostInstallGuideTab *postInstallGuideTab{};
-    AssistantTab *assistantTab{};
-    TipsTab *tipsTab{};
-    InstallAppsTab *installAppsTab{};
+    void navigate(const QString &page);
+    void dispatchHomeAction(const QString &action);
+    QListWidget *navigation_ = nullptr;
+    QStackedWidget *pages_ = nullptr;
+    ToolRunner *tools_ = nullptr;
+    SoftwarePage *software_ = nullptr;
+    MaintenancePage *maintenance_ = nullptr;
 };
-
-#endif // MAINWINDOW_H

@@ -20,11 +20,6 @@ endif()
 set(CATOS_HELLO_STATE_DIR "/var/lib/catos-hello")
 
 install(
-    FILES data/desktop.yaml
-    DESTINATION "${CATOS_HELLO_STATE_DIR}"
-)
-
-install(
     DIRECTORY data/news/
     DESTINATION "${CATOS_HELLO_STATE_DIR}/news"
     FILES_MATCHING PATTERN "*.html"

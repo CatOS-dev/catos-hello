@@ -89,6 +89,7 @@ main() {
         echo "#!/bin/bash"
         [ -n "$prompt" ] && echo "echo -e '\\n\033[1;32m$prompt\033[0m\\n'" 
         echo "$cmd"
+        echo '_catos_run_status=$?'
         
         # 等待逻辑处理
         case "$wait_opt" in
@@ -98,6 +99,7 @@ main() {
         esac
         
         echo "rm -f '$tmpfile'"
+        echo 'exit "$_catos_run_status"'
     } > "$tmpfile"
 
     chmod +x "$tmpfile"

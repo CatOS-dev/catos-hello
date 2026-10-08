@@ -1,129 +1,107 @@
 #include "mainwindow.h"
-#include "ui_mainwindow.h"
-#include <QLabel>
-#include <QPushButton>
-#include <QVBoxLayout>
-#include <QHBoxLayout>
-#include <QTabWidget>
-#include <QSpacerItem>
-#include <QDesktopServices>
-#include <QUrl>
-#include <QSettings>
-#include <QMessageBox>
-#include <QDebug>
-#include <QDir>
-#include <QFile>
-#include <QProcess>
+#include "ToolRunner.h"
+#include "about/AboutPage.h"
 #include "home/HomePage.h"
+#include "maintenance/MaintenancePage.h"
+#include "software/SoftwarePage.h"
 
-MainWindow::MainWindow(QWidget *parent)
-    : QMainWindow(parent)
-    , ui(new Ui::MainWindow)
+#include <QFile>
+#include <QDir>
+#include <QFrame>
+#include <QHBoxLayout>
+#include <QLabel>
+#include <QListWidget>
+#include <QMessageBox>
+#include <QPushButton>
+#include <QStackedWidget>
+#include <QVBoxLayout>
+
+MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent)
 {
-    ui->setupUi(this);
+    setWindowTitle(tr("CatOS Hello"));
+    resize(1040, 700);
+    setMinimumSize(760, 520);
+    tools_ = new ToolRunner(this);
+    auto *central = new QWidget(this);
+    auto *layout = new QHBoxLayout(central);
+    layout->setContentsMargins(0, 0, 0, 0);
+    layout->setSpacing(0);
 
-    this->setWindowTitle("CatOS-Hello");
+    auto *sidebar = new QFrame(central);
+    sidebar->setFrameShape(QFrame::StyledPanel);
+    sidebar->setFixedWidth(214);
+    auto *sidebarLayout = new QVBoxLayout(sidebar);
+    sidebarLayout->setContentsMargins(14, 20, 14, 16);
+    auto *logo = new QLabel(tr("CatOS Hello"), sidebar);
+    QFont brand = logo->font();
+    brand.setBold(true);
+    brand.setPointSize(brand.pointSize() + 5);
+    logo->setFont(brand);
+    sidebarLayout->addWidget(logo);
+    navigation_ = new QListWidget(sidebar);
+    navigation_->addItems({tr("Home"), tr("Software and desktop"),
+                           tr("System maintenance"), tr("About CatOS")});
+    navigation_->setFrameShape(QFrame::NoFrame);
+    navigation_->setSpacing(7);
+    sidebarLayout->addWidget(navigation_);
 
-    // 创建中央控件
-    QWidget *centralWidget = new QWidget(this);
-    QVBoxLayout *mainLayout = new QVBoxLayout;
-
-    // 创建欢迎标签
-    QLabel *welcomeLabel = new QLabel(tr("Welcome to CatOS!"), this);
-    mainLayout->addWidget(welcomeLabel);
-
-    // 创建Tab控件
-    QTabWidget *mainTabWidget = new QTabWidget(this);
-
-    // 添加各个 Tab
-    auto *homePage = new HomePage(this);
-    mainTabWidget->addTab(homePage, tr("Home"));
-    connect(homePage, &HomePage::navigateTo, this, [mainTabWidget](const QString &page) {
-        if (page == QStringLiteral("software") || page == QStringLiteral("desktop"))
-            mainTabWidget->setCurrentIndex(5);
-        else if (page == QStringLiteral("maintenance")) mainTabWidget->setCurrentIndex(3);
-    });
-    connect(homePage, &HomePage::actionRequested, this, [mainTabWidget](const QString &action) {
-        if (action == QStringLiteral("shelly")) QProcess::startDetached(QStringLiteral("shelly-ui"));
-        else if (action == QStringLiteral("apps") || action == QStringLiteral("software") ||
-                 action == QStringLiteral("desktop")) mainTabWidget->setCurrentIndex(5);
-        else mainTabWidget->setCurrentIndex(2);
-    });
-    mainTabWidget->addTab(new GeneralNewsTab(this), tr("General News"));
-    mainTabWidget->addTab(new PostInstallGuideTab(this), tr("Post-Install Guide"));
-    mainTabWidget->addTab(new AssistantTab(this), tr("Assistant"));
-    mainTabWidget->addTab(new TipsTab(this), tr("Tips"));
-    mainTabWidget->addTab(new InstallAppsTab(this), tr("Install More Apps"));
-
-    // 将Tab控件添加到布局中
-    mainLayout->addWidget(mainTabWidget);
-
-    // 创建按钮布局
-    QHBoxLayout *buttonLayout = new QHBoxLayout;
-    QSpacerItem *horizontalSpacer = new QSpacerItem(200, 0, QSizePolicy::Fixed, QSizePolicy::Fixed);
-    buttonLayout->addItem(horizontalSpacer);
-
-    QPushButton *softwareNewsButton = new QPushButton(tr("Software News"), this);
-    QPushButton *viewLogsButton = new QPushButton(tr("View Update Logs"), this);
-    QPushButton *noShowButton = new QPushButton(tr("Stop Showing"), this);
-    QPushButton *exitButton = new QPushButton(tr("Exit"), this);
-
-    buttonLayout->addWidget(softwareNewsButton);
-    buttonLayout->addWidget(viewLogsButton);
-    buttonLayout->addWidget(noShowButton);
-    buttonLayout->addWidget(exitButton);
-
-    connect(softwareNewsButton, &QPushButton::clicked, this, &MainWindow::onSoftwareNewsButtonClicked);
-    connect(viewLogsButton, &QPushButton::clicked, this, &MainWindow::onViewLogsButtonClicked);
-    connect(noShowButton, &QPushButton::clicked, this, &MainWindow::onNoShowButtonClicked);
-    connect(exitButton, &QPushButton::clicked, this, &MainWindow::onExitButtonClicked);
-
-    // 将按钮布局添加到主布局
-    mainLayout->addLayout(buttonLayout);
-
-    // 设置中央控件和布局
-    centralWidget->setLayout(mainLayout);
-    setCentralWidget(centralWidget);
-}
-
-MainWindow::~MainWindow()
-{
-    delete ui;
-}
-
-void MainWindow::onSoftwareNewsButtonClicked()
-{
-    qInfo() << "MainWindow: open software news";
-    QDesktopServices::openUrl(QUrl("https://www.archlinux.org/"));
-}
-
-void MainWindow::onViewLogsButtonClicked()
-{
-    qInfo() << "MainWindow: open update logs";
-    QDesktopServices::openUrl(QUrl("https://github.com/CatOS-Home/CatOS/commits/main/"));
-}
-
-void MainWindow::onNoShowButtonClicked()
-{
-    qInfo() << "MainWindow: disable startup display";
-    // 删除 autostart 桌面文件以禁用自动启动
-    const QString autostartPath = QDir::homePath() + "/.config/autostart/catos-hello.desktop";
-    if (QFile::exists(autostartPath)) {
-        if (QFile::remove(autostartPath)) {
-            qInfo() << "MainWindow: removed autostart file" << autostartPath;
-            QMessageBox::information(this, tr("Success"), tr("This window will no longer be displayed at startup. You can run catos-hello in the terminal to open it again."));
-        } else {
-            qWarning() << "MainWindow: failed to remove autostart file" << autostartPath;
-            QMessageBox::warning(this, tr("Error"), tr("Failed to remove autostart file: %1").arg(autostartPath));
+    auto *hideAtLogin = new QPushButton(tr("Don't open at login"), sidebar);
+    connect(hideAtLogin, &QPushButton::clicked, this, [this, hideAtLogin] {
+        const QString path = QDir::homePath() + QStringLiteral("/.config/autostart/catos-hello.desktop");
+        if (QFile::exists(path) && !QFile::remove(path)) {
+            QMessageBox::warning(this, tr("Autostart"), tr("Could not disable automatic startup."));
+            return;
         }
-    } else {
-        qInfo() << "MainWindow: autostart file not found:" << autostartPath;
-        QMessageBox::information(this, tr("Note"), tr("Autostart file not found."));
+        hideAtLogin->setEnabled(false);
+        hideAtLogin->setText(tr("Autostart disabled"));
+    });
+    sidebarLayout->addWidget(hideAtLogin);
+    if (!QFile::exists(QDir::homePath() + QStringLiteral("/.config/autostart/catos-hello.desktop"))) {
+        hideAtLogin->setEnabled(false);
+        hideAtLogin->setText(tr("Autostart disabled"));
     }
+    layout->addWidget(sidebar);
+
+    pages_ = new QStackedWidget(central);
+    auto *home = new HomePage(pages_);
+    software_ = new SoftwarePage(tools_, pages_);
+    maintenance_ = new MaintenancePage(tools_, pages_);
+    pages_->addWidget(home);
+    pages_->addWidget(software_);
+    pages_->addWidget(maintenance_);
+    pages_->addWidget(new AboutPage(pages_));
+    layout->addWidget(pages_, 1);
+    setCentralWidget(central);
+    connect(navigation_, &QListWidget::currentRowChanged, pages_, &QStackedWidget::setCurrentIndex);
+    navigation_->setCurrentRow(0);
+    connect(home, &HomePage::navigateTo, this, &MainWindow::navigate);
+    connect(home, &HomePage::actionRequested, this, &MainWindow::dispatchHomeAction);
 }
 
-void MainWindow::onExitButtonClicked()
+void MainWindow::navigate(const QString &page)
 {
-    qInfo() << "MainWindow: exit";
-    QApplication::quit();
+    if (page == QStringLiteral("software") || page == QStringLiteral("desktop")) {
+        navigation_->setCurrentRow(1);
+        if (page == QStringLiteral("desktop")) software_->showDesktopSettings();
+    } else if (page == QStringLiteral("maintenance") || page == QStringLiteral("drivers")) {
+        navigation_->setCurrentRow(2);
+        if (page == QStringLiteral("drivers")) maintenance_->showDrivers();
+    } else if (page == QStringLiteral("about")) navigation_->setCurrentRow(3);
+    else navigation_->setCurrentRow(0);
+}
+
+void MainWindow::dispatchHomeAction(const QString &action)
+{
+    if (action == QStringLiteral("shelly")) {
+        if (!ToolRunner::launch(QStringLiteral("shelly-ui")))
+            QMessageBox::warning(this, tr("Shelly unavailable"), tr("The Shelly graphical application is not installed."));
+    } else if (action == QStringLiteral("install")) {
+        if (!ToolRunner::launch(QStringLiteral("calamares_polkit")))
+            QMessageBox::warning(this, tr("Installer"), tr("Calamares is not available."));
+    } else if (action == QStringLiteral("install-advanced")) {
+        if (!ToolRunner::launch(QStringLiteral("calamares_polkit"), {QStringLiteral("--config"),
+                                                                     QStringLiteral("/usr/share/calamares-advanced")}))
+            QMessageBox::warning(this, tr("Installer"), tr("Calamares is not available."));
+    } else if (action == QStringLiteral("drivers")) navigate(QStringLiteral("drivers"));
+    else navigate(action);
 }
