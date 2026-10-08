@@ -5,6 +5,11 @@
 #include <QDialog>
 #include <QFile>
 #include <QLabel>
+#include <QGroupBox>
+#include <QMenu>
+#include <QScrollArea>
+#include "maintenance/MaintenancePage.h"
+#include <QToolButton>
 #include <QListWidget>
 #include <QPushButton>
 #include <QTemporaryDir>
@@ -13,6 +18,7 @@
 #include <QTreeWidget>
 #include "home/Environment.h"
 #include "home/HomePage.h"
+#include "home/Onboarding.h"
 #include "mainwindow.h"
 
 class HelloUiTests : public QObject {
@@ -30,7 +36,7 @@ private:
 
     static bool hasButton(QWidget &widget, const QString &label) {
         for (auto *button : widget.findChildren<QPushButton *>())
-            if (button->text() == label) return true;
+            if (button->text() == label || button->accessibleName() == label) return true;
         return false;
     }
 
@@ -68,12 +74,16 @@ private slots:
         QVERIFY(window.findChild<QPushButton *>(QStringLiteral("partition")));
         QVERIFY(window.findChild<QComboBox *>(QStringLiteral("languageSelect")));
         QVERIFY(!window.findChild<QPushButton *>(QStringLiteral("desktopPackagesButton")));
-        QVERIFY(!hasButton(window, QStringLiteral("Run CatOS updater")));
-        QVERIFY(!hasButton(window, QStringLiteral("Review drivers")));
+        QVERIFY(!window.findChild<QPushButton *>(QStringLiteral("action_update")));
+        QVERIFY(!window.findChild<QPushButton *>(QStringLiteral("action_drivers")));
         QVERIFY(!hasButton(window, QStringLiteral("Open Shelly")));
         window.show();
         QCoreApplication::processEvents();
         screenshot(window, QStringLiteral("hello-live-en.png"));
+        window.resize(760, 520);
+        QCoreApplication::processEvents();
+        screenshot(window, QStringLiteral("hello-live-en-compact.png"));
+        window.resize(1040, 700);
         navigation->setCurrentRow(1);
         QCoreApplication::processEvents();
         screenshot(window, QStringLiteral("hello-recovery-en.png"));
@@ -89,7 +99,16 @@ private slots:
         QVERIFY(!window.findChild<QPushButton *>(QStringLiteral("install-log")));
         QVERIFY(!window.findChild<QPushButton *>(QStringLiteral("partition")));
         QVERIFY(window.findChild<QPushButton *>(QStringLiteral("desktopPackagesButton")));
-        QVERIFY(hasButton(window, QStringLiteral("Run CatOS updater")));
+        QVERIFY(window.findChild<QPushButton *>(QStringLiteral("action_update")));
+        QVERIFY(hasButton(window, QStringLiteral("Run CatOS updater (news and updates)")));
+        QVERIFY(window.findChildren<QGroupBox *>().isEmpty());
+        auto *advanced = window.findChild<QWidget *>(QStringLiteral("advancedSection"));
+        auto *toggle = window.findChild<QToolButton *>(QStringLiteral("advancedToggle"));
+        QVERIFY(advanced && toggle);
+        QVERIFY(advanced->isHidden());
+        toggle->setChecked(true);
+        QVERIFY(!advanced->isHidden());
+        toggle->setChecked(false);
         QVERIFY(!hasButton(window, QStringLiteral("Get installation logs")));
         window.show();
         QCoreApplication::processEvents();
@@ -97,6 +116,36 @@ private slots:
         navigation->setCurrentRow(2);
         QCoreApplication::processEvents();
         screenshot(window, QStringLiteral("hello-maintenance-en.png"));
+        toggle->setChecked(true);
+        if (auto *scroll = window.findChild<MaintenancePage *>()->findChild<QScrollArea *>())
+            scroll->ensureWidgetVisible(advanced);
+        QCoreApplication::processEvents();
+        screenshot(window, QStringLiteral("hello-maintenance-advanced-en.png"));
+        toggle->setChecked(false);
+    }
+
+    void firstKickRowsStillSupportNavigationAndProgress() {
+        OnboardingStore state;
+        state.reset();
+        MainWindow window(environment(false));
+        window.show();
+        auto *navigation = window.findChild<QListWidget *>(QStringLiteral("navigation"));
+        auto *software = window.findChild<QPushButton *>(QStringLiteral("action_software"));
+        QVERIFY(software);
+        QVERIFY(software->isFlat());
+        QCOMPARE(navigation->currentRow(), 0);
+        QTest::mouseClick(software, Qt::LeftButton);
+        QCOMPARE(navigation->currentRow(), 1);
+        navigation->setCurrentRow(0);
+        auto *step = window.findChild<QWidget *>(QStringLiteral("step_updates"));
+        QVERIFY(step);
+        auto *menu = step->findChild<QMenu *>();
+        QVERIFY(menu);
+        QCOMPARE(menu->actions().size(), 2);
+        menu->actions().first()->trigger();
+        QVERIFY(step->isHidden());
+        QVERIFY(state.markedDone(QStringLiteral("updates")));
+        state.reset();
     }
 
     void desktopPackageSelectorOpensFullIndependentDialog() {
@@ -175,6 +224,11 @@ private slots:
             QCoreApplication::processEvents();
             screenshot(window, live ? QStringLiteral("hello-live-zh.png")
                                     : QStringLiteral("hello-installed-zh.png"));
+            window.resize(760, 520);
+            QCoreApplication::processEvents();
+            screenshot(window, live ? QStringLiteral("hello-live-zh-compact.png")
+                                    : QStringLiteral("hello-installed-zh-compact.png"));
+            window.resize(1040, 700);
             navigation->setCurrentRow(live ? 1 : 2);
             QCoreApplication::processEvents();
             screenshot(window, live ? QStringLiteral("hello-recovery-zh.png")

@@ -6,6 +6,7 @@
 #include "home/HomePage.h"
 #include "maintenance/MaintenancePage.h"
 #include "software/SoftwarePage.h"
+#include "ui/ActionList.h"
 
 #include <QApplication>
 #include <QComboBox>
@@ -21,6 +22,7 @@
 #include <QMessageBox>
 #include <QProcess>
 #include <QPushButton>
+#include <QScrollArea>
 #include <QStackedWidget>
 #include <QTemporaryDir>
 #include <QUrl>
@@ -41,8 +43,12 @@ MainWindow::MainWindow(const Environment &environment, QWidget *parent)
     layout->setSpacing(0);
 
     auto *sidebar = new QFrame(central);
-    sidebar->setFrameShape(QFrame::StyledPanel);
-    sidebar->setFixedWidth(214);
+    sidebar->setFrameShape(QFrame::NoFrame);
+    sidebar->setFixedWidth(218);
+    auto sidebarPalette = sidebar->palette();
+    sidebarPalette.setColor(QPalette::Window, sidebarPalette.color(QPalette::AlternateBase));
+    sidebar->setPalette(sidebarPalette);
+    sidebar->setAutoFillBackground(true);
     auto *sidebarLayout = new QVBoxLayout(sidebar);
     sidebarLayout->setContentsMargins(14, 20, 14, 16);
     auto *logo = new QLabel(tr("CatOS Hello"), sidebar);
@@ -58,6 +64,10 @@ MainWindow::MainWindow(const Environment &environment, QWidget *parent)
                                 tr("System maintenance"), tr("About CatOS")});
     navigation_->setFrameShape(QFrame::NoFrame);
     navigation_->setSpacing(7);
+    navigation_->setStyleSheet(QStringLiteral(
+        "QListWidget { background: transparent; border: none; }"
+        "QListWidget::item { padding: 10px 12px; border-radius: 8px; }"
+        "QListWidget::item:selected { background: palette(highlight); color: palette(highlighted-text); }"));
     sidebarLayout->addWidget(navigation_);
 
     if (!live_) {
@@ -71,6 +81,7 @@ MainWindow::MainWindow(const Environment &environment, QWidget *parent)
             hideAtLogin->setEnabled(false);
             hideAtLogin->setText(tr("Autostart disabled"));
         });
+        hideAtLogin->setFlat(true);
         sidebarLayout->addWidget(hideAtLogin);
         if (!QFile::exists(QDir::homePath() + QStringLiteral("/.config/autostart/catos-hello.desktop"))) {
             hideAtLogin->setEnabled(false);
@@ -79,6 +90,7 @@ MainWindow::MainWindow(const Environment &environment, QWidget *parent)
     }
     auto *exitButton = new QPushButton(tr("Exit"), sidebar);
     exitButton->setObjectName(QStringLiteral("exitButton"));
+    exitButton->setFlat(true);
     connect(exitButton, &QPushButton::clicked, qApp, &QApplication::quit);
     sidebarLayout->addWidget(exitButton);
     layout->addWidget(sidebar);
@@ -117,30 +129,64 @@ MainWindow::MainWindow(const Environment &environment, QWidget *parent)
     pages_->addWidget(home);
     if (live_) {
         auto *recovery = new QWidget(pages_);
-        auto *recoveryLayout = new QVBoxLayout(recovery);
-        recoveryLayout->setContentsMargins(24, 24, 24, 24);
-        auto *title = new QLabel(tr("Disk and recovery"), recovery);
-        QFont heading = title->font();
-        heading.setPointSize(heading.pointSize() + 7);
-        heading.setBold(true);
-        title->setFont(heading);
-        recoveryLayout->addWidget(title);
-        auto *description = new QLabel(tr("Tools for disk preparation and troubleshooting in the live session."), recovery);
-        description->setWordWrap(true);
-        recoveryLayout->addWidget(description);
-        for (const auto &item : {qMakePair(tr("Partition disks (GParted)"), QStringLiteral("partition")),
-                                 qMakePair(tr("Recover partitions (TestDisk)"), QStringLiteral("testdisk")),
-                                 qMakePair(tr("Open terminal"), QStringLiteral("terminal")),
-                                 qMakePair(tr("Get installation logs"), QStringLiteral("install-log")),
-                                 qMakePair(tr("Collect system logs"), QStringLiteral("collect-logs")),
-                                 qMakePair(tr("Select package mirrors"), QStringLiteral("mirrors")),
-                                 qMakePair(tr("Edit pacman repositories"), QStringLiteral("repositories"))}) {
-            auto *button = new QPushButton(item.first, recovery);
-            button->setObjectName(item.second);
-            connect(button, &QPushButton::clicked, this, [this, action = item.second] {
-                dispatchHomeAction(action);
+        auto *recoveryOuter = new QVBoxLayout(recovery);
+        recoveryOuter->setContentsMargins(0, 0, 0, 0);
+        auto *scroll = new QScrollArea(recovery);
+        scroll->setWidgetResizable(true);
+        scroll->setFrameShape(QFrame::NoFrame);
+        recoveryOuter->addWidget(scroll);
+        auto *content = new QWidget(scroll);
+        scroll->setWidget(content);
+        auto *recoveryLayout = new QVBoxLayout(content);
+        recoveryLayout->setContentsMargins(28, 20, 34, 28);
+        recoveryLayout->setSpacing(4);
+        Ui::addTitle(recoveryLayout, content, tr("Disk and recovery"),
+                     tr("Tools for disk preparation and troubleshooting in the live session."));
+        Ui::addSection(recoveryLayout, content, tr("Disk utilities"));
+        for (const auto &item : {
+                 qMakePair(tr("Partition disks (GParted)"), QStringLiteral("partition")),
+                 qMakePair(tr("Recover partitions (TestDisk)"), QStringLiteral("testdisk"))}) {
+            auto *action = Ui::addAction(recoveryLayout, content, item.first,
+                item.second == QStringLiteral("partition")
+                    ? tr("Create, resize or inspect disk partitions.")
+                    : tr("Find and recover missing partition tables."),
+                QStringLiteral("drive-harddisk"));
+            action->setObjectName(item.second);
+            connect(action, &QPushButton::clicked, this, [this, operation = item.second] {
+                dispatchHomeAction(operation);
             });
-            recoveryLayout->addWidget(button, 0, Qt::AlignLeft);
+        }
+        Ui::addSection(recoveryLayout, content, tr("Installation diagnostics"));
+        for (const auto &item : {
+                 qMakePair(tr("Get installation logs"), QStringLiteral("install-log")),
+                 qMakePair(tr("Collect system logs"), QStringLiteral("collect-logs"))}) {
+            auto *action = Ui::addAction(recoveryLayout, content, item.first,
+                item.second == QStringLiteral("install-log")
+                    ? tr("Extract Calamares logs and open them in Kate.")
+                    : tr("Export system information for troubleshooting."),
+                QStringLiteral("text-x-log"));
+            action->setObjectName(item.second);
+            connect(action, &QPushButton::clicked, this, [this, operation = item.second] {
+                dispatchHomeAction(operation);
+            });
+        }
+        Ui::addSection(recoveryLayout, content, tr("Additional tools"));
+        for (const auto &item : {
+                 qMakePair(tr("Open terminal"), QStringLiteral("terminal")),
+                 qMakePair(tr("Select package mirrors"), QStringLiteral("mirrors")),
+                 qMakePair(tr("Edit pacman repositories"), QStringLiteral("repositories"))}) {
+            const QString detail = item.second == QStringLiteral("terminal")
+                ? tr("Run commands in the live session.")
+                : item.second == QStringLiteral("mirrors")
+                ? tr("Choose package download mirror servers.")
+                : tr("Review pacman repository configuration.");
+            const QString icon = item.second == QStringLiteral("terminal")
+                ? QStringLiteral("utilities-terminal") : QStringLiteral("network-server");
+            auto *action = Ui::addAction(recoveryLayout, content, item.first, detail, icon);
+            action->setObjectName(item.second);
+            connect(action, &QPushButton::clicked, this, [this, operation = item.second] {
+                dispatchHomeAction(operation);
+            });
         }
         recoveryLayout->addStretch();
         pages_->addWidget(recovery);

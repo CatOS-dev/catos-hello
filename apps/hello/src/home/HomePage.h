@@ -3,6 +3,7 @@
 #include "home/Environment.h"
 #include "home/Onboarding.h"
 #include <QWidget>
+#include <QVector>
 
 class QVBoxLayout;
 class HomePage : public QWidget {
@@ -19,6 +20,7 @@ private:
     QWidget *resume_ = nullptr;
     class QLabel *progress_ = nullptr;
     OnboardingStore onboarding_;
+    QVector<QWidget *> stepRows_;
     void addStep(QVBoxLayout *layout, const QString &id, const QString &title,
                  const QString &detail, const QString &action, const QString &label);
     void refreshGuide();

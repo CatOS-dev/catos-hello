@@ -1,8 +1,10 @@
 #include "desktop/DesktopPage.h"
 #include "ToolRunner.h"
 #include "home/Environment.h"
+#include "ui/ActionList.h"
 
 #include <QHBoxLayout>
+#include <QPalette>
 #include <QLabel>
 #include <QMessageBox>
 #include <QPushButton>
@@ -15,30 +17,30 @@ DesktopPage::DesktopPage(ToolRunner *tools, QWidget *parent)
 {
     auto *layout = new QVBoxLayout(this);
     layout->setContentsMargins(0, 4, 0, 0);
-    auto *title = new QLabel(tr("Personalize your desktop"), this);
-    QFont font = title->font();
-    font.setBold(true);
-    title->setFont(font);
-    layout->addWidget(title);
-
     const QString desktop = Environment::detect().desktop;
-    layout->addWidget(new QLabel(tr("Current session: %1").arg(desktop), this));
     QString settings;
     if (desktop == QStringLiteral("KDE Plasma")) settings = QStringLiteral("systemsettings");
     else if (desktop == QStringLiteral("GNOME")) settings = QStringLiteral("gnome-control-center");
     if (!settings.isEmpty()) {
-        auto *button = new QPushButton(tr("Open %1 settings").arg(desktop), this);
+        auto *button = Ui::addAction(layout, this, tr("Open %1 settings").arg(desktop),
+                                     tr("Current session: %1").arg(desktop),
+                                     QStringLiteral("preferences-desktop"));
         connect(button, &QPushButton::clicked, this, [this, settings] {
             if (!ToolRunner::launch(settings))
                 QMessageBox::warning(this, tr("Settings"), tr("The desktop settings application is not installed."));
         });
-        layout->addWidget(button, 0, Qt::AlignLeft);
+    } else {
+        auto *session = new QLabel(tr("Current session: %1").arg(desktop), this);
+        session->setForegroundRole(QPalette::PlaceholderText);
+        layout->addWidget(session);
     }
 
+    Ui::addSection(layout, this, tr("Catdot desktop Profiles"));
     auto *bar = new QHBoxLayout;
-    bar->addWidget(new QLabel(tr("Catdot desktop Profiles"), this));
     bar->addStretch();
     refresh_ = new QPushButton(tr("Refresh"), this);
+    refresh_->setIcon(QIcon::fromTheme(QStringLiteral("view-refresh")));
+    refresh_->setFlat(true);
     connect(refresh_, &QPushButton::clicked, this, &DesktopPage::refresh);
     bar->addWidget(refresh_);
     layout->addLayout(bar);
@@ -66,6 +68,7 @@ DesktopPage::DesktopPage(ToolRunner *tools, QWidget *parent)
     layout->addLayout(actions);
     auto *hint = new QLabel(tr("Catdot switches complete configuration Profiles and keeps backups of replaced files. Changes may require logging out."), this);
     hint->setWordWrap(true);
+    hint->setForegroundRole(QPalette::PlaceholderText);
     layout->addWidget(hint);
     if (QStandardPaths::findExecutable(QStringLiteral("catdot")).isEmpty()) {
         refresh_->hide();

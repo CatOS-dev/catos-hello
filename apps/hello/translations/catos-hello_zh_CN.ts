@@ -4,67 +4,77 @@
 <context>
     <name>AboutPage</name>
     <message>
-        <location filename="../src/about/AboutPage.cpp" line="17"/>
+        <location filename="../src/about/AboutPage.cpp" line="16"/>
         <source>About CatOS</source>
         <translation>关于 CatOS</translation>
     </message>
     <message>
-        <location filename="../src/about/AboutPage.cpp" line="23"/>
+        <location filename="../src/about/AboutPage.cpp" line="17"/>
         <source>%1 — based on Arch Linux, built for daily use.</source>
         <translation>%1 —— 基于 Arch Linux，为日常使用而打造。</translation>
     </message>
     <message>
-        <location filename="../src/about/AboutPage.cpp" line="31"/>
+        <location filename="../src/about/AboutPage.cpp" line="41"/>
+        <source>CatOS resources</source>
+        <translation>CatOS 资源</translation>
+    </message>
+    <message>
+        <location filename="../src/about/AboutPage.cpp" line="42"/>
         <source>CatOS website</source>
         <translation>CatOS 官网</translation>
     </message>
     <message>
-        <location filename="../src/about/AboutPage.cpp" line="32"/>
+        <location filename="../src/about/AboutPage.cpp" line="43"/>
         <source>CatOS project</source>
         <translation>CatOS 项目</translation>
     </message>
     <message>
-        <location filename="../src/about/AboutPage.cpp" line="33"/>
+        <location filename="../src/about/AboutPage.cpp" line="44"/>
         <source>CatOS update history</source>
         <translation>CatOS 更新历史</translation>
     </message>
     <message>
-        <location filename="../src/about/AboutPage.cpp" line="34"/>
+        <location filename="../src/about/AboutPage.cpp" line="45"/>
         <source>CatOS releases</source>
         <translation>CatOS 发布版本</translation>
     </message>
     <message>
-        <location filename="../src/about/AboutPage.cpp" line="35"/>
+        <location filename="../src/about/AboutPage.cpp" line="48"/>
+        <source>Documentation and community</source>
+        <translation>文档与社区</translation>
+    </message>
+    <message>
+        <location filename="../src/about/AboutPage.cpp" line="49"/>
         <source>Arch Linux website</source>
         <translation>Arch Linux 官网</translation>
     </message>
     <message>
-        <location filename="../src/about/AboutPage.cpp" line="36"/>
+        <location filename="../src/about/AboutPage.cpp" line="50"/>
         <source>Arch Linux Wiki</source>
         <translation>Arch Linux Wiki</translation>
     </message>
     <message>
-        <location filename="../src/about/AboutPage.cpp" line="37"/>
+        <location filename="../src/about/AboutPage.cpp" line="51"/>
         <source>Arch LinuxCN Wiki</source>
         <translation>Arch Linux 中文 Wiki</translation>
     </message>
     <message>
-        <location filename="../src/about/AboutPage.cpp" line="38"/>
+        <location filename="../src/about/AboutPage.cpp" line="46"/>
         <source>Support CatOS on DistroWatch</source>
         <translation>在 DistroWatch 支持 CatOS</translation>
     </message>
     <message>
-        <location filename="../src/about/AboutPage.cpp" line="39"/>
+        <location filename="../src/about/AboutPage.cpp" line="52"/>
         <source>Package manager command reference</source>
         <translation>包管理器命令对照表</translation>
     </message>
     <message>
-        <location filename="../src/about/AboutPage.cpp" line="41"/>
+        <location filename="../src/about/AboutPage.cpp" line="54"/>
         <source>Software news</source>
         <translation>软件新闻</translation>
     </message>
     <message>
-        <location filename="../src/about/AboutPage.cpp" line="51"/>
+        <location filename="../src/about/AboutPage.cpp" line="57"/>
         <source>Getting to know CatOS</source>
         <translation>了解 CatOS</translation>
     </message>
@@ -143,32 +153,32 @@
 <context>
     <name>DesktopPage</name>
     <message>
-        <location filename="../src/desktop/DesktopPage.cpp" line="18"/>
         <source>Personalize your desktop</source>
-        <translation>个性化桌面</translation>
+        <translation type="vanished">个性化桌面</translation>
     </message>
     <message>
-        <location filename="../src/desktop/DesktopPage.cpp" line="25"/>
+        <location filename="../src/desktop/DesktopPage.cpp" line="26"/>
+        <location filename="../src/desktop/DesktopPage.cpp" line="33"/>
         <source>Current session: %1</source>
         <translation>当前桌面会话：%1</translation>
     </message>
     <message>
-        <location filename="../src/desktop/DesktopPage.cpp" line="30"/>
+        <location filename="../src/desktop/DesktopPage.cpp" line="25"/>
         <source>Open %1 settings</source>
         <translation>打开 %1 设置</translation>
     </message>
     <message>
-        <location filename="../src/desktop/DesktopPage.cpp" line="33"/>
+        <location filename="../src/desktop/DesktopPage.cpp" line="30"/>
         <source>Settings</source>
         <translation>设置</translation>
     </message>
     <message>
-        <location filename="../src/desktop/DesktopPage.cpp" line="33"/>
+        <location filename="../src/desktop/DesktopPage.cpp" line="30"/>
         <source>The desktop settings application is not installed.</source>
         <translation>未安装桌面设置程序。</translation>
     </message>
     <message>
-        <location filename="../src/desktop/DesktopPage.cpp" line="39"/>
+        <location filename="../src/desktop/DesktopPage.cpp" line="38"/>
         <source>Catdot desktop Profiles</source>
         <translation>Catdot 桌面配置方案</translation>
     </message>
@@ -178,99 +188,99 @@
         <translation>刷新</translation>
     </message>
     <message>
-        <location filename="../src/desktop/DesktopPage.cpp" line="45"/>
+        <location filename="../src/desktop/DesktopPage.cpp" line="47"/>
         <source>Checking available Profiles…</source>
         <translation>正在检查可用配置方案…</translation>
     </message>
     <message>
-        <location filename="../src/desktop/DesktopPage.cpp" line="50"/>
+        <location filename="../src/desktop/DesktopPage.cpp" line="52"/>
         <source>Profile</source>
         <translation>配置方案</translation>
     </message>
     <message>
-        <location filename="../src/desktop/DesktopPage.cpp" line="50"/>
+        <location filename="../src/desktop/DesktopPage.cpp" line="52"/>
         <source>Status</source>
         <translation>状态</translation>
     </message>
     <message>
-        <location filename="../src/desktop/DesktopPage.cpp" line="50"/>
+        <location filename="../src/desktop/DesktopPage.cpp" line="52"/>
         <source>Description</source>
         <translation>说明</translation>
     </message>
     <message>
-        <location filename="../src/desktop/DesktopPage.cpp" line="55"/>
+        <location filename="../src/desktop/DesktopPage.cpp" line="57"/>
         <source>Review and switch Profile</source>
         <translation>预览并切换配置方案</translation>
     </message>
     <message>
-        <location filename="../src/desktop/DesktopPage.cpp" line="67"/>
+        <location filename="../src/desktop/DesktopPage.cpp" line="69"/>
         <source>Catdot switches complete configuration Profiles and keeps backups of replaced files. Changes may require logging out.</source>
         <translation>Catdot 会切换整套配置方案并备份被替换的文件，部分变更可能需要重新登录。</translation>
     </message>
     <message>
-        <location filename="../src/desktop/DesktopPage.cpp" line="74"/>
+        <location filename="../src/desktop/DesktopPage.cpp" line="77"/>
         <source>Catdot is not installed. This desktop may use its own settings instead.</source>
         <translation>未安装 Catdot，可以使用当前桌面自带的设置工具。</translation>
     </message>
     <message>
-        <location filename="../src/desktop/DesktopPage.cpp" line="84"/>
+        <location filename="../src/desktop/DesktopPage.cpp" line="87"/>
         <source>Loading Catdot Profiles…</source>
         <translation>正在加载 Catdot 配置方案…</translation>
     </message>
     <message>
-        <location filename="../src/desktop/DesktopPage.cpp" line="90"/>
+        <location filename="../src/desktop/DesktopPage.cpp" line="93"/>
         <source>Catdot is unavailable: %1</source>
         <translation>Catdot 不可用：%1</translation>
     </message>
     <message>
-        <location filename="../src/desktop/DesktopPage.cpp" line="93"/>
+        <location filename="../src/desktop/DesktopPage.cpp" line="96"/>
         <source>No Catdot Profile is currently active.</source>
         <translation>当前未启用任何 Catdot 配置方案。</translation>
     </message>
     <message>
-        <location filename="../src/desktop/DesktopPage.cpp" line="94"/>
+        <location filename="../src/desktop/DesktopPage.cpp" line="97"/>
         <source>Active Catdot Profile: %1</source>
         <translation>当前启用的 Catdot 配置方案：%1</translation>
     </message>
     <message>
-        <location filename="../src/desktop/DesktopPage.cpp" line="102"/>
+        <location filename="../src/desktop/DesktopPage.cpp" line="105"/>
         <source>Packages: %1</source>
         <translation>软件包：%1</translation>
     </message>
     <message>
-        <location filename="../src/desktop/DesktopPage.cpp" line="104"/>
+        <location filename="../src/desktop/DesktopPage.cpp" line="107"/>
         <source>No installed Catdot Profiles were found.</source>
         <translation>没有找到已安装的 Catdot 配置方案。</translation>
     </message>
     <message>
-        <location filename="../src/desktop/DesktopPage.cpp" line="117"/>
+        <location filename="../src/desktop/DesktopPage.cpp" line="120"/>
         <source>Profile preview</source>
         <translation>配置方案预览</translation>
     </message>
     <message>
-        <location filename="../src/desktop/DesktopPage.cpp" line="121"/>
+        <location filename="../src/desktop/DesktopPage.cpp" line="124"/>
         <source>No existing paths need replacement.</source>
         <translation>无需替换现有路径。</translation>
     </message>
     <message>
-        <location filename="../src/desktop/DesktopPage.cpp" line="122"/>
+        <location filename="../src/desktop/DesktopPage.cpp" line="125"/>
         <source>Existing paths affected (%1):
 %2</source>
         <translation>受影响的现有路径（%1）：
 %2</translation>
     </message>
     <message>
-        <location filename="../src/desktop/DesktopPage.cpp" line="126"/>
+        <location filename="../src/desktop/DesktopPage.cpp" line="129"/>
         <source>All declared packages are installed.</source>
         <translation>所需软件包均已安装。</translation>
     </message>
     <message>
-        <location filename="../src/desktop/DesktopPage.cpp" line="127"/>
+        <location filename="../src/desktop/DesktopPage.cpp" line="130"/>
         <source>Packages to install: %1</source>
         <translation>需要安装的软件包：%1</translation>
     </message>
     <message>
-        <location filename="../src/desktop/DesktopPage.cpp" line="128"/>
+        <location filename="../src/desktop/DesktopPage.cpp" line="131"/>
         <source>This is a complete desktop Profile, not just a theme.
 
 %1
@@ -289,37 +299,37 @@ Catdot backs up existing files before replacing them. The preview can change bef
 Catdot 会在替换前备份现有文件。实际执行前内容仍可能变化，切换后可能需要注销。</translation>
     </message>
     <message>
-        <location filename="../src/desktop/DesktopPage.cpp" line="136"/>
+        <location filename="../src/desktop/DesktopPage.cpp" line="139"/>
         <source>Switch to %1?</source>
         <translation>切换到 %1？</translation>
     </message>
     <message>
-        <location filename="../src/desktop/DesktopPage.cpp" line="139"/>
+        <location filename="../src/desktop/DesktopPage.cpp" line="142"/>
         <source>Activating Profile %1 in a terminal…</source>
         <translation>正在终端中启用配置方案 %1…</translation>
     </message>
     <message>
-        <location filename="../src/desktop/DesktopPage.cpp" line="143"/>
+        <location filename="../src/desktop/DesktopPage.cpp" line="146"/>
         <source>Profile activated</source>
         <translation>配置方案已启用</translation>
     </message>
     <message>
-        <location filename="../src/desktop/DesktopPage.cpp" line="144"/>
+        <location filename="../src/desktop/DesktopPage.cpp" line="147"/>
         <source>%1 is active. Sign out and sign back in for desktop changes to take effect.</source>
         <translation>%1 已启用。注销后重新登录即可应用桌面变更。</translation>
     </message>
     <message>
-        <location filename="../src/desktop/DesktopPage.cpp" line="146"/>
+        <location filename="../src/desktop/DesktopPage.cpp" line="149"/>
         <source>Profile switch did not complete.</source>
         <translation>配置方案切换未完成。</translation>
     </message>
     <message>
-        <location filename="../src/desktop/DesktopPage.cpp" line="147"/>
+        <location filename="../src/desktop/DesktopPage.cpp" line="150"/>
         <source>Profile activation</source>
         <translation>启用配置方案</translation>
     </message>
     <message>
-        <location filename="../src/desktop/DesktopPage.cpp" line="148"/>
+        <location filename="../src/desktop/DesktopPage.cpp" line="151"/>
         <source>The Profile was not activated. Review the terminal output.</source>
         <translation>配置方案未启用，请查看终端输出。</translation>
     </message>
@@ -390,7 +400,7 @@ Catdot 会在替换前备份现有文件。实际执行前内容仍可能变化�
 <context>
     <name>HomePage</name>
     <message>
-        <location filename="../src/home/HomePage.cpp" line="23"/>
+        <location filename="../src/home/HomePage.cpp" line="28"/>
         <source>Welcome to CatOS</source>
         <translation>欢迎使用 CatOS</translation>
     </message>
@@ -400,152 +410,208 @@ Catdot 会在替换前备份现有文件。实际执行前内容仍可能变化�
         <translation>%1  ·  %2  ·  %3</translation>
     </message>
     <message>
-        <location filename="../src/home/HomePage.cpp" line="31"/>
+        <location filename="../src/home/HomePage.cpp" line="30"/>
         <source>Live session</source>
         <translation>LiveCD 实时会话</translation>
     </message>
     <message>
-        <location filename="../src/home/HomePage.cpp" line="31"/>
+        <location filename="../src/home/HomePage.cpp" line="30"/>
         <source>Installed system</source>
         <translation>已安装系统</translation>
     </message>
     <message>
-        <location filename="../src/home/HomePage.cpp" line="35"/>
+        <location filename="../src/home/HomePage.cpp" line="34"/>
         <source>Install CatOS or use the recovery tools before installation.</source>
         <translation>开始安装 CatOS，或在安装前使用磁盘与救援工具。</translation>
     </message>
     <message>
-        <location filename="../src/home/HomePage.cpp" line="39"/>
+        <location filename="../src/home/HomePage.cpp" line="40"/>
         <source>Install CatOS</source>
         <translation>安装 CatOS</translation>
     </message>
     <message>
-        <location filename="../src/home/HomePage.cpp" line="40"/>
+        <location filename="../src/home/HomePage.cpp" line="56"/>
         <source>Advanced installer</source>
         <translation>高级安装（在线安装）</translation>
     </message>
     <message>
-        <location filename="../src/home/HomePage.cpp" line="51"/>
+        <location filename="../src/home/HomePage.cpp" line="65"/>
         <source>Partition disks (GParted)</source>
         <translation>磁盘分区（GParted）</translation>
     </message>
     <message>
-        <location filename="../src/home/HomePage.cpp" line="52"/>
+        <location filename="../src/home/HomePage.cpp" line="72"/>
         <source>Get installation logs</source>
         <translation>获取安装日志</translation>
     </message>
     <message>
-        <location filename="../src/home/HomePage.cpp" line="66"/>
+        <location filename="../src/home/HomePage.cpp" line="132"/>
         <source>Software manager</source>
         <translation>软件管理器</translation>
     </message>
     <message>
-        <location filename="../src/home/HomePage.cpp" line="67"/>
+        <location filename="../src/home/HomePage.cpp" line="133"/>
         <source>Desktop settings</source>
         <translation>桌面设置</translation>
     </message>
     <message>
-        <location filename="../src/home/HomePage.cpp" line="68"/>
+        <location filename="../src/home/HomePage.cpp" line="134"/>
         <source>System tools</source>
         <translation>系统工具</translation>
     </message>
     <message>
-        <location filename="../src/home/HomePage.cpp" line="78"/>
+        <location filename="../src/home/HomePage.cpp" line="87"/>
         <source>Getting started</source>
         <translation>首次使用指南</translation>
     </message>
     <message>
-        <location filename="../src/home/HomePage.cpp" line="83"/>
+        <location filename="../src/home/HomePage.cpp" line="33"/>
+        <source>Start here</source>
+        <translation>开始安装</translation>
+    </message>
+    <message>
+        <location filename="../src/home/HomePage.cpp" line="55"/>
+        <source>Installation options</source>
+        <translation>其他安装方式</translation>
+    </message>
+    <message>
+        <location filename="../src/home/HomePage.cpp" line="57"/>
+        <source>Choose the network installation configuration and additional packages.</source>
+        <translation>选择网络安装配置和额外软件包。</translation>
+    </message>
+    <message>
+        <location filename="../src/home/HomePage.cpp" line="64"/>
+        <source>Before installing</source>
+        <translation>安装前准备</translation>
+    </message>
+    <message>
+        <location filename="../src/home/HomePage.cpp" line="66"/>
+        <source>Inspect or prepare disk partitions before starting the installer.</source>
+        <translation>在启动安装器前检查或准备磁盘分区。</translation>
+    </message>
+    <message>
+        <location filename="../src/home/HomePage.cpp" line="73"/>
+        <source>View Calamares logs if an installation failed.</source>
+        <translation>安装失败时查看 Calamares 日志。</translation>
+    </message>
+    <message>
+        <location filename="../src/home/HomePage.cpp" line="88"/>
         <source>Choose what to do next. You can skip any step and return later.</source>
         <translation>选择下一步操作。你可以跳过任意步骤，之后再回来。</translation>
     </message>
     <message>
-        <location filename="../src/home/HomePage.cpp" line="88"/>
+        <location filename="../src/home/HomePage.cpp" line="95"/>
         <source>Update CatOS</source>
         <translation>更新 CatOS</translation>
     </message>
     <message>
-        <location filename="../src/home/HomePage.cpp" line="89"/>
+        <location filename="../src/home/HomePage.cpp" line="96"/>
         <source>Check important news and update your system with CatOS updater.</source>
         <translation>先检查重要更新公告，再使用 CatOS 专用更新工具更新系统。</translation>
     </message>
     <message>
-        <location filename="../src/home/HomePage.cpp" line="90"/>
+        <location filename="../src/home/HomePage.cpp" line="97"/>
         <source>Run CatOS updater</source>
         <translation>运行 CatOS 更新工具</translation>
     </message>
     <message>
-        <location filename="../src/home/HomePage.cpp" line="91"/>
+        <location filename="../src/home/HomePage.cpp" line="98"/>
         <source>Check hardware drivers</source>
         <translation>检查硬件驱动</translation>
     </message>
     <message>
-        <location filename="../src/home/HomePage.cpp" line="92"/>
+        <location filename="../src/home/HomePage.cpp" line="99"/>
         <source>Review available hardware profiles before making changes.</source>
         <translation>在修改系统配置前检查可用的硬件驱动。</translation>
     </message>
     <message>
-        <location filename="../src/home/HomePage.cpp" line="92"/>
+        <location filename="../src/home/HomePage.cpp" line="100"/>
         <source>Review drivers</source>
         <translation>查看驱动</translation>
     </message>
     <message>
-        <location filename="../src/home/HomePage.cpp" line="93"/>
+        <location filename="../src/home/HomePage.cpp" line="101"/>
         <source>Install your applications</source>
         <translation>安装应用程序</translation>
     </message>
     <message>
-        <location filename="../src/home/HomePage.cpp" line="94"/>
+        <location filename="../src/home/HomePage.cpp" line="102"/>
         <source>Find repository, AUR and Flatpak applications.</source>
         <translation>查找仓库、AUR 和 Flatpak 应用程序。</translation>
     </message>
     <message>
-        <location filename="../src/home/HomePage.cpp" line="94"/>
+        <location filename="../src/home/HomePage.cpp" line="103"/>
         <source>Browse software</source>
         <translation>浏览软件</translation>
     </message>
     <message>
-        <location filename="../src/home/HomePage.cpp" line="95"/>
+        <location filename="../src/home/HomePage.cpp" line="104"/>
         <source>Personalize your desktop</source>
         <translation>个性化桌面</translation>
     </message>
     <message>
-        <location filename="../src/home/HomePage.cpp" line="96"/>
+        <location filename="../src/home/HomePage.cpp" line="105"/>
         <source>Discover settings for your current desktop.</source>
         <translation>查看当前桌面环境的设置。</translation>
     </message>
     <message>
-        <location filename="../src/home/HomePage.cpp" line="96"/>
+        <location filename="../src/home/HomePage.cpp" line="106"/>
         <source>Configure desktop</source>
         <translation>配置桌面</translation>
     </message>
     <message>
-        <location filename="../src/home/HomePage.cpp" line="97"/>
+        <location filename="../src/home/HomePage.cpp" line="108"/>
         <source>Hide getting-started guide</source>
         <translation>隐藏首次使用指南</translation>
     </message>
     <message>
-        <location filename="../src/home/HomePage.cpp" line="108"/>
+        <location filename="../src/home/HomePage.cpp" line="120"/>
         <source>Need help setting up CatOS?</source>
         <translation>需要帮助设置 CatOS 吗？</translation>
     </message>
     <message>
-        <location filename="../src/home/HomePage.cpp" line="109"/>
+        <location filename="../src/home/HomePage.cpp" line="122"/>
         <source>Show getting-started guide</source>
         <translation>显示首次使用指南</translation>
     </message>
     <message>
-        <location filename="../src/home/HomePage.cpp" line="139"/>
+        <location filename="../src/home/HomePage.cpp" line="131"/>
+        <source>Explore CatOS</source>
+        <translation>探索 CatOS</translation>
+    </message>
+    <message>
+        <location filename="../src/home/HomePage.cpp" line="136"/>
+        <source>Install and manage applications.</source>
+        <translation>安装和管理应用程序。</translation>
+    </message>
+    <message>
+        <location filename="../src/home/HomePage.cpp" line="137"/>
+        <source>Adjust your desktop environment.</source>
+        <translation>调整桌面环境配置。</translation>
+    </message>
+    <message>
+        <location filename="../src/home/HomePage.cpp" line="138"/>
+        <source>Open maintenance and diagnostic tools.</source>
+        <translation>打开系统维护和诊断工具。</translation>
+    </message>
+    <message>
+        <location filename="../src/home/HomePage.cpp" line="168"/>
+        <location filename="../src/home/HomePage.cpp" line="171"/>
+        <source>Step options</source>
+        <translation>步骤选项</translation>
+    </message>
+    <message>
+        <location filename="../src/home/HomePage.cpp" line="173"/>
         <source>I completed this</source>
         <translation>我已完成</translation>
     </message>
     <message>
-        <location filename="../src/home/HomePage.cpp" line="145"/>
+        <location filename="../src/home/HomePage.cpp" line="178"/>
         <source>Later</source>
         <translation>稍后</translation>
     </message>
     <message>
-        <location filename="../src/home/HomePage.cpp" line="172"/>
+        <location filename="../src/home/HomePage.cpp" line="206"/>
         <source>%1 of %2 steps marked complete by you · %3 postponed</source>
         <translation>你已完成 %1 / %2 项 · 推迟 %3 项</translation>
     </message>
@@ -705,192 +771,242 @@ Catdot 会在替换前备份现有文件。实际执行前内容仍可能变化�
         <translation type="vanished">改变主题</translation>
     </message>
     <message>
-        <location filename="../src/mainwindow.cpp" line="80"/>
+        <location filename="../src/mainwindow.cpp" line="91"/>
         <source>Exit</source>
         <translation>退出</translation>
     </message>
     <message>
-        <location filename="../src/mainwindow.cpp" line="34"/>
-        <location filename="../src/mainwindow.cpp" line="48"/>
+        <location filename="../src/mainwindow.cpp" line="36"/>
+        <location filename="../src/mainwindow.cpp" line="54"/>
         <source>CatOS Hello</source>
         <translation>CatOS 欢迎程序</translation>
     </message>
     <message>
-        <location filename="../src/mainwindow.cpp" line="56"/>
+        <location filename="../src/mainwindow.cpp" line="62"/>
         <source>Install CatOS</source>
         <translation>安装 CatOS</translation>
     </message>
     <message>
-        <location filename="../src/mainwindow.cpp" line="56"/>
-        <location filename="../src/mainwindow.cpp" line="122"/>
-        <location filename="../src/mainwindow.cpp" line="193"/>
-        <location filename="../src/mainwindow.cpp" line="196"/>
-        <location filename="../src/mainwindow.cpp" line="199"/>
+        <location filename="../src/mainwindow.cpp" line="62"/>
+        <location filename="../src/mainwindow.cpp" line="143"/>
+        <location filename="../src/mainwindow.cpp" line="239"/>
+        <location filename="../src/mainwindow.cpp" line="242"/>
+        <location filename="../src/mainwindow.cpp" line="245"/>
         <source>Disk and recovery</source>
         <translation>磁盘与救援</translation>
     </message>
     <message>
-        <location filename="../src/mainwindow.cpp" line="56"/>
-        <location filename="../src/mainwindow.cpp" line="58"/>
+        <location filename="../src/mainwindow.cpp" line="62"/>
+        <location filename="../src/mainwindow.cpp" line="64"/>
         <source>About CatOS</source>
         <translation>关于 CatOS</translation>
     </message>
     <message>
-        <location filename="../src/mainwindow.cpp" line="57"/>
+        <location filename="../src/mainwindow.cpp" line="63"/>
         <source>Home</source>
         <translation>欢迎</translation>
     </message>
     <message>
-        <location filename="../src/mainwindow.cpp" line="57"/>
+        <location filename="../src/mainwindow.cpp" line="63"/>
         <source>Software and desktop</source>
         <translation>软件与桌面</translation>
     </message>
     <message>
-        <location filename="../src/mainwindow.cpp" line="58"/>
+        <location filename="../src/mainwindow.cpp" line="64"/>
         <source>System maintenance</source>
         <translation>系统维护</translation>
     </message>
     <message>
-        <location filename="../src/mainwindow.cpp" line="64"/>
+        <location filename="../src/mainwindow.cpp" line="74"/>
         <source>Don&apos;t open at login</source>
         <translation>登录时不再自动打开</translation>
     </message>
     <message>
-        <location filename="../src/mainwindow.cpp" line="68"/>
+        <location filename="../src/mainwindow.cpp" line="78"/>
         <source>Autostart</source>
         <translation>开机自启</translation>
     </message>
     <message>
-        <location filename="../src/mainwindow.cpp" line="68"/>
+        <location filename="../src/mainwindow.cpp" line="78"/>
         <source>Could not disable automatic startup.</source>
         <translation>无法禁用开机自动启动。</translation>
     </message>
     <message>
-        <location filename="../src/mainwindow.cpp" line="72"/>
-        <location filename="../src/mainwindow.cpp" line="77"/>
+        <location filename="../src/mainwindow.cpp" line="82"/>
+        <location filename="../src/mainwindow.cpp" line="88"/>
         <source>Autostart disabled</source>
         <translation>已禁用开机自启</translation>
     </message>
     <message>
-        <location filename="../src/mainwindow.cpp" line="92"/>
+        <location filename="../src/mainwindow.cpp" line="104"/>
         <source>Language</source>
         <translation>语言</translation>
     </message>
     <message>
-        <location filename="../src/mainwindow.cpp" line="95"/>
+        <location filename="../src/mainwindow.cpp" line="107"/>
         <source>System default</source>
         <translation>跟随系统</translation>
     </message>
     <message>
-        <location filename="../src/mainwindow.cpp" line="104"/>
+        <location filename="../src/mainwindow.cpp" line="116"/>
         <source>Apply</source>
         <translation>应用</translation>
     </message>
     <message>
-        <location filename="../src/mainwindow.cpp" line="128"/>
+        <location filename="../src/mainwindow.cpp" line="144"/>
         <source>Tools for disk preparation and troubleshooting in the live session.</source>
         <translation>在 LiveCD 环境中准备磁盘或排查安装问题。</translation>
     </message>
     <message>
-        <location filename="../src/mainwindow.cpp" line="131"/>
+        <location filename="../src/mainwindow.cpp" line="145"/>
+        <source>Disk utilities</source>
+        <translation>磁盘工具</translation>
+    </message>
+    <message>
+        <location filename="../src/mainwindow.cpp" line="147"/>
         <source>Partition disks (GParted)</source>
         <translation>磁盘分区（GParted）</translation>
     </message>
     <message>
-        <location filename="../src/mainwindow.cpp" line="132"/>
+        <location filename="../src/mainwindow.cpp" line="148"/>
         <source>Recover partitions (TestDisk)</source>
         <translation>分区恢复（TestDisk）</translation>
     </message>
     <message>
-        <location filename="../src/mainwindow.cpp" line="133"/>
+        <location filename="../src/mainwindow.cpp" line="151"/>
+        <source>Create, resize or inspect disk partitions.</source>
+        <translation>创建、调整或检查磁盘分区。</translation>
+    </message>
+    <message>
+        <location filename="../src/mainwindow.cpp" line="152"/>
+        <source>Find and recover missing partition tables.</source>
+        <translation>查找并尝试恢复丢失的分区表。</translation>
+    </message>
+    <message>
+        <location filename="../src/mainwindow.cpp" line="159"/>
+        <source>Installation diagnostics</source>
+        <translation>安装诊断</translation>
+    </message>
+    <message>
+        <location filename="../src/mainwindow.cpp" line="165"/>
+        <source>Extract Calamares logs and open them in Kate.</source>
+        <translation>提取 Calamares 安装日志并用 Kate 打开。</translation>
+    </message>
+    <message>
+        <location filename="../src/mainwindow.cpp" line="166"/>
+        <source>Export system information for troubleshooting.</source>
+        <translation>导出系统信息以便排查问题。</translation>
+    </message>
+    <message>
+        <location filename="../src/mainwindow.cpp" line="173"/>
+        <source>Additional tools</source>
+        <translation>其他工具</translation>
+    </message>
+    <message>
+        <location filename="../src/mainwindow.cpp" line="175"/>
         <source>Open terminal</source>
         <translation>打开终端</translation>
     </message>
     <message>
-        <location filename="../src/mainwindow.cpp" line="134"/>
+        <location filename="../src/mainwindow.cpp" line="161"/>
         <source>Get installation logs</source>
         <translation>获取安装日志</translation>
     </message>
     <message>
-        <location filename="../src/mainwindow.cpp" line="135"/>
+        <location filename="../src/mainwindow.cpp" line="162"/>
         <source>Collect system logs</source>
         <translation>收集系统日志</translation>
     </message>
     <message>
-        <location filename="../src/mainwindow.cpp" line="136"/>
+        <location filename="../src/mainwindow.cpp" line="176"/>
         <source>Select package mirrors</source>
         <translation>选择软件源镜像</translation>
     </message>
     <message>
-        <location filename="../src/mainwindow.cpp" line="137"/>
+        <location filename="../src/mainwindow.cpp" line="177"/>
         <source>Edit pacman repositories</source>
         <translation>编辑 pacman 软件仓库</translation>
     </message>
     <message>
-        <location filename="../src/mainwindow.cpp" line="189"/>
+        <location filename="../src/mainwindow.cpp" line="179"/>
+        <source>Run commands in the live session.</source>
+        <translation>在 LiveCD 实时会话中执行命令。</translation>
+    </message>
+    <message>
+        <location filename="../src/mainwindow.cpp" line="181"/>
+        <source>Choose package download mirror servers.</source>
+        <translation>选择软件包下载镜像服务器。</translation>
+    </message>
+    <message>
+        <location filename="../src/mainwindow.cpp" line="182"/>
+        <source>Review pacman repository configuration.</source>
+        <translation>查看 pacman 软件仓库配置。</translation>
+    </message>
+    <message>
+        <location filename="../src/mainwindow.cpp" line="235"/>
         <source>Installer</source>
         <translation>安装程序</translation>
     </message>
     <message>
-        <location filename="../src/mainwindow.cpp" line="189"/>
+        <location filename="../src/mainwindow.cpp" line="235"/>
         <source>Calamares is not available.</source>
         <translation>Calamares 安装程序不可用。</translation>
     </message>
     <message>
-        <location filename="../src/mainwindow.cpp" line="193"/>
+        <location filename="../src/mainwindow.cpp" line="239"/>
         <source>GParted is not available.</source>
         <translation>GParted 分区工具不可用。</translation>
     </message>
     <message>
-        <location filename="../src/mainwindow.cpp" line="196"/>
+        <location filename="../src/mainwindow.cpp" line="242"/>
         <source>TestDisk is not available.</source>
         <translation>TestDisk 分区恢复工具不可用。</translation>
     </message>
     <message>
-        <location filename="../src/mainwindow.cpp" line="199"/>
+        <location filename="../src/mainwindow.cpp" line="245"/>
         <source>Terminal is not available.</source>
         <translation>终端程序不可用。</translation>
     </message>
     <message>
-        <location filename="../src/mainwindow.cpp" line="206"/>
-        <location filename="../src/mainwindow.cpp" line="208"/>
+        <location filename="../src/mainwindow.cpp" line="252"/>
+        <location filename="../src/mainwindow.cpp" line="254"/>
         <source>System logs</source>
         <translation>系统日志</translation>
     </message>
     <message>
-        <location filename="../src/mainwindow.cpp" line="207"/>
+        <location filename="../src/mainwindow.cpp" line="253"/>
         <source>The diagnostic archive was saved to your Desktop.</source>
         <translation>诊断日志压缩包已保存到桌面。</translation>
     </message>
     <message>
-        <location filename="../src/mainwindow.cpp" line="209"/>
+        <location filename="../src/mainwindow.cpp" line="255"/>
         <source>Unable to collect diagnostic logs.</source>
         <translation>无法收集诊断日志。</translation>
     </message>
     <message>
-        <location filename="../src/mainwindow.cpp" line="215"/>
-        <location filename="../src/mainwindow.cpp" line="217"/>
+        <location filename="../src/mainwindow.cpp" line="261"/>
+        <location filename="../src/mainwindow.cpp" line="263"/>
         <source>Update CatOS</source>
         <translation>更新 CatOS</translation>
     </message>
     <message>
-        <location filename="../src/mainwindow.cpp" line="218"/>
+        <location filename="../src/mainwindow.cpp" line="264"/>
         <source>System update did not finish successfully (%1). %2</source>
         <translation>系统更新未成功完成（%1）。%2</translation>
     </message>
     <message>
-        <location filename="../src/mainwindow.cpp" line="228"/>
-        <location filename="../src/mainwindow.cpp" line="237"/>
+        <location filename="../src/mainwindow.cpp" line="274"/>
+        <location filename="../src/mainwindow.cpp" line="283"/>
         <source>Installation logs</source>
         <translation>安装日志</translation>
     </message>
     <message>
-        <location filename="../src/mainwindow.cpp" line="228"/>
+        <location filename="../src/mainwindow.cpp" line="274"/>
         <source>Unable to prepare a temporary directory.</source>
         <translation>无法创建临时目录。</translation>
     </message>
     <message>
-        <location filename="../src/mainwindow.cpp" line="238"/>
+        <location filename="../src/mainwindow.cpp" line="284"/>
         <source>Unable to extract Calamares installation logs. %1</source>
         <translation>无法提取 Calamares 安装日志。%1</translation>
     </message>
@@ -898,51 +1014,61 @@ Catdot 会在替换前备份现有文件。实际执行前内容仍可能变化�
 <context>
     <name>MaintenancePage</name>
     <message>
-        <location filename="../src/maintenance/MaintenancePage.cpp" line="22"/>
+        <location filename="../src/maintenance/MaintenancePage.cpp" line="23"/>
         <source>This operation changes system packages or settings. Continue?</source>
         <translation>此操作将修改系统软件包或设置，是否继续？</translation>
     </message>
     <message>
-        <location filename="../src/maintenance/MaintenancePage.cpp" line="26"/>
+        <location filename="../src/maintenance/MaintenancePage.cpp" line="27"/>
         <source>Operation did not finish successfully (%1). %2</source>
         <translation>操作未成功完成（%1）。%2</translation>
     </message>
     <message>
-        <location filename="../src/maintenance/MaintenancePage.cpp" line="44"/>
+        <location filename="../src/maintenance/MaintenancePage.cpp" line="47"/>
         <source>System maintenance</source>
         <translation>系统维护</translation>
     </message>
     <message>
-        <location filename="../src/maintenance/MaintenancePage.cpp" line="50"/>
+        <location filename="../src/maintenance/MaintenancePage.cpp" line="48"/>
         <source>Review system status and open a tool when needed.</source>
         <translation>检查系统状态，并按需使用相应工具。</translation>
     </message>
     <message>
-        <location filename="../src/maintenance/MaintenancePage.cpp" line="52"/>
+        <location filename="../src/maintenance/MaintenancePage.cpp" line="50"/>
         <source>Updates</source>
         <translation>系统更新</translation>
     </message>
     <message>
-        <location filename="../src/maintenance/MaintenancePage.cpp" line="54"/>
+        <location filename="../src/maintenance/MaintenancePage.cpp" line="51"/>
         <source>Run CatOS updater (news and updates)</source>
         <translation>运行 CatOS 更新工具（新闻检查与更新）</translation>
     </message>
     <message>
-        <location filename="../src/maintenance/MaintenancePage.cpp" line="56"/>
-        <location filename="../src/maintenance/MaintenancePage.cpp" line="58"/>
+        <location filename="../src/maintenance/MaintenancePage.cpp" line="52"/>
+        <source>Check important news and update CatOS safely.</source>
+        <translation>检查重要更新公告并更新 CatOS 系统。</translation>
+    </message>
+    <message>
+        <location filename="../src/maintenance/MaintenancePage.cpp" line="55"/>
+        <location filename="../src/maintenance/MaintenancePage.cpp" line="57"/>
         <location filename="../src/maintenance/MaintenancePage.cpp" line="63"/>
         <source>Update CatOS</source>
         <translation>更新 CatOS</translation>
     </message>
     <message>
-        <location filename="../src/maintenance/MaintenancePage.cpp" line="59"/>
+        <location filename="../src/maintenance/MaintenancePage.cpp" line="58"/>
         <source>System update did not finish successfully (%1). %2</source>
         <translation>系统更新未成功完成（%1）。%2</translation>
     </message>
     <message>
-        <location filename="../src/maintenance/MaintenancePage.cpp" line="63"/>
+        <location filename="../src/maintenance/MaintenancePage.cpp" line="61"/>
         <source>Update installed packages (terminal)</source>
         <translation>更新已安装软件包（终端）</translation>
+    </message>
+    <message>
+        <location filename="../src/maintenance/MaintenancePage.cpp" line="62"/>
+        <source>Update packages from configured pacman repositories.</source>
+        <translation>更新已配置 pacman 仓库中的软件包。</translation>
     </message>
     <message>
         <location filename="../src/maintenance/MaintenancePage.cpp" line="65"/>
@@ -950,231 +1076,321 @@ Catdot 会在替换前备份现有文件。实际执行前内容仍可能变化�
         <translation>更新原生软件包和 AUR 软件包</translation>
     </message>
     <message>
-        <location filename="../src/maintenance/MaintenancePage.cpp" line="65"/>
+        <location filename="../src/maintenance/MaintenancePage.cpp" line="66"/>
+        <source>Run the original pacman and AUR update workflow with paru.</source>
+        <translation>使用 paru 执行原生软件包和 AUR 更新。</translation>
+    </message>
+    <message>
+        <location filename="../src/maintenance/MaintenancePage.cpp" line="67"/>
         <source>Update packages with paru</source>
         <translation>使用 paru 更新软件包</translation>
     </message>
     <message>
-        <location filename="../src/maintenance/MaintenancePage.cpp" line="69"/>
+        <location filename="../src/maintenance/MaintenancePage.cpp" line="70"/>
         <source>Hardware drivers</source>
         <translation>硬件驱动</translation>
     </message>
     <message>
-        <location filename="../src/maintenance/MaintenancePage.cpp" line="72"/>
+        <location filename="../src/maintenance/MaintenancePage.cpp" line="71"/>
         <source>View compatible hardware drivers</source>
         <translation>查看兼容的硬件驱动</translation>
     </message>
     <message>
         <location filename="../src/maintenance/MaintenancePage.cpp" line="72"/>
+        <source>Inspect available hardware and matching driver profiles.</source>
+        <translation>检查硬件及匹配的驱动配置。</translation>
+    </message>
+    <message>
+        <location filename="../src/maintenance/MaintenancePage.cpp" line="73"/>
         <source>Available drivers</source>
         <translation>可用驱动</translation>
     </message>
     <message>
-        <location filename="../src/maintenance/MaintenancePage.cpp" line="74"/>
+        <location filename="../src/maintenance/MaintenancePage.cpp" line="76"/>
         <source>Automatically configure drivers</source>
         <translation>自动配置驱动</translation>
     </message>
     <message>
-        <location filename="../src/maintenance/MaintenancePage.cpp" line="74"/>
+        <location filename="../src/maintenance/MaintenancePage.cpp" line="77"/>
+        <source>Apply compatible hardware drivers after reviewing your system.</source>
+        <translation>确认系统硬件情况后应用兼容的驱动。</translation>
+    </message>
+    <message>
+        <location filename="../src/maintenance/MaintenancePage.cpp" line="78"/>
         <source>Configure hardware</source>
         <translation>配置硬件</translation>
     </message>
     <message>
-        <location filename="../src/maintenance/MaintenancePage.cpp" line="78"/>
+        <location filename="../src/maintenance/MaintenancePage.cpp" line="81"/>
         <source>Package sources</source>
         <translation>软件源</translation>
     </message>
     <message>
-        <location filename="../src/maintenance/MaintenancePage.cpp" line="80"/>
+        <location filename="../src/maintenance/MaintenancePage.cpp" line="82"/>
         <source>Select package mirrors</source>
         <translation>选择软件源镜像</translation>
     </message>
     <message>
         <location filename="../src/maintenance/MaintenancePage.cpp" line="83"/>
+        <source>Choose and rank repository mirror servers.</source>
+        <translation>选择软件仓库镜像服务器并排序。</translation>
+    </message>
+    <message>
+        <location filename="../src/maintenance/MaintenancePage.cpp" line="86"/>
         <source>Edit pacman repositories</source>
         <translation>编辑 pacman 软件仓库</translation>
     </message>
     <message>
-        <location filename="../src/maintenance/MaintenancePage.cpp" line="88"/>
+        <location filename="../src/maintenance/MaintenancePage.cpp" line="87"/>
+        <source>Review enabled software repositories.</source>
+        <translation>查看已启用的软件仓库。</translation>
+    </message>
+    <message>
+        <location filename="../src/maintenance/MaintenancePage.cpp" line="91"/>
         <source>Troubleshooting</source>
         <translation>故障诊断</translation>
     </message>
     <message>
-        <location filename="../src/maintenance/MaintenancePage.cpp" line="90"/>
+        <location filename="../src/maintenance/MaintenancePage.cpp" line="92"/>
         <source>Check failed services</source>
         <translation>检查失败的服务</translation>
     </message>
     <message>
-        <location filename="../src/maintenance/MaintenancePage.cpp" line="90"/>
+        <location filename="../src/maintenance/MaintenancePage.cpp" line="93"/>
+        <source>List systemd units that failed to start.</source>
+        <translation>列出启动失败的 systemd 服务单元。</translation>
+    </message>
+    <message>
+        <location filename="../src/maintenance/MaintenancePage.cpp" line="94"/>
         <source>System services</source>
         <translation>系统服务</translation>
     </message>
     <message>
-        <location filename="../src/maintenance/MaintenancePage.cpp" line="92"/>
+        <location filename="../src/maintenance/MaintenancePage.cpp" line="96"/>
         <source>Read pacman history</source>
         <translation>查看 pacman 操作记录</translation>
     </message>
     <message>
-        <location filename="../src/maintenance/MaintenancePage.cpp" line="92"/>
+        <location filename="../src/maintenance/MaintenancePage.cpp" line="97"/>
+        <source>View the local package transaction log.</source>
+        <translation>查看本地软件包安装与更新记录。</translation>
+    </message>
+    <message>
+        <location filename="../src/maintenance/MaintenancePage.cpp" line="98"/>
         <source>Package manager log</source>
         <translation>包管理器日志</translation>
     </message>
     <message>
-        <location filename="../src/maintenance/MaintenancePage.cpp" line="94"/>
+        <location filename="../src/maintenance/MaintenancePage.cpp" line="100"/>
         <source>Collect system logs</source>
         <translation>收集系统日志</translation>
     </message>
     <message>
-        <location filename="../src/maintenance/MaintenancePage.cpp" line="99"/>
         <location filename="../src/maintenance/MaintenancePage.cpp" line="101"/>
+        <source>Save a diagnostic archive to your Desktop.</source>
+        <translation>将诊断日志压缩包保存到桌面。</translation>
+    </message>
+    <message>
+        <location filename="../src/maintenance/MaintenancePage.cpp" line="107"/>
+        <location filename="../src/maintenance/MaintenancePage.cpp" line="109"/>
         <source>System logs</source>
         <translation>系统日志</translation>
     </message>
     <message>
-        <location filename="../src/maintenance/MaintenancePage.cpp" line="100"/>
+        <location filename="../src/maintenance/MaintenancePage.cpp" line="108"/>
         <source>The diagnostic archive was saved to your Desktop.</source>
         <translation>诊断日志压缩包已保存到桌面。</translation>
     </message>
     <message>
-        <location filename="../src/maintenance/MaintenancePage.cpp" line="102"/>
+        <location filename="../src/maintenance/MaintenancePage.cpp" line="110"/>
         <source>Unable to collect diagnostic logs.</source>
         <translation>无法收集诊断日志。</translation>
     </message>
     <message>
-        <location filename="../src/maintenance/MaintenancePage.cpp" line="108"/>
+        <location filename="../src/maintenance/MaintenancePage.cpp" line="117"/>
         <source>Advanced maintenance (optional)</source>
         <translation>高级维护（可选）</translation>
     </message>
     <message>
-        <location filename="../src/maintenance/MaintenancePage.cpp" line="112"/>
+        <location filename="../src/maintenance/MaintenancePage.cpp" line="133"/>
         <source>Refresh package signing keys</source>
         <translation>刷新软件包签名密钥</translation>
     </message>
     <message>
-        <location filename="../src/maintenance/MaintenancePage.cpp" line="112"/>
+        <location filename="../src/maintenance/MaintenancePage.cpp" line="134"/>
+        <source>Reset the Arch Linux package signing keyring.</source>
+        <translation>重置 Arch Linux 软件包签名密钥环。</translation>
+    </message>
+    <message>
+        <location filename="../src/maintenance/MaintenancePage.cpp" line="135"/>
         <source>Keyring maintenance</source>
         <translation>密钥环维护</translation>
     </message>
     <message>
-        <location filename="../src/maintenance/MaintenancePage.cpp" line="114"/>
+        <location filename="../src/maintenance/MaintenancePage.cpp" line="137"/>
         <source>Trim old package cache</source>
         <translation>清理旧版软件包缓存</translation>
     </message>
     <message>
-        <location filename="../src/maintenance/MaintenancePage.cpp" line="114"/>
+        <location filename="../src/maintenance/MaintenancePage.cpp" line="138"/>
+        <source>Keep the three most recent versions of each package.</source>
+        <translation>保留每个软件包最近三个版本的缓存。</translation>
+    </message>
+    <message>
+        <location filename="../src/maintenance/MaintenancePage.cpp" line="139"/>
         <source>Package cache cleanup</source>
         <translation>软件包缓存清理</translation>
     </message>
     <message>
-        <location filename="../src/maintenance/MaintenancePage.cpp" line="116"/>
+        <location filename="../src/maintenance/MaintenancePage.cpp" line="141"/>
         <source>Remove unused packages</source>
         <translation>移除无用软件包</translation>
     </message>
     <message>
-        <location filename="../src/maintenance/MaintenancePage.cpp" line="116"/>
+        <location filename="../src/maintenance/MaintenancePage.cpp" line="142"/>
+        <source>Uninstall orphaned dependencies no longer required.</source>
+        <translation>卸载不再需要的孤立依赖包。</translation>
+    </message>
+    <message>
+        <location filename="../src/maintenance/MaintenancePage.cpp" line="143"/>
         <source>Remove orphaned packages</source>
         <translation>移除孤儿包</translation>
     </message>
     <message>
-        <location filename="../src/maintenance/MaintenancePage.cpp" line="118"/>
+        <location filename="../src/maintenance/MaintenancePage.cpp" line="145"/>
         <source>Full package cache cleanup</source>
         <translation>清空全部软件包缓存</translation>
     </message>
     <message>
-        <location filename="../src/maintenance/MaintenancePage.cpp" line="118"/>
+        <location filename="../src/maintenance/MaintenancePage.cpp" line="146"/>
+        <source>Remove all cached pacman package files.</source>
+        <translation>移除所有 pacman 软件包缓存文件。</translation>
+    </message>
+    <message>
+        <location filename="../src/maintenance/MaintenancePage.cpp" line="147"/>
         <source>Clear package cache</source>
         <translation>清理软件包缓存</translation>
     </message>
     <message>
-        <location filename="../src/maintenance/MaintenancePage.cpp" line="120"/>
+        <location filename="../src/maintenance/MaintenancePage.cpp" line="149"/>
         <source>Reinstall installed repository packages</source>
         <translation>重新安装仓库软件包</translation>
     </message>
     <message>
-        <location filename="../src/maintenance/MaintenancePage.cpp" line="120"/>
+        <location filename="../src/maintenance/MaintenancePage.cpp" line="150"/>
+        <source>Reinstall repository packages already present on the system.</source>
+        <translation>重新安装系统中已有的仓库软件包。</translation>
+    </message>
+    <message>
+        <location filename="../src/maintenance/MaintenancePage.cpp" line="151"/>
         <source>Reinstall packages</source>
         <translation>重新安装软件包</translation>
     </message>
     <message>
-        <location filename="../src/maintenance/MaintenancePage.cpp" line="122"/>
+        <location filename="../src/maintenance/MaintenancePage.cpp" line="153"/>
         <source>Clean AUR and local package caches</source>
         <translation>清理 AUR 与本地软件包缓存</translation>
     </message>
     <message>
-        <location filename="../src/maintenance/MaintenancePage.cpp" line="122"/>
+        <location filename="../src/maintenance/MaintenancePage.cpp" line="154"/>
+        <source>Clear cached packages and builds managed by paru.</source>
+        <translation>清理 paru 管理的软件包和构建缓存。</translation>
+    </message>
+    <message>
+        <location filename="../src/maintenance/MaintenancePage.cpp" line="155"/>
         <source>AUR cache cleanup</source>
         <translation>AUR 缓存清理</translation>
     </message>
     <message>
-        <location filename="../src/maintenance/MaintenancePage.cpp" line="124"/>
+        <location filename="../src/maintenance/MaintenancePage.cpp" line="157"/>
         <source>Unlock pacman database</source>
         <translation>解锁 pacman 数据库</translation>
     </message>
     <message>
-        <location filename="../src/maintenance/MaintenancePage.cpp" line="124"/>
+        <location filename="../src/maintenance/MaintenancePage.cpp" line="158"/>
+        <source>Remove a stale package database lock after checking active processes.</source>
+        <translation>确认没有软件包管理进程后移除失效的数据库锁。</translation>
+    </message>
+    <message>
+        <location filename="../src/maintenance/MaintenancePage.cpp" line="159"/>
         <source>Remove package database lock</source>
         <translation>移除软件包数据库锁</translation>
     </message>
     <message>
-        <location filename="../src/maintenance/MaintenancePage.cpp" line="126"/>
+        <location filename="../src/maintenance/MaintenancePage.cpp" line="161"/>
         <source>Offline post-install: refresh keys and update</source>
         <translation>离线安装后：刷新密钥并更新</translation>
     </message>
     <message>
-        <location filename="../src/maintenance/MaintenancePage.cpp" line="126"/>
+        <location filename="../src/maintenance/MaintenancePage.cpp" line="162"/>
+        <source>Refresh package keys and update after offline installation.</source>
+        <translation>离线安装后刷新软件包密钥并更新系统。</translation>
+    </message>
+    <message>
+        <location filename="../src/maintenance/MaintenancePage.cpp" line="163"/>
         <source>Post-install initialization</source>
         <translation>安装后初始化</translation>
     </message>
     <message>
-        <location filename="../src/maintenance/MaintenancePage.cpp" line="128"/>
-        <location filename="../src/maintenance/MaintenancePage.cpp" line="131"/>
-        <location filename="../src/maintenance/MaintenancePage.cpp" line="137"/>
-        <location filename="../src/maintenance/MaintenancePage.cpp" line="140"/>
-        <location filename="../src/maintenance/MaintenancePage.cpp" line="145"/>
-        <location filename="../src/maintenance/MaintenancePage.cpp" line="146"/>
+        <location filename="../src/maintenance/MaintenancePage.cpp" line="166"/>
+        <location filename="../src/maintenance/MaintenancePage.cpp" line="171"/>
+        <location filename="../src/maintenance/MaintenancePage.cpp" line="177"/>
+        <location filename="../src/maintenance/MaintenancePage.cpp" line="180"/>
+        <location filename="../src/maintenance/MaintenancePage.cpp" line="185"/>
+        <location filename="../src/maintenance/MaintenancePage.cpp" line="186"/>
         <source>Vacuum journal</source>
         <translation>清理系统日志（Journal）</translation>
     </message>
     <message>
-        <location filename="../src/maintenance/MaintenancePage.cpp" line="132"/>
+        <location filename="../src/maintenance/MaintenancePage.cpp" line="167"/>
+        <source>Choose how long to retain system journal entries.</source>
+        <translation>设置系统 Journal 日志的保留时间。</translation>
+    </message>
+    <message>
+        <location filename="../src/maintenance/MaintenancePage.cpp" line="172"/>
         <source>Keep journal entries for (e.g. 2weeks, 30days):</source>
         <translation>保留多长时间内的日志（如 2weeks、30days）：</translation>
     </message>
     <message>
-        <location filename="../src/maintenance/MaintenancePage.cpp" line="137"/>
+        <location filename="../src/maintenance/MaintenancePage.cpp" line="177"/>
         <source>Invalid journal retention period.</source>
         <translation>日志保留时间格式无效。</translation>
     </message>
     <message>
-        <location filename="../src/maintenance/MaintenancePage.cpp" line="141"/>
+        <location filename="../src/maintenance/MaintenancePage.cpp" line="181"/>
         <source>Delete journal entries older than %1?</source>
         <translation>删除 %1 之前的系统日志？</translation>
     </message>
     <message>
-        <location filename="../src/maintenance/MaintenancePage.cpp" line="145"/>
+        <location filename="../src/maintenance/MaintenancePage.cpp" line="185"/>
         <source>Journal cleanup completed.</source>
         <translation>系统日志清理完成。</translation>
     </message>
     <message>
-        <location filename="../src/maintenance/MaintenancePage.cpp" line="146"/>
+        <location filename="../src/maintenance/MaintenancePage.cpp" line="186"/>
         <source>Journal cleanup failed: %1</source>
         <translation>系统日志清理失败：%1</translation>
     </message>
     <message>
-        <location filename="../src/maintenance/MaintenancePage.cpp" line="150"/>
-        <location filename="../src/maintenance/MaintenancePage.cpp" line="152"/>
-        <location filename="../src/maintenance/MaintenancePage.cpp" line="154"/>
-        <location filename="../src/maintenance/MaintenancePage.cpp" line="157"/>
+        <location filename="../src/maintenance/MaintenancePage.cpp" line="189"/>
+        <location filename="../src/maintenance/MaintenancePage.cpp" line="193"/>
+        <location filename="../src/maintenance/MaintenancePage.cpp" line="195"/>
+        <location filename="../src/maintenance/MaintenancePage.cpp" line="198"/>
         <source>Clear temporary files</source>
         <translation>清理临时文件</translation>
     </message>
     <message>
-        <location filename="../src/maintenance/MaintenancePage.cpp" line="153"/>
+        <location filename="../src/maintenance/MaintenancePage.cpp" line="190"/>
+        <source>Remove user caches and system temporary files.</source>
+        <translation>清理用户缓存和系统临时文件。</translation>
+    </message>
+    <message>
+        <location filename="../src/maintenance/MaintenancePage.cpp" line="194"/>
         <source>This removes the user cache and files in /tmp and /var/tmp. Continue?</source>
         <translation>这将删除用户缓存及 /tmp、/var/tmp 中的文件，是否继续？</translation>
     </message>
     <message>
-        <location filename="../src/maintenance/MaintenancePage.cpp" line="158"/>
+        <location filename="../src/maintenance/MaintenancePage.cpp" line="199"/>
         <source>Temporary file cleanup did not finish successfully (%1). %2</source>
         <translation>临时文件清理未成功完成（%1）。%2</translation>
     </message>
@@ -1568,49 +1784,72 @@ sudo pacman -S rate-mirrors</translation>
 <context>
     <name>SoftwarePage</name>
     <message>
-        <location filename="../src/software/SoftwarePage.cpp" line="28"/>
+        <location filename="../src/software/SoftwarePage.cpp" line="27"/>
         <source>Software and desktop</source>
         <translation>软件与桌面</translation>
     </message>
     <message>
-        <location filename="../src/software/SoftwarePage.cpp" line="38"/>
         <source>Install applications with Shelly</source>
-        <translation>使用 Shelly 安装应用程序</translation>
+        <translation type="vanished">使用 Shelly 安装应用程序</translation>
     </message>
     <message>
-        <location filename="../src/software/SoftwarePage.cpp" line="43"/>
         <source>Manage repository packages, AUR, Flatpak and AppImage applications in one place.</source>
-        <translation>集中管理软件仓库、AUR、Flatpak 和 AppImage 应用。</translation>
+        <translation type="vanished">集中管理软件仓库、AUR、Flatpak 和 AppImage 应用。</translation>
     </message>
     <message>
-        <location filename="../src/software/SoftwarePage.cpp" line="46"/>
+        <location filename="../src/software/SoftwarePage.cpp" line="28"/>
+        <source>Applications</source>
+        <translation>应用程序</translation>
+    </message>
+    <message>
+        <location filename="../src/software/SoftwarePage.cpp" line="29"/>
         <source>Open Shelly</source>
         <translation>打开 Shelly</translation>
     </message>
     <message>
-        <location filename="../src/software/SoftwarePage.cpp" line="49"/>
+        <location filename="../src/software/SoftwarePage.cpp" line="30"/>
+        <source>Install and manage repository, AUR, Flatpak and AppImage applications.</source>
+        <translation>安装和管理仓库、AUR、Flatpak 和 AppImage 应用。</translation>
+    </message>
+    <message>
+        <location filename="../src/software/SoftwarePage.cpp" line="34"/>
         <source>Shelly unavailable</source>
         <translation>Shelly 不可用</translation>
     </message>
     <message>
-        <location filename="../src/software/SoftwarePage.cpp" line="49"/>
+        <location filename="../src/software/SoftwarePage.cpp" line="35"/>
         <source>The Shelly graphical application is not installed.</source>
         <translation>未安装 Shelly 图形应用程序。</translation>
     </message>
     <message>
-        <location filename="../src/software/SoftwarePage.cpp" line="62"/>
+        <location filename="../src/software/SoftwarePage.cpp" line="38"/>
+        <source>Desktop environments</source>
+        <translation>桌面环境</translation>
+    </message>
+    <message>
+        <location filename="../src/software/SoftwarePage.cpp" line="39"/>
         <source>Install other desktop environments</source>
         <translation>安装其他桌面环境</translation>
     </message>
     <message>
-        <location filename="../src/software/SoftwarePage.cpp" line="64"/>
+        <location filename="../src/software/SoftwarePage.cpp" line="40"/>
+        <source>Choose desktop packages and check which are already installed.</source>
+        <translation>选择桌面环境软件包，并查看已有的安装状态。</translation>
+    </message>
+    <message>
+        <location filename="../src/software/SoftwarePage.cpp" line="43"/>
         <source>Choose desktop environments…</source>
         <translation>选择桌面环境…</translation>
     </message>
     <message>
-        <location filename="../src/software/SoftwarePage.cpp" line="69"/>
+        <location filename="../src/software/SoftwarePage.cpp" line="47"/>
         <source>Install desktop environments</source>
         <translation>安装桌面环境</translation>
+    </message>
+    <message>
+        <location filename="../src/software/SoftwarePage.cpp" line="54"/>
+        <source>Desktop settings</source>
+        <translation>桌面设置</translation>
     </message>
 </context>
 </TS>

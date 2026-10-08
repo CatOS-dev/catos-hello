@@ -15,6 +15,7 @@ set(PROJECT_SOURCES
     ${APP_SOURCE_DIR}/mainwindow.h
     ${APP_SOURCE_DIR}/ToolRunner.cpp
     ${APP_SOURCE_DIR}/ToolRunner.h
+    ${APP_SOURCE_DIR}/ui/ActionList.h
     ${APP_SOURCE_DIR}/home/HomePage.cpp
     ${APP_SOURCE_DIR}/home/HomePage.h
     ${APP_SOURCE_DIR}/home/Environment.cpp
