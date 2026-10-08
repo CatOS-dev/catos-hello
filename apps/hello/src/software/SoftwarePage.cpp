@@ -1,8 +1,11 @@
 #include "software/SoftwarePage.h"
 #include "ToolRunner.h"
 #include "desktop/DesktopPage.h"
+#include "software/InstallAppsTab.h"
 
 #include <QFrame>
+#include <QDialog>
+#include <QHBoxLayout>
 #include <QLabel>
 #include <QPushButton>
 #include <QScrollArea>
@@ -32,7 +35,7 @@ SoftwarePage::SoftwarePage(ToolRunner *tools, QWidget *parent) : QWidget(parent)
     auto *software = new QFrame(content);
     software->setFrameShape(QFrame::StyledPanel);
     auto *softwareLayout = new QVBoxLayout(software);
-    auto *heading = new QLabel(tr("Install and update applications with Shelly"), software);
+    auto *heading = new QLabel(tr("Install applications with Shelly"), software);
     QFont headingFont = heading->font();
     headingFont.setBold(true);
     heading->setFont(headingFont);
@@ -53,6 +56,25 @@ SoftwarePage::SoftwarePage(ToolRunner *tools, QWidget *parent) : QWidget(parent)
     desktop->setFrameShape(QFrame::StyledPanel);
     desktopLayout_ = new QVBoxLayout(desktop);
     desktopLayout_->addWidget(new DesktopPage(tools, desktop));
+    auto *environments = new QFrame(content);
+    auto *environmentsLayout = new QHBoxLayout(environments);
+    environmentsLayout->setContentsMargins(0, 6, 0, 6);
+    auto *description = new QLabel(tr("Install other desktop environments"), environments);
+    environmentsLayout->addWidget(description, 1);
+    auto *choose = new QPushButton(tr("Choose desktop environments…"), environments);
+    choose->setObjectName(QStringLiteral("desktopPackagesButton"));
+    connect(choose, &QPushButton::clicked, this, [this] {
+        QDialog dialog(this);
+        dialog.setObjectName(QStringLiteral("desktopPackagesDialog"));
+        dialog.setWindowTitle(tr("Install desktop environments"));
+        dialog.resize(860, 580);
+        auto *dialogLayout = new QVBoxLayout(&dialog);
+        dialogLayout->addWidget(new InstallAppsTab(&dialog));
+        dialog.exec();
+    });
+    environmentsLayout->addWidget(choose);
+    layout->addWidget(environments);
+
     layout->addWidget(desktop);
     layout->addStretch();
 }

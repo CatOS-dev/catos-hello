@@ -36,8 +36,8 @@ Environment Environment::detect()
     result.desktop = desktopName(qEnvironmentVariable("XDG_CURRENT_DESKTOP"),
                                  qEnvironmentVariable("DESKTOP_SESSION"));
     result.sessionType = qEnvironmentVariable("XDG_SESSION_TYPE");
-    result.live = QFileInfo::exists(QStringLiteral("/run/archiso/bootmnt")) ||
-                  QFileInfo::exists(QStringLiteral("/run/archiso/cowspace"));
+    // Preserve CatOS Hello's original LiveCD rule. The installer belongs to the ISO.
+    result.live = isLiveCd();
     for (const auto &interface : QNetworkInterface::allInterfaces()) {
         const auto flags = interface.flags();
         if ((flags & QNetworkInterface::IsUp) && (flags & QNetworkInterface::IsRunning) &&
@@ -47,4 +47,9 @@ Environment Environment::detect()
         }
     }
     return result;
+}
+
+bool Environment::isLiveCd(const QString &installer)
+{
+    return QFileInfo::exists(installer);
 }

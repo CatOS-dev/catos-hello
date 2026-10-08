@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+# Extract Calamares logs for the LiveCD user, preserving private permissions.
+set -euo pipefail
+
+(( $# == 3 )) || exit 2
+destination="$1"
+uid="$2"
+gid="$3"
+[[ "$destination" == /tmp/catos-install-log-* && -d "$destination" && ! -L "$destination" ]] || exit 2
+[[ "$uid" =~ ^[0-9]+$ && "$gid" =~ ^[0-9]+$ ]] || exit 2
+[[ -d /root/.cache/calamares ]] || { echo 'No Calamares log directory exists yet.' >&2; exit 1; }
+cp -a -- /root/.cache/calamares/. "$destination/"
+chown -R -- "$uid:$gid" "$destination"
+chmod -R go-rwx -- "$destination"

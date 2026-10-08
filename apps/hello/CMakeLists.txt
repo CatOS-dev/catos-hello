@@ -27,6 +27,8 @@ set(PROJECT_SOURCES
     ${APP_SOURCE_DIR}/desktop/Catdot.h
     ${APP_SOURCE_DIR}/software/SoftwarePage.cpp
     ${APP_SOURCE_DIR}/software/SoftwarePage.h
+    ${APP_SOURCE_DIR}/software/InstallAppsTab.cpp
+    ${APP_SOURCE_DIR}/software/InstallAppsTab.h
     ${APP_SOURCE_DIR}/maintenance/MaintenancePage.cpp
     ${APP_SOURCE_DIR}/maintenance/MaintenancePage.h
     ${APP_SOURCE_DIR}/about/AboutPage.cpp

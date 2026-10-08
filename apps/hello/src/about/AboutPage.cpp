@@ -2,13 +2,10 @@
 #include "home/Environment.h"
 #include "TipsTab.h"
 
-#include <QApplication>
-#include <QComboBox>
+#include <QGridLayout>
 #include <QDesktopServices>
 #include <QHBoxLayout>
 #include <QLabel>
-#include <QProcess>
-#include <QCoreApplication>
 #include <QPushButton>
 #include <QScrollArea>
 #include <QUrl>
@@ -28,41 +25,28 @@ AboutPage::AboutPage(QWidget *parent) : QWidget(parent)
     description->setWordWrap(true);
     layout->addWidget(description);
 
-    auto *links = new QHBoxLayout;
-    for (const auto &item : {qMakePair(tr("CatOS project"), QStringLiteral("https://github.com/CatOS-Home/CatOS")),
-                             qMakePair(tr("Arch Linux Wiki"), QStringLiteral("https://wiki.archlinux.org")),
-                             qMakePair(tr("CatOS releases"), QStringLiteral("https://github.com/CatOS-Home/CatOS/releases"))}) {
+    auto *links = new QGridLayout;
+    int index = 0;
+    for (const auto &item : {
+             qMakePair(tr("CatOS website"), QStringLiteral("https://www.catos.info/")),
+             qMakePair(tr("CatOS project"), QStringLiteral("https://github.com/CatOS-Home/CatOS")),
+             qMakePair(tr("CatOS update history"), QStringLiteral("https://github.com/CatOS-Home/CatOS/commits/main/")),
+             qMakePair(tr("CatOS releases"), QStringLiteral("https://github.com/CatOS-Home/CatOS/releases")),
+             qMakePair(tr("Arch Linux website"), QStringLiteral("https://archlinux.org/")),
+             qMakePair(tr("Arch Linux Wiki"), QStringLiteral("https://wiki.archlinux.org")),
+             qMakePair(tr("Arch LinuxCN Wiki"), QStringLiteral("https://wiki.archlinuxcn.org/")),
+             qMakePair(tr("Support CatOS on DistroWatch"), QStringLiteral("https://distrowatch.com/dwres-mobile.php?resource=links#new")),
+             qMakePair(tr("Package manager command reference"),
+                       QStringLiteral("https://wiki.archlinuxcn.org/wiki/Pacman/%E5%90%84%E8%BD%AF%E4%BB%B6%E5%8C%85%E7%AE%A1%E7%90%86%E5%99%A8%E5%91%BD%E4%BB%A4%E5%AF%B9%E5%BA%94%E5%85%B3%E7%B3%BB")),
+             qMakePair(tr("Software news"), QStringLiteral("https://archlinux.org/"))}) {
         auto *button = new QPushButton(item.first, this);
         connect(button, &QPushButton::clicked, this, [url = item.second] {
             QDesktopServices::openUrl(QUrl(url));
         });
-        links->addWidget(button);
+        links->addWidget(button, index / 2, index % 2);
+        ++index;
     }
     layout->addLayout(links);
-
-    auto *language = new QHBoxLayout;
-    language->addWidget(new QLabel(tr("Language"), this));
-    auto *options = new QComboBox(this);
-    options->addItem(tr("System default"), QString());
-    options->addItem(QStringLiteral("简体中文"), QStringLiteral("zh_CN"));
-    options->addItem(QStringLiteral("English"), QStringLiteral("en_US"));
-    options->addItem(QStringLiteral("Français"), QStringLiteral("fr"));
-    options->addItem(QStringLiteral("Deutsch"), QStringLiteral("de"));
-    const QString selected = qApp->arguments().value(1);
-    if (!selected.isEmpty()) {
-        const int index = options->findData(selected);
-        if (index >= 0) options->setCurrentIndex(index);
-    }
-    language->addWidget(options);
-    auto *apply = new QPushButton(tr("Apply (restart Hello)"), this);
-    connect(apply, &QPushButton::clicked, this, [options] {
-        QStringList args;
-        const QString locale = options->currentData().toString();
-        if (!locale.isEmpty()) args << locale;
-        if (QProcess::startDetached(QCoreApplication::applicationFilePath(), args)) qApp->quit();
-    });
-    language->addWidget(apply);
-    layout->addLayout(language);
 
     auto *tips = new QLabel(tr("Getting to know CatOS"), this);
     QFont tipsFont = tips->font();

@@ -61,3 +61,17 @@ add_test(NAME test_catdot COMMAND test_catdot)
 add_test(NAME test_terminal_exit
     COMMAND bash "${PROJECT_SOURCE_DIR}/tests/test_run_in_terminal.sh"
                  "${PROJECT_SOURCE_DIR}/scripts/RunInTerminal")
+
+# Exercise the actual widgets with both environment views; never launch their tools.
+file(GLOB_RECURSE HELLO_UI_SOURCES CONFIGURE_DEPENDS "${HELLO_SOURCE_DIR}/*.cpp")
+list(REMOVE_ITEM HELLO_UI_SOURCES "${HELLO_SOURCE_DIR}/main.cpp")
+add_executable(test_hello_ui test_hello_ui.cpp ${HELLO_UI_SOURCES})
+target_include_directories(test_hello_ui PRIVATE ${HELLO_SOURCE_DIR})
+target_link_libraries(test_hello_ui PRIVATE Qt6::Test Qt6::Widgets Qt6::Network)
+target_compile_definitions(test_hello_ui PRIVATE
+    HELLO_QM_PATH="${CMAKE_BINARY_DIR}/apps/hello/catos-hello_zh_CN.qm")
+add_dependencies(test_hello_ui CatOSHello_lrelease)
+add_test(NAME test_hello_ui COMMAND test_hello_ui)
+set_tests_properties(test_hello_ui PROPERTIES
+    WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
+    ENVIRONMENT "QT_QPA_PLATFORM=offscreen")

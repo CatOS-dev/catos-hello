@@ -8,7 +8,7 @@ class QVBoxLayout;
 class HomePage : public QWidget {
     Q_OBJECT
 public:
-    explicit HomePage(QWidget *parent = nullptr);
+    explicit HomePage(const Environment &environment, QWidget *parent = nullptr);
 
 signals:
     void navigateTo(const QString &page);

@@ -4,6 +4,8 @@
 #include "RepoListWindow.h"
 
 #include <QFrame>
+#include <QInputDialog>
+#include <QRegularExpression>
 #include <QGroupBox>
 #include <QLabel>
 #include <QMessageBox>
@@ -49,14 +51,19 @@ MaintenancePage::MaintenancePage(ToolRunner *tools, QWidget *parent) : QWidget(p
 
     auto *updates = new QGroupBox(tr("Updates"), content);
     auto *updatesLayout = new QVBoxLayout(updates);
-    auto *shelly = new QPushButton(tr("Open Shelly package manager"), updates);
-    connect(shelly, &QPushButton::clicked, this, [this] {
-        if (!ToolRunner::launch(QStringLiteral("shelly-ui")))
-            QMessageBox::warning(this, tr("Shelly unavailable"), tr("The Shelly graphical application is not installed."));
+    auto *catosUpdater = new QPushButton(tr("Run CatOS updater (news and updates)"), updates);
+    connect(catosUpdater, &QPushButton::clicked, this, [this] {
+        tools_->runInTerminal(tr("Update CatOS"), QStringLiteral("sysup"),
+                              [this](int code, const QString &, const QString &error) {
+            if (code != 0) QMessageBox::warning(this, tr("Update CatOS"),
+                tr("System update did not finish successfully (%1). %2").arg(code).arg(error));
+        });
     });
-    updatesLayout->addWidget(shelly, 0, Qt::AlignLeft);
+    updatesLayout->addWidget(catosUpdater, 0, Qt::AlignLeft);
     addCommand(updatesLayout, tr("Update installed packages (terminal)"), tr("Update CatOS"),
                QStringLiteral("sudo pacman -Syu"), true);
+    addCommand(updatesLayout, tr("Update native and AUR packages"), tr("Update packages with paru"),
+               QStringLiteral("paru"), true);
     layout->addWidget(updates);
 
     auto *drivers = new QGroupBox(tr("Hardware drivers"), content);
@@ -112,6 +119,46 @@ MaintenancePage::MaintenancePage(ToolRunner *tools, QWidget *parent) : QWidget(p
                QStringLiteral("sudo pacman -Scc"), true);
     addCommand(advancedLayout, tr("Reinstall installed repository packages"), tr("Reinstall packages"),
                QStringLiteral("pacman -Qqn | sudo pacman --overwrite='*' -S -"), true);
+    addCommand(advancedLayout, tr("Clean AUR and local package caches"), tr("AUR cache cleanup"),
+               QStringLiteral("paru -Scc"), true);
+    addCommand(advancedLayout, tr("Unlock pacman database"), tr("Remove package database lock"),
+               QStringLiteral("sudo rm /var/lib/pacman/db.lck"), true);
+    addCommand(advancedLayout, tr("Offline post-install: refresh keys and update"), tr("Post-install initialization"),
+               QStringLiteral("sudo ResetKeyring && paru -Syu"), true);
+    auto *vacuum = new QPushButton(tr("Vacuum journal"), advanced);
+    connect(vacuum, &QPushButton::clicked, this, [this] {
+        bool accepted = false;
+        const QString interval = QInputDialog::getText(this, tr("Vacuum journal"),
+            tr("Keep journal entries for (e.g. 2weeks, 30days):"),
+            QLineEdit::Normal, QStringLiteral("2weeks"), &accepted);
+        if (!accepted || interval.isEmpty()) return;
+        if (!QRegularExpression(QStringLiteral("^[0-9]+(seconds|minutes|hours|days|weeks|months|years)$"))
+                .match(interval).hasMatch()) {
+            QMessageBox::warning(this, tr("Vacuum journal"), tr("Invalid journal retention period."));
+            return;
+        }
+        if (QMessageBox::question(this, tr("Vacuum journal"),
+                tr("Delete journal entries older than %1?").arg(interval)) != QMessageBox::Yes) return;
+        tools_->run(QStringLiteral("pkexec"),
+                    {QStringLiteral("journalctl"), QStringLiteral("--vacuum-time=") + interval},
+                    [this](int code, const QString &, const QString &error) {
+            if (code == 0) QMessageBox::information(this, tr("Vacuum journal"), tr("Journal cleanup completed."));
+            else QMessageBox::warning(this, tr("Vacuum journal"), tr("Journal cleanup failed: %1").arg(error));
+        });
+    });
+    advancedLayout->addWidget(vacuum, 0, Qt::AlignLeft);
+    auto *clearTemporary = new QPushButton(tr("Clear temporary files"), advanced);
+    connect(clearTemporary, &QPushButton::clicked, this, [this] {
+        if (QMessageBox::question(this, tr("Clear temporary files"),
+                tr("This removes the user cache and files in /tmp and /var/tmp. Continue?")) != QMessageBox::Yes) return;
+        tools_->runInTerminal(tr("Clear temporary files"),
+               QStringLiteral("rm -rf -- \"$HOME\"/.cache/* && sudo rm -rf -- /tmp/* /var/tmp/*"),
+               [this](int code, const QString &, const QString &error) {
+            if (code != 0) QMessageBox::warning(this, tr("Clear temporary files"),
+                tr("Temporary file cleanup did not finish successfully (%1). %2").arg(code).arg(error));
+        });
+    });
+    advancedLayout->addWidget(clearTemporary, 0, Qt::AlignLeft);
     layout->addWidget(advanced);
     layout->addStretch();
 }

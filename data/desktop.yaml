@@ -1,0 +1,302 @@
+desktops:
+  - name: "KDE-Desktop"
+    description: "KDE-Plasma Desktop - Simple by default, powerful when needed."
+    expanded: true
+    packages:
+      - plasma-login-manager
+      - plasma-meta
+      - konsole
+      - dolphin
+      - plasma-workspace
+      - xdg-desktop-portal
+      - ark
+      - vlc
+      - kate
+      - kcalc
+      - spectacle
+      - okular
+      - kio-admin
+      - kwalletmanager
+      - bluedevil
+      - powerdevil
+      - yakuake
+      - ffmpegthumbs
+      - filelight
+      - tela-icon-theme-git
+      - catos-kde-settings
+      - catos-kde-theme
+      - kwin-decoration-sierra-breeze-enhanced-for-catos
+  - name: "GNOME-Desktop"
+    description: "GNOME Desktop - designed to put you in control and get things done."
+    expanded: false
+    packages:
+      - gdm
+      - gnome
+      - gnome-shell-extensions
+      - gnome-tweaks
+      - gnome-shell-extension-vitals
+      - gnome-shell-extension-caffeine
+      - gnome-shell-extension-appindicator
+      - gnome-shell-extension-desktop-icons-ng
+      - gnome-shell-extension-dash-to-dock
+      - gnome-appfolders-manager
+      - gnome-tweaks
+      - gnome-themes-extra
+      - tela-circle-icon-theme-all
+      - sassc
+      - catos-gnome-settings
+      - catos-gtk-settings
+      - catos-graphite-gtk-theme
+      - gnome-shell-extension-kimpanel-git
+  - name: "Niri-dms"
+    description: "Niri dynamic tiling desktop profile (dms variant)."
+    expanded: false
+    packages:
+      - ly
+      - niri
+      - thunar
+      - xwayland-satellite
+      - ghostty
+      - wf-recorder
+      - catos-niri-dms
+  - name: "Niri-noctalia"
+    description: "Niri dynamic tiling desktop profile (noctalia variant)."
+    expanded: false
+    packages:
+      - ly
+      - niri
+      - thunar
+      - xwayland-satellite
+      - ghostty
+      - wf-recorder
+      - catos-niri-noctalia
+  - name: "Hyprland-dms"
+    description: "Hyprland dynamic tiling Wayland profile (dms variant)."
+    expanded: false
+    packages:
+      - ly
+      - hyprland
+      - thunar
+      - ghostty
+      - wf-recorder
+      - hyprlock
+      - hyprpicker
+      - catos-hyprland-dms
+  - name: "Hyprland-noctalia"
+    description: "Hyprland dynamic tiling Wayland profile (noctalia variant)."
+    expanded: false
+    packages:
+      - ly
+      - hyprland
+      - thunar
+      - ghostty
+      - wf-recorder
+      - hyprlock
+      - hyprpicker
+      - catos-hyprland-noctalia
+  - name: "Xfce4"
+    description: "Xfce lightweight desktop environment."
+    expanded: false
+    packages:
+      - blueman
+      - file-roller
+      - galculator
+      - gvfs
+      - gvfs-afc
+      - gvfs-gphoto2
+      - gvfs-mtp
+      - gvfs-nfs
+      - gvfs-smb
+      - lightdm
+      - lightdm-slick-greeter
+      - lightdm-gtk-greeter-settings
+      - network-manager-applet
+      - parole
+      - ristretto
+      - thunar-archive-plugin
+      - thunar-media-tags-plugin
+      - xdg-user-dirs-gtk
+      - xed
+      - xfce4
+      - xfce4-battery-plugin
+      - xfce4-clipman-plugin
+      - xfce4-datetime-plugin
+      - xfce4-mount-plugin
+      - xfce4-netload-plugin
+      - xfce4-notifyd
+      - xfce4-pulseaudio-plugin
+      - xfce4-screensaver
+      - xfce4-screenshooter
+      - xfce4-taskmanager
+      - xfce4-wavelan-plugin
+      - xfce4-weather-plugin
+      - xfce4-whiskermenu-plugin
+      - xfce4-xkb-plugin
+      - catos-gtk-settings
+      - catos-graphite-gtk-theme
+      - tela-circle-icon-theme-all
+      - catos-xfce-settings
+      - catos-lightdm-slick-theme
+  - name: "Cinnamon"
+    description: "Traditional desktop experience with modern features."
+    expanded: false
+    packages:
+      - cinnamon
+      - system-config-printer
+      - gnome-keyring
+      - gnome-terminal
+      - metacity
+      - lightdm
+      - lightdm-gtk-greeter
+      - cinnamon-translations
+      - tela-circle-icon-theme-all
+      - catos-cinnamon-settings
+      - catos-gtk-settings
+      - catos-graphite-gtk-theme
+  - name: "Cosmic"
+    description: "COSMIC desktop environment."
+    expanded: false
+    packages:
+      - cosmic
+      - notification-daemon
+      - cosmic-greeter
+      - xdg-desktop-portal-cosmic
+      - xorg-xwayland
+  - name: "Budgie-Desktop"
+    description: "Budgie - an independent, familiar, and modern desktop."
+    expanded: false
+    packages:
+      - budgie-control-center
+      - budgie-desktop
+      - budgie-desktop-view
+      - budgie-extras
+      - eog
+      - evince
+      - file-roller
+      - gedit
+      - gnome-keyring
+      - gnome-screenshot
+      - gnome-terminal
+      - gvfs
+      - gvfs-afc
+      - gvfs-gphoto2
+      - gvfs-mtp
+      - gvfs-nfs
+      - gvfs-smb
+      - lightdm
+      - lightdm-slick-greeter
+      - nemo
+      - nemo-fileroller
+      - network-manager-applet
+      - sushi
+      - totem
+      - xdg-user-dirs-gtk
+      - tela-circle-icon-theme-all
+      - catos-budgie-settings
+      - catos-lightdm-slick-theme
+      - catos-gtk-settings
+      - catos-graphite-gtk-theme
+  - name: "LXDE-Desktop"
+    description: "The Lightweight Desktop Environment."
+    expanded: false
+    packages:
+      - celluloid
+      - file-roller
+      - galculator
+      - gnome-screenshot
+      - gpicview
+      - gvfs
+      - gvfs-afc
+      - gvfs-gphoto2
+      - gvfs-mtp
+      - gvfs-nfs
+      - gvfs-smb
+      - lxappearance
+      - obconf-qt
+      - lxde
+      - lxde-icon-theme
+      - lxterminal
+      - lightdm
+      - lightdm-slick-greeter
+      - notification-daemon
+      - openbox
+      - pcmanfm
+      - lxmusic
+      - network-manager-applet
+      - xdg-user-dirs-gtk
+      - xed
+      - catos-gtk-settings
+      - catos-graphite-gtk-theme
+      - tela-circle-icon-theme-all
+  - name: "LXQT-Desktop"
+    description: "The Lightweight Qt Desktop Environment."
+    expanded: false
+    packages:
+      - audiocd-kio
+      - baka-mplayer
+      - breeze
+      - breeze-gtk
+      - featherpad
+      - gvfs
+      - gvfs-mtp
+      - kio-fuse
+      - libstatgrab
+      - libsysstat
+      - lm_sensors
+      - lxqt
+      - lxqt-archiver
+      - network-manager-applet
+      - oxygen-icons
+      - pavucontrol-qt
+      - print-manager
+      - qt5-translations
+      - sddm
+      - catos-sddm-theme
+      - xdg-utils
+      - xscreensaver
+      - catos-gtk-settings
+      - catos-graphite-gtk-theme
+      - xsettingsd
+      - tela-circle-icon-theme-all
+  - name: "MATE-Desktop"
+    description: "MATE Desktop - the continuation of GNOME 2."
+    expanded: false
+    packages:
+      - celluloid
+      - gvfs
+      - gvfs-afc
+      - gvfs-gphoto2
+      - gvfs-mtp
+      - gvfs-nfs
+      - gvfs-smb
+      - lightdm
+      - lightdm-slick-greeter
+      - catos-lightdm-slick-theme
+      - mate
+      - mate-extra
+      - network-manager-applet
+      - xdg-user-dirs-gtk
+      - tela-circle-icon-theme-all
+      - catos-mate-settings
+      - catos-gtk-settings
+      - catos-graphite-gtk-theme
+  - name: "UKUI"
+    description: "Lightweight desktop environment with a familiar layout."
+    expanded: false
+    packages:
+      - sddm
+      - ukui
+      - catos-sddm-theme
+      - thunar
+      - thunar-archive-plugin
+      - thunar-volman
+      - xfce4-terminal
+      - mate-terminal
+      - mate-system-monitor
+      - mate-control-center
+      - redshift
+      - gnome-screenshot
+      - accountsservice
+      - gvfs
+      - qt5-quickcontrols
+      - tela-circle-icon-theme-all

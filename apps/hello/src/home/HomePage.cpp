@@ -7,7 +7,7 @@
 #include <QScrollArea>
 #include <QVBoxLayout>
 
-HomePage::HomePage(QWidget *parent) : QWidget(parent)
+HomePage::HomePage(const Environment &env, QWidget *parent) : QWidget(parent)
 {
     auto *outer = new QVBoxLayout(this);
     auto *scroll = new QScrollArea(this);
@@ -26,23 +26,40 @@ HomePage::HomePage(QWidget *parent) : QWidget(parent)
     font.setBold(true);
     title->setFont(font);
     layout->addWidget(title);
-    const auto env = Environment::detect();
     auto *summary = new QLabel(tr("%1  ·  %2  ·  %3")
         .arg(env.osName, env.desktop,
              env.live ? tr("Live session") : tr("Installed system")), content);
     summary->setWordWrap(true);
     layout->addWidget(summary);
     if (env.live) {
+        auto *intro = new QLabel(tr("Install CatOS or use the recovery tools before installation."), content);
+        intro->setWordWrap(true);
+        layout->addWidget(intro);
         auto *installActions = new QHBoxLayout;
         for (const auto &item : {qMakePair(tr("Install CatOS"), QStringLiteral("install")),
                                  qMakePair(tr("Advanced installer"), QStringLiteral("install-advanced"))}) {
             auto *button = new QPushButton(item.first, content);
+            button->setMinimumHeight(54);
+            button->setObjectName(item.second);
             connect(button, &QPushButton::clicked, this, [this, action = item.second] {
                 emit actionRequested(action);
             });
             installActions->addWidget(button);
         }
         layout->addLayout(installActions);
+        auto *tools = new QHBoxLayout;
+        for (const auto &item : {qMakePair(tr("Partition disks (GParted)"), QStringLiteral("partition")),
+                                 qMakePair(tr("Get installation logs"), QStringLiteral("install-log"))}) {
+            auto *button = new QPushButton(item.first, content);
+            button->setObjectName(item.second);
+            connect(button, &QPushButton::clicked, this, [this, action = item.second] {
+                emit actionRequested(action);
+            });
+            tools->addWidget(button);
+        }
+        layout->addLayout(tools);
+        layout->addStretch();
+        return;
     }
 
     auto *links = new QHBoxLayout;
@@ -69,7 +86,8 @@ HomePage::HomePage(QWidget *parent) : QWidget(parent)
     progress_ = new QLabel(guide_);
     steps->addWidget(progress_);
     addStep(steps, QStringLiteral("updates"), tr("Update CatOS"),
-            tr("Review software updates with Shelly."), QStringLiteral("shelly"), tr("Open Shelly"));
+            tr("Check important news and update your system with CatOS updater."),
+            QStringLiteral("update"), tr("Run CatOS updater"));
     addStep(steps, QStringLiteral("drivers"), tr("Check hardware drivers"),
             tr("Review available hardware profiles before making changes."), QStringLiteral("drivers"), tr("Review drivers"));
     addStep(steps, QStringLiteral("apps"), tr("Install your applications"),
