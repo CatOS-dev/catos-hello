@@ -1,5 +1,6 @@
 #include "software/SoftwarePage.h"
 #include "ToolRunner.h"
+#include "desktop/DesktopPage.h"
 
 #include <QFrame>
 #include <QLabel>
@@ -51,6 +52,7 @@ SoftwarePage::SoftwarePage(ToolRunner *tools, QWidget *parent) : QWidget(parent)
     desktop->setObjectName(QStringLiteral("desktopSection"));
     desktop->setFrameShape(QFrame::StyledPanel);
     desktopLayout_ = new QVBoxLayout(desktop);
+    desktopLayout_->addWidget(new DesktopPage(tools, desktop));
     layout->addWidget(desktop);
     layout->addStretch();
 }
@@ -58,5 +60,5 @@ SoftwarePage::SoftwarePage(ToolRunner *tools, QWidget *parent) : QWidget(parent)
 void SoftwarePage::showDesktopSettings()
 {
     if (auto *desktop = findChild<QFrame *>(QStringLiteral("desktopSection")))
-        desktop->setFocus(Qt::OtherFocusReason);
+        if (auto *scroll = findChild<QScrollArea *>()) scroll->ensureWidgetVisible(desktop);
 }

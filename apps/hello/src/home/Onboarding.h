@@ -10,6 +10,8 @@ public:
     bool dismissed() const;
     void setDismissed(bool dismissed);
     bool skipped(const QString &step) const;
+    bool markedDone(const QString &step) const;
+    void setMarkedDone(const QString &step, bool done);
     void setSkipped(const QString &step, bool skipped);
     void reset();
 

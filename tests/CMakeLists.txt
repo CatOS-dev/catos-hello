@@ -48,3 +48,16 @@ add_executable(test_toolrunner
 target_include_directories(test_toolrunner PRIVATE ${HELLO_SOURCE_DIR})
 target_link_libraries(test_toolrunner PRIVATE Qt6::Test)
 add_test(NAME test_toolrunner COMMAND test_toolrunner)
+
+add_executable(test_catdot
+    test_catdot.cpp
+    ${HELLO_SOURCE_DIR}/desktop/Catdot.cpp
+    ${HELLO_SOURCE_DIR}/ToolRunner.cpp
+)
+target_include_directories(test_catdot PRIVATE ${HELLO_SOURCE_DIR})
+target_link_libraries(test_catdot PRIVATE Qt6::Test)
+add_test(NAME test_catdot COMMAND test_catdot)
+
+add_test(NAME test_terminal_exit
+    COMMAND bash "${PROJECT_SOURCE_DIR}/tests/test_run_in_terminal.sh"
+                 "${PROJECT_SOURCE_DIR}/scripts/RunInTerminal")

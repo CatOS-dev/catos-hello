@@ -66,6 +66,8 @@ HomePage::HomePage(QWidget *parent) : QWidget(parent)
     auto *explanation = new QLabel(tr("Choose what to do next. You can skip any step and return later."), guide_);
     explanation->setWordWrap(true);
     steps->addWidget(explanation);
+    progress_ = new QLabel(guide_);
+    steps->addWidget(progress_);
     addStep(steps, QStringLiteral("updates"), tr("Update CatOS"),
             tr("Review software updates with Shelly."), QStringLiteral("shelly"), tr("Open Shelly"));
     addStep(steps, QStringLiteral("drivers"), tr("Check hardware drivers"),
@@ -116,13 +118,19 @@ void HomePage::addStep(QVBoxLayout *layout, const QString &id, const QString &ti
     auto *open = new QPushButton(label, row);
     connect(open, &QPushButton::clicked, this, [this, action] { emit actionRequested(action); });
     line->addWidget(open);
+    auto *done = new QPushButton(tr("I completed this"), row);
+    connect(done, &QPushButton::clicked, this, [this, id] {
+        onboarding_.setMarkedDone(id, true);
+        refreshGuide();
+    });
+    line->addWidget(done);
     auto *skip = new QPushButton(tr("Later"), row);
     connect(skip, &QPushButton::clicked, this, [this, row, id] {
         onboarding_.setSkipped(id, true);
-        row->hide();
+        refreshGuide();
     });
     line->addWidget(skip);
-    row->setVisible(!onboarding_.skipped(id));
+    row->setVisible(!onboarding_.skipped(id) && !onboarding_.markedDone(id));
     layout->addWidget(row);
 }
 
@@ -134,6 +142,15 @@ void HomePage::refreshGuide()
     const auto rows = guide_->findChildren<QFrame *>(QString(), Qt::FindDirectChildrenOnly);
     const QStringList ids = {QStringLiteral("updates"), QStringLiteral("drivers"),
                              QStringLiteral("apps"), QStringLiteral("desktop")};
-    for (int i = 0; i < rows.size() && i < ids.size(); ++i)
-        rows[i]->setVisible(!onboarding_.skipped(ids[i]));
+    int done = 0;
+    int skipped = 0;
+    for (int i = 0; i < rows.size() && i < ids.size(); ++i) {
+        const bool isDone = onboarding_.markedDone(ids[i]);
+        const bool isSkipped = onboarding_.skipped(ids[i]);
+        rows[i]->setVisible(!isSkipped && !isDone);
+        done += isDone;
+        skipped += isSkipped;
+    }
+    progress_->setText(tr("%1 of %2 steps marked complete by you · %3 postponed")
+        .arg(done).arg(ids.size()).arg(skipped));
 }

@@ -17,6 +17,7 @@ signals:
 private:
     QWidget *guide_ = nullptr;
     QWidget *resume_ = nullptr;
+    class QLabel *progress_ = nullptr;
     OnboardingStore onboarding_;
     void addStep(QVBoxLayout *layout, const QString &id, const QString &title,
                  const QString &detail, const QString &action, const QString &label);

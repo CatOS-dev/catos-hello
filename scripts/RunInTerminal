@@ -81,7 +81,8 @@ main() {
     cmd="$*"
 
     # 创建临时脚本
-    local tmpfile=$(mktemp -p "$HOME/.cache" -t runinterminal.XXXXXX)
+    mkdir -p "$HOME/.cache" || exit 1
+    local tmpfile=$(mktemp -p "$HOME/.cache" -t runinterminal.XXXXXX) || exit 1
     trap "rm -f '$tmpfile'" EXIT
 
     # 构建脚本内容

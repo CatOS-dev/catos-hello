@@ -15,16 +15,19 @@ private slots:
             QVERIFY(!state.dismissed());
             QVERIFY(!state.skipped(QStringLiteral("drivers")));
             state.setSkipped(QStringLiteral("drivers"), true);
+            state.setMarkedDone(QStringLiteral("updates"), true);
             state.setDismissed(true);
         }
         {
             OnboardingStore state(file);
             QVERIFY(state.dismissed());
             QVERIFY(state.skipped(QStringLiteral("drivers")));
+            QVERIFY(state.markedDone(QStringLiteral("updates")));
             QVERIFY(!state.skipped(QStringLiteral("updates")));
             state.reset();
             QVERIFY(!state.dismissed());
             QVERIFY(!state.skipped(QStringLiteral("drivers")));
+            QVERIFY(!state.markedDone(QStringLiteral("updates")));
         }
     }
     void desktopDisplayUsesCurrentSession() {

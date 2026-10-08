@@ -21,6 +21,10 @@ set(PROJECT_SOURCES
     ${APP_SOURCE_DIR}/home/Environment.h
     ${APP_SOURCE_DIR}/home/Onboarding.cpp
     ${APP_SOURCE_DIR}/home/Onboarding.h
+    ${APP_SOURCE_DIR}/desktop/DesktopPage.cpp
+    ${APP_SOURCE_DIR}/desktop/DesktopPage.h
+    ${APP_SOURCE_DIR}/desktop/Catdot.cpp
+    ${APP_SOURCE_DIR}/desktop/Catdot.h
     ${APP_SOURCE_DIR}/software/SoftwarePage.cpp
     ${APP_SOURCE_DIR}/software/SoftwarePage.h
     ${APP_SOURCE_DIR}/maintenance/MaintenancePage.cpp

@@ -21,9 +21,21 @@ bool OnboardingStore::skipped(const QString &step) const
     return settings_->value(QStringLiteral("onboarding/skipped/") + step, false).toBool();
 }
 
+bool OnboardingStore::markedDone(const QString &step) const
+{
+    return settings_->value(QStringLiteral("onboarding/done/") + step, false).toBool();
+}
+
+void OnboardingStore::setMarkedDone(const QString &step, bool done)
+{
+    settings_->setValue(QStringLiteral("onboarding/done/") + step, done);
+    if (done) setSkipped(step, false);
+}
+
 void OnboardingStore::setSkipped(const QString &step, bool skipped)
 {
     settings_->setValue(QStringLiteral("onboarding/skipped/") + step, skipped);
+    if (skipped) settings_->setValue(QStringLiteral("onboarding/done/") + step, false);
 }
 
 void OnboardingStore::reset()
