@@ -31,3 +31,12 @@ set_target_properties(test_repolist test_mirrorlist PROPERTIES
 
 file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/test_data
      DESTINATION "${CMAKE_BINARY_DIR}/tests")
+
+add_executable(test_onboarding
+    test_onboarding.cpp
+    ${HELLO_SOURCE_DIR}/home/Onboarding.cpp
+    ${HELLO_SOURCE_DIR}/home/Environment.cpp
+)
+target_include_directories(test_onboarding PRIVATE ${HELLO_SOURCE_DIR})
+target_link_libraries(test_onboarding PRIVATE Qt6::Test Qt6::Network)
+add_test(NAME test_onboarding COMMAND test_onboarding)

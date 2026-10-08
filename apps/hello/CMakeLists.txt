@@ -11,6 +11,12 @@ find_package(Qt6 REQUIRED COMPONENTS Widgets LinguistTools Network)
 
 set(PROJECT_SOURCES
     ${APP_SOURCE_DIR}/main.cpp
+    ${APP_SOURCE_DIR}/home/HomePage.cpp
+    ${APP_SOURCE_DIR}/home/HomePage.h
+    ${APP_SOURCE_DIR}/home/Environment.cpp
+    ${APP_SOURCE_DIR}/home/Environment.h
+    ${APP_SOURCE_DIR}/home/Onboarding.cpp
+    ${APP_SOURCE_DIR}/home/Onboarding.h
     ${APP_SOURCE_DIR}/mainwindow.cpp
     ${APP_SOURCE_DIR}/mainwindow.h
     ${APP_SOURCE_DIR}/mainwindow.ui

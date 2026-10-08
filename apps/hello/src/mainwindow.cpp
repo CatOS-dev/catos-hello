@@ -13,6 +13,8 @@
 #include <QDebug>
 #include <QDir>
 #include <QFile>
+#include <QProcess>
+#include "home/HomePage.h"
 
 MainWindow::MainWindow(QWidget *parent)
     : QMainWindow(parent)
@@ -34,6 +36,19 @@ MainWindow::MainWindow(QWidget *parent)
     QTabWidget *mainTabWidget = new QTabWidget(this);
 
     // 添加各个 Tab
+    auto *homePage = new HomePage(this);
+    mainTabWidget->addTab(homePage, tr("Home"));
+    connect(homePage, &HomePage::navigateTo, this, [mainTabWidget](const QString &page) {
+        if (page == QStringLiteral("software") || page == QStringLiteral("desktop"))
+            mainTabWidget->setCurrentIndex(5);
+        else if (page == QStringLiteral("maintenance")) mainTabWidget->setCurrentIndex(3);
+    });
+    connect(homePage, &HomePage::actionRequested, this, [mainTabWidget](const QString &action) {
+        if (action == QStringLiteral("shelly")) QProcess::startDetached(QStringLiteral("shelly-ui"));
+        else if (action == QStringLiteral("apps") || action == QStringLiteral("software") ||
+                 action == QStringLiteral("desktop")) mainTabWidget->setCurrentIndex(5);
+        else mainTabWidget->setCurrentIndex(2);
+    });
     mainTabWidget->addTab(new GeneralNewsTab(this), tr("General News"));
     mainTabWidget->addTab(new PostInstallGuideTab(this), tr("Post-Install Guide"));
     mainTabWidget->addTab(new AssistantTab(this), tr("Assistant"));
