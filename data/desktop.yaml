@@ -69,7 +69,7 @@ desktops:
       - xwayland-satellite
       - ghostty
       - wf-recorder
-      - catos-niri-noctaliav5
+      - catos-niri-noctalia
   - name: "Hyprland-dms"
     description: "Hyprland dynamic tiling Wayland profile (dms variant)."
     expanded: false
