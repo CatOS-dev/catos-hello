@@ -71,7 +71,7 @@ desktops:
       - wf-recorder
       - catos-niri-noctalia
   - name: "Hyprland-dms"
-    description: "Hyprland dynamic tiling Wayland profile (dms variant)."
+    description: "Hyprland dynamic tiling Wayland profile with Dux Shell."
     expanded: false
     packages:
       - ly
@@ -81,7 +81,7 @@ desktops:
       - wf-recorder
       - hyprlock
       - hyprpicker
-      - catos-hyprland-dms
+      - catos-hyprland-dux
   - name: "Hyprland-noctalia"
     description: "Hyprland dynamic tiling Wayland profile (noctalia variant)."
     expanded: false
