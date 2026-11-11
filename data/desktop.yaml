@@ -49,7 +49,7 @@ desktops:
       - catos-graphite-gtk-theme
       - gnome-shell-extension-kimpanel-git
   - name: "Niri-dms"
-    description: "Niri dynamic tiling desktop profile (dms variant)."
+    description: "Niri scrolling Wayland desktop profile with Dux Shell."
     expanded: false
     packages:
       - ly
@@ -58,7 +58,7 @@ desktops:
       - xwayland-satellite
       - ghostty
       - wf-recorder
-      - catos-niri-dms
+      - catos-niri-dux
   - name: "Niri-noctalia"
     description: "Niri dynamic tiling desktop profile (noctalia variant)."
     expanded: false
@@ -69,7 +69,7 @@ desktops:
       - xwayland-satellite
       - ghostty
       - wf-recorder
-      - catos-niri-noctalia
+      - catos-niri-noctaliav5
   - name: "Hyprland-dms"
     description: "Hyprland dynamic tiling Wayland profile (dms variant)."
     expanded: false
