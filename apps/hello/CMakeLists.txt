@@ -85,8 +85,10 @@ file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/translations.qrc"
 qt_add_resources(APP_RESOURCES_RCC "${CMAKE_CURRENT_BINARY_DIR}/translations.qrc")
 target_sources(${APP_TARGET} PRIVATE ${APP_RESOURCES_RCC})
 
-target_compile_options(${APP_TARGET} PRIVATE -fsanitize=address)
-target_link_options(${APP_TARGET} PRIVATE -fsanitize=address)
+if(CMAKE_CXX_COMPILER_ID MATCHES "^(GNU|Clang)$")
+    target_compile_options(${APP_TARGET} PRIVATE "$<$<CONFIG:Debug>:-fsanitize=address>")
+    target_link_options(${APP_TARGET} PRIVATE "$<$<CONFIG:Debug>:-fsanitize=address>")
+endif()
 
 target_include_directories(${APP_TARGET} PRIVATE ${APP_SOURCE_DIR})
 target_link_libraries(${APP_TARGET} PRIVATE Qt6::Widgets Qt6::Network)

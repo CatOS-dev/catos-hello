@@ -238,10 +238,14 @@ void MainWindow::dispatchHomeAction(const QString &action)
             if (!ToolRunner::launch(QStringLiteral("gparted")))
                 QMessageBox::warning(this, tr("Disk and recovery"), tr("GParted is not available."));
         } else if (action == QStringLiteral("testdisk")) {
-            if (!ToolRunner::launch(QStringLiteral("konsole"), {QStringLiteral("-e"), QStringLiteral("pkexec"), QStringLiteral("testdisk")}))
+            if (!ToolRunner::launch(QStringLiteral("RunInTerminal"),
+                                    {QStringLiteral("--prompt"), tr("Recover partitions (TestDisk)"),
+                                     QStringLiteral("pkexec testdisk")}))
                 QMessageBox::warning(this, tr("Disk and recovery"), tr("TestDisk is not available."));
         } else if (action == QStringLiteral("terminal")) {
-            if (!ToolRunner::launch(QStringLiteral("konsole")))
+            if (!ToolRunner::launch(QStringLiteral("RunInTerminal"),
+                                    {QStringLiteral("--no-enter-wait"),
+                                     QStringLiteral("\"${SHELL:-/bin/bash}\" -i")}))
                 QMessageBox::warning(this, tr("Disk and recovery"), tr("Terminal is not available."));
         } else if (action == QStringLiteral("mirrors")) MirrorListWindow(this).exec();
         else if (action == QStringLiteral("repositories")) RepoListWindow(this).exec();
